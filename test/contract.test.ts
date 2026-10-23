@@ -4,6 +4,7 @@ import {
   actionDecidedEvent,
   approvalResolvedEvent,
   sessionEndedEvent,
+  sessionLabeledEvent,
   sessionStartedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
@@ -120,5 +121,16 @@ describe("Event contract", () => {
 
     expect(() => EventSchema.parse(evt)).not.toThrow();
     expect(evt).toMatchObject({ data: { context_tokens: 100, cost_usd: 0.42 } });
+  });
+
+  test("sessionLabeledEvent builds a schema-valid envelope carrying the given labels", () => {
+    const evt = sessionLabeledEvent("sess-1", { ticket: "RES-131", project: "reservee" });
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("session.labeled");
+    expect(evt).toMatchObject({
+      session: "sess-1",
+      data: { labels: { ticket: "RES-131", project: "reservee" } },
+    });
   });
 });

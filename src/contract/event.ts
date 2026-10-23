@@ -90,6 +90,7 @@ export const EventSchema = z.discriminatedUnion("type", [
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
 export type SessionStartedEvent = Extract<Event, { type: "session.started" }>;
+export type SessionLabeledEvent = Extract<Event, { type: "session.labeled" }>;
 export type SessionEndedEvent = Extract<Event, { type: "session.ended" }>;
 export type UsageSampledEvent = Extract<Event, { type: "usage.sampled" }>;
 
@@ -128,6 +129,28 @@ export function sessionStartedEvent(
     type: "session.started",
     data,
   }) as SessionStartedEvent;
+}
+
+/**
+ * Build a `session.labeled` Event envelope with the current timestamp
+ * (ticket 05, ADR 0003): `labels` is whatever the announce carried, stored
+ * opaquely — Tenaza interprets only the reserved `project` key, and that
+ * happens on read (`deriveProject`), never here. Multiple `session.labeled`
+ * Events for the same Session accumulate (`buildSessionIndex` merges them in
+ * file order), so a later announce adds or overrides keys without this
+ * builder needing to know the Session's prior labels.
+ */
+export function sessionLabeledEvent(
+  session: string,
+  labels: Record<string, string>,
+): SessionLabeledEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "session.labeled",
+    data: { labels },
+  }) as SessionLabeledEvent;
 }
 
 /**

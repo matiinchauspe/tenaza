@@ -21,6 +21,21 @@ function openItem(home: string, session: string, command: string): void {
   );
 }
 
+/**
+ * An Inbox item a Capability-lacking caller COULD NOT deny (ADR 0001, ticket
+ * 06): `decision: "allow"` on a `human`-effect Rule — `blocked: false`. The
+ * command already ran once; `run` must refuse a second execution of it.
+ */
+function openUnblockedItem(home: string, session: string, command: string): void {
+  appendEvent(
+    home,
+    actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "allow", {
+      match: command,
+      effect: "human",
+    }),
+  );
+}
+
 describe("resolveInboxItem (done / dismiss)", () => {
   let home: string;
 
@@ -132,5 +147,38 @@ describe("runInboxItem", () => {
     openItem(home, "sess-1", "true");
 
     await expect(runInboxItem(home, 99)).rejects.toThrow(UnknownInboxItemError);
+  });
+
+  describe("an unblocked item (ADR 0001, ticket 06: the command already ran once)", () => {
+    test("run REFUSES — never executes, never writes an Event, reports 'unblockable'", async () => {
+      const marker = path.join(home, "marker");
+      openUnblockedItem(home, "sess-1", `touch ${marker}`);
+
+      const outcome = await runInboxItem(home, 1);
+
+      expect(outcome).toEqual({ kind: "unblockable" });
+      expect(existsSync(marker)).toBe(false);
+      expect(readHumanEvents(home)).toEqual([]);
+      // still open — refusing to run is not a resolution
+      expect(deriveInbox(home)).toHaveLength(1);
+    });
+
+    test("done still closes it, exactly as for a blocked item", () => {
+      openUnblockedItem(home, "sess-1", "gh pr merge 58");
+
+      const result = resolveInboxItem(home, 1, "done");
+
+      expect(result).toEqual({ alreadyResolved: false });
+      expect(deriveInbox(home)).toEqual([]);
+    });
+
+    test("dismiss still closes it, exactly as for a blocked item", () => {
+      openUnblockedItem(home, "sess-1", "gh pr merge 58");
+
+      const result = resolveInboxItem(home, 1, "dismissed");
+
+      expect(result).toEqual({ alreadyResolved: false });
+      expect(deriveInbox(home)).toEqual([]);
+    });
   });
 });

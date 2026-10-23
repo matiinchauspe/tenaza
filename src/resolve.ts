@@ -39,7 +39,8 @@ export function resolveInboxItem(
 export type RunOutcome =
   | { kind: "closed" }
   | { kind: "stays-open"; exitCode: number }
-  | { kind: "already-resolved" };
+  | { kind: "already-resolved" }
+  | { kind: "unblockable" };
 
 /**
  * `tenaza run <id>`: execute the Inbox item's stored command AT THE HUMAN'S
@@ -48,12 +49,20 @@ export type RunOutcome =
  * the child's output live (inherited stdio) rather than capturing it, so the
  * human watches it run. Closes the item as `done` on exit 0; on anything
  * else the item stays open and no Event is written, so the human can retry.
+ *
+ * `row.blocked === false` (ADR 0001, ticket 06) means a Capability-lacking
+ * caller could never actually deny this Action — the command already ran
+ * ONCE, unblocked. Running it again here would execute it a SECOND time
+ * (a merge, a prod write, …), so `run` refuses outright: no spawn, no
+ * Event, the item stays open for `done`/`dismiss` to close by hand.
  */
 export async function runInboxItem(home: string, id: number): Promise<RunOutcome> {
   const row = findInboxRow(home, id);
   if (!row) throw new UnknownInboxItemError(id);
 
   if (isResolved(home, id)) return { kind: "already-resolved" };
+
+  if (!row.blocked) return { kind: "unblockable" };
 
   if (row.action.kind !== "shell") {
     throw new Error(`tenaza: inbox #${id} has no runnable command`);

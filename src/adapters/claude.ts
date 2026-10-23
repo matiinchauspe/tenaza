@@ -6,7 +6,9 @@ import {
   usageSampledEvent,
 } from "../contract/event";
 import { decideAction } from "../decide";
-import { appendEvent } from "../log";
+import { appendEvent, readSessionEvents } from "../log";
+import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
+import { loadPolicy } from "../policy";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
 
@@ -211,12 +213,25 @@ function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookR
  * No transcript, a missing file, or one with no readable usage all degrade
  * to doing nothing: a zero sample would be a LIE ("this Session uses no
  * context"), not an honest "unknown" (q9).
+ *
+ * Also where 🔴 fires (ticket 08): the running max BEFORE this sample is
+ * read first (never after appending — appending it first would make the
+ * new sample its own "previous max" and crossing could never be detected),
+ * so `shouldNotifyThresholdCrossing` sees an honest "has this Session ever
+ * been at or past the threshold before now."
  */
 function sampleUsage(home: string, session: string, transcriptPath: string | undefined): void {
   if (!transcriptPath) return;
   const contextTokens = measureContextTokens(transcriptPath);
   if (contextTokens === undefined) return;
+
+  const previousMax = maxUsageSample(readSessionEvents(session, home));
   appendEvent(home, usageSampledEvent(session, { context_tokens: contextTokens }));
+
+  const { thresholdTokens } = loadPolicy(home);
+  if (shouldNotifyThresholdCrossing(previousMax, contextTokens, thresholdTokens)) {
+    notifyThresholdCrossed(home, session, contextTokens, thresholdTokens);
+  }
 }
 
 /** SessionStart: a new top-level Session — no parent. */

@@ -64,11 +64,17 @@ _Avoid_: Alert, warning, alarm
 ## The human
 
 **Inbox item**:
-A denied Action awaiting the human, carrying the exact command for the human to run.
+An Action that matched a `human` Rule, carrying the exact command, surfaced for the human: denied
+and awaiting their run when the Adapter has the `block` Capability to enforce it, or — when it
+doesn't — already allowed (the call could not actually be stopped) but still recorded and shown,
+never silently dropped (ADR 0001).
 _Avoid_: Approval, pending, ticket
 
 **Resolution**:
-The human closing an Inbox item: `done` (they ran it, by hand or through `tenaza run`, which executes the stored command on their request and closes the item on exit 0) or `dismissed` (no longer applies). Tenaza never runs a command on its own initiative.
+The human closing an Inbox item: `done` (they ran it, by hand or through `tenaza run`, which
+executes the stored command on their request and closes the item on exit 0 — but REFUSES on an
+item that already ran once, unblocked, rather than run it a second time) or `dismissed` (no
+longer applies). Tenaza never runs a command on its own initiative.
 _Avoid_: Approval, ack
 
 ## Not Tenaza's language

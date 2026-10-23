@@ -17,8 +17,10 @@ bun run build    # bun build --compile -> dist/tenaza
 
 ```bash
 echo '<hook payload>' | tenaza hook claude   # PreToolUse, SessionStart, SubagentStart, SubagentStop, SessionEnd, Stop, PostToolUse
+echo '<hook payload>' | tenaza hook fake     # the test Adapter: start, action, end — never a real runtime
 tenaza status
 tenaza run <id>       # execute the stored command at your request; closes on exit 0
+                      # refuses on an item that already ran once, unblocked (see below)
 tenaza done <id>      # close an item you ran yourself, by hand
 tenaza dismiss <id>   # close an item that no longer applies
 tenaza label key=value [key=value …]   # announce Labels on the caller's own Session
@@ -36,7 +38,19 @@ it in red, and the number as `243k`, or `⚑243k` once Flagged. The Claude Adapt
 parsing the Session's own transcript at `Stop`, `SubagentStop` and `SessionEnd`, and every 25
 tool calls on `PostToolUse` — v1 never stops a Session for its size, only shows it. Each row
 shows its `ticket` Label when one was announced, else its structural role ("sesión" /
-"subagente"). The Inbox follows below the tree.
+"subagente"). A Session whose Adapter never declared the `measure` Capability shows `sin datos`
+there instead — no bar, no `⚑` — the core degrading by Capability, never by runtime name (ADR
+0001; the `fake` Adapter behind `tenaza hook fake` is what exercises this, and the `human`-Rule
+case below, in tests). The Inbox follows below the tree.
+
+The Inbox holds every Action that matched a `human` Rule. The common case is a deny an Adapter
+with the `block` Capability enforced — `#id  Tool: command`, awaiting `tenaza run <id>`. An
+Adapter WITHOUT `block` cannot actually stop the call, so Tenaza never claims it denied one: the
+Action is still recorded and still shown, marked `(ya corrió — no se pudo bloquear)`. On such an
+item `tenaza run` REFUSES outright — no spawn, no Event, exit code 1, an es-AR message explaining
+it already ran and naming `tenaza done <id>` / `tenaza dismiss <id>` — since running it again
+would execute the command a SECOND time (a merge, a prod write, …). `done` and `dismiss` close it
+exactly as they would any other item.
 
 An agent doesn't know its own Session id, so it announces Labels by running `tenaza label
 ticket=RES-131 project=reservee`; the Claude Code Adapter's `PreToolUse` hook intercepts that

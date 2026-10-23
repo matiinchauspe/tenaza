@@ -258,6 +258,91 @@ effect = "flag"
     expect(events[0]).toMatchObject({ type: "usage.sampled", data: { context_tokens: 75704 } });
   });
 
+  test("a `tenaza label` Bash command labels session_id's Session when there is no agent_id", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=RES-131 project=reservee" },
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "sess-1",
+      type: "session.labeled",
+      data: { labels: { ticket: "RES-131", project: "reservee" } },
+    });
+  });
+
+  test("a `tenaza label` Bash command run inside a subagent labels agent_id's Session, never session_id's (AC1)", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=RES-131 project=reservee" },
+      agent_id: "agent-1",
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "agent-1",
+      type: "session.labeled",
+      data: { labels: { ticket: "RES-131", project: "reservee" } },
+    });
+  });
+
+  test("a `tenaza label` command never goes through the Policy — no action.decided, even with a matching Rule", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "tenaza label"
+effect = "human"
+`,
+    );
+
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=RES-131" },
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("session.labeled");
+  });
+
+  test("`tenaza label` with no key=value pairs writes nothing — degrades silently, never a crash", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("a bare `tenaza` or `tenaza status` command is not mistaken for a label announce", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza status" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
   test("PostToolUse counts are scoped per Session, never shared across sessions", () => {
     for (let i = 1; i < 25; i++) {
       handleClaudeHook(home, {

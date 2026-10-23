@@ -1,16 +1,29 @@
 import type { Action, Capability } from "../contract/event";
-import { sessionEndedEvent, sessionStartedEvent, usageSampledEvent } from "../contract/event";
+import {
+  sessionEndedEvent,
+  sessionLabeledEvent,
+  sessionStartedEvent,
+  usageSampledEvent,
+} from "../contract/event";
 import { decideAction } from "../decide";
 import { appendEvent } from "../log";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
 
-/** The subset of Claude Code's PreToolUse hook payload Tenaza reads. */
+/**
+ * The subset of Claude Code's PreToolUse hook payload Tenaza reads.
+ * `agent_id` is one of the hooks docs' own "common input fields": present on
+ * EVERY hook event — PreToolUse included — when it fires inside a subagent
+ * (verified 2026-10-23 against code.claude.com/docs/en/hooks, both its
+ * "Common input fields" table and its PreToolUse section). Optional because
+ * it's absent for a call in the main Session.
+ */
 export interface ClaudeHookPayload {
   session_id: string;
   hook_event_name: "PreToolUse";
   tool_name: string;
   tool_input: Record<string, unknown>;
+  agent_id?: string;
 }
 
 /** A new top-level Session. Never carries a parent — only SubagentStart does. */
@@ -109,6 +122,32 @@ export function normalizeClaudeAction(payload: ClaudeHookPayload): Action | unde
   return { kind: "shell", command, tool: "Bash" };
 }
 
+/**
+ * Recognize `tenaza label key=value …` and parse its pairs — the Yunque
+ * announce mechanism (ADR 0003). Matches the binary by its bare or
+ * path-qualified name so `tenaza label …`, `/opt/homebrew/bin/tenaza label
+ * …` and similar all recognize; anything else (a different `tenaza`
+ * subcommand, an unrelated command) returns `undefined`, never throws. A
+ * token with no `=`, or an empty key, is skipped rather than failing the
+ * whole command — one malformed pair never loses the rest. Returns
+ * `undefined` (not an empty object) when nothing usable was found, so a
+ * caller can tell "not a label command" apart from "a label command with
+ * nothing in it" without checking size itself.
+ */
+export function parseLabelCommand(command: string): Record<string, string> | undefined {
+  const match = command.trim().match(/^(?:\S*\/)?tenaza\s+label(?:\s+(.*))?$/);
+  if (!match) return undefined;
+
+  const labels: Record<string, string> = {};
+  for (const pair of (match[1] ?? "").trim().split(/\s+/)) {
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    if (eq <= 0) continue;
+    labels[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return Object.keys(labels).length > 0 ? labels : undefined;
+}
+
 export function denyMessage(inboxId: number): string {
   return (
     `Reserved for the human, inbox #${inboxId}. ` +
@@ -132,12 +171,25 @@ function buildHookResponse(
 /**
  * Decide one Claude Code PreToolUse call against the Policy. Returns
  * `undefined` when there is nothing to tell the host — either the call
- * didn't normalize to an Action, or it normalized but matched no Rule
- * (allowed and NOT logged, per the Policy's own rule).
+ * didn't normalize to an Action, it was a `tenaza label` announce (handled
+ * separately, below), or it normalized but matched no Rule (allowed and NOT
+ * logged, per the Policy's own rule).
  */
 function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookResponse | undefined {
   const action = normalizeClaudeAction(payload);
   if (!action) return undefined;
+
+  if (action.kind === "shell") {
+    const labels = parseLabelCommand(action.command);
+    if (labels) {
+      // The agent doesn't know its own Session id; this hook does (ADR
+      // 0003) — `agent_id` names a subagent's OWN Session, never its
+      // parent's `session_id`. Never routed through the Policy: an
+      // announce isn't a Rule match, so it's never logged as one.
+      appendEvent(home, sessionLabeledEvent(payload.agent_id ?? payload.session_id, labels));
+      return undefined;
+    }
+  }
 
   const result = decideAction(home, payload.session_id, action);
 

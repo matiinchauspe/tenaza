@@ -91,6 +91,7 @@ export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
 export type SessionStartedEvent = Extract<Event, { type: "session.started" }>;
 export type SessionEndedEvent = Extract<Event, { type: "session.ended" }>;
+export type UsageSampledEvent = Extract<Event, { type: "usage.sampled" }>;
 
 /** Build an `action.decided` Event envelope with the current timestamp. */
 export function actionDecidedEvent(
@@ -142,6 +143,27 @@ export function sessionEndedEvent(session: string, reason: string): SessionEnded
     type: "session.ended",
     data: { reason },
   }) as SessionEndedEvent;
+}
+
+/**
+ * Build a `usage.sampled` Event envelope with the current timestamp (q9): a
+ * Session's context size, and cost when the Adapter knows it. `cost_usd` is
+ * omitted — never written as `undefined` or `0` — when there is nothing to
+ * report, since a Session's context_tokens is always known at the point an
+ * Adapter samples it, but its cost in USD depends on pricing data v1's
+ * Claude Adapter does not compute.
+ */
+export function usageSampledEvent(
+  session: string,
+  data: { context_tokens: number; cost_usd?: number },
+): UsageSampledEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "usage.sampled",
+    data,
+  }) as UsageSampledEvent;
 }
 
 /**

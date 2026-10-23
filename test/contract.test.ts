@@ -5,6 +5,7 @@ import {
   approvalResolvedEvent,
   sessionEndedEvent,
   sessionStartedEvent,
+  usageSampledEvent,
 } from "../src/contract/event";
 
 describe("Event contract", () => {
@@ -103,5 +104,21 @@ describe("Event contract", () => {
     expect(() => EventSchema.parse(evt)).not.toThrow();
     expect(evt.type).toBe("session.ended");
     expect(evt).toMatchObject({ session: "sess-1", data: { reason: "clear" } });
+  });
+
+  test("usageSampledEvent builds a schema-valid envelope, cost_usd omitted when unknown", () => {
+    const evt = usageSampledEvent("sess-1", { context_tokens: 242170 });
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("usage.sampled");
+    expect(evt).toMatchObject({ session: "sess-1", data: { context_tokens: 242170 } });
+    expect((evt as { data: { cost_usd?: number } }).data.cost_usd).toBeUndefined();
+  });
+
+  test("usageSampledEvent carries cost_usd when given", () => {
+    const evt = usageSampledEvent("sess-1", { context_tokens: 100, cost_usd: 0.42 });
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt).toMatchObject({ data: { context_tokens: 100, cost_usd: 0.42 } });
   });
 });

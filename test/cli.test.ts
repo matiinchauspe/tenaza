@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readNotificationRecorder } from "../src/notify";
 import { runCli } from "./support/cli";
 
 describe("tenaza CLI (black box, temporary TENAZA_HOME)", () => {
@@ -464,6 +465,83 @@ effect = "human"
 
       const response = JSON.parse(result.stdout);
       expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+  });
+
+  describe("notifications (ticket 08, end to end through the real hook subprocess)", () => {
+    test("a denied Bash command sends exactly one 🟡, matching the spec's own worked example format", async () => {
+      // Label the Session first, the same way Yunque would announce it, so
+      // the subtitle reproduces the spec's own worked example verbatim.
+      await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "b71",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "tenaza label project=reservee ticket=RES-131" },
+        }),
+      });
+
+      await deny("gh pr merge 58 --merge", "b71");
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toMatchObject({
+        tag: "inbox-1",
+        title: "🟡 Tenaza · te espera · inbox #1",
+        subtitle: "reservee / RES-131 / sesión b71",
+        message: "Bash: gh pr merge 58 --merge · tenaza run 1",
+      });
+    });
+
+    test("an unblocked match (hook fake, ADR 0001) still sends one 🟡, but never invites a second `tenaza run`", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.message).toContain("ya corrió");
+      expect(notifications[0]?.message).not.toContain("tenaza run");
+    });
+
+    test("three denies in a row produce three 🟡 but only one sound (AC5: burst window)", async () => {
+      await deny("gh pr merge 1");
+      await deny("gh pr merge 2");
+      await deny("gh pr merge 3");
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(3);
+      expect(notifications.filter((n) => n.sound)).toHaveLength(1);
+      expect(notifications[0]?.sound).toBe(true);
+    });
+
+    test("resolving an item (run/done/dismiss) sends nothing — only opening one does", async () => {
+      await deny("true");
+      expect(readNotificationRecorder(home)).toHaveLength(1); // the open itself
+
+      await runCli(["run", "1"], { home });
+
+      expect(readNotificationRecorder(home)).toHaveLength(1); // unchanged by the resolution
+    });
+
+    test("an unmatched command never notifies", async () => {
+      await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-1",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "ls -la" },
+        }),
+      });
+
+      expect(readNotificationRecorder(home)).toEqual([]);
     });
   });
 });

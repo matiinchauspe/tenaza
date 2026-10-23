@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
 import { readSessionEvents } from "../../src/log";
+import { readNotificationRecorder } from "../../src/notify";
 
 const fixture = (name: string) =>
   path.join(import.meta.dir, "..", "fixtures", "transcripts", name);
@@ -367,5 +368,90 @@ effect = "human"
       transcript_path: fixture("above-threshold.jsonl"),
     });
     expect(readSessionEvents("sess-2", home)).toHaveLength(1);
+  });
+
+  describe("notifications (ticket 08: 🔴 fires at the moment a sample crosses the threshold)", () => {
+    test("a Stop call with a transcript above the threshold fires exactly one 🔴", () => {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toMatchObject({
+        tag: "threshold-sess-1",
+        title: "🔴 Tenaza · pasó 200k",
+      });
+      expect(notifications[0]?.message).toContain("242k");
+    });
+
+    test("a second sample still above the threshold sends nothing more — once per Session", () => {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+
+      expect(readNotificationRecorder(home)).toHaveLength(1);
+    });
+
+    test("a sample below the threshold sends nothing", () => {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+
+      expect(readNotificationRecorder(home)).toEqual([]);
+    });
+
+    test("Session completion (SessionEnd) on its own, with no crossing sample, sends nothing", () => {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "SessionEnd",
+        reason: "clear",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+
+      expect(readNotificationRecorder(home)).toEqual([]);
+    });
+
+    test("a Session whose transcript reads lower on a later sample (e.g. after compaction) still never re-crosses", () => {
+      // First sample crosses (above-threshold); the running max is what
+      // `shouldNotifyThresholdCrossing` compares against, never the latest
+      // alone, so a later LOWER sample must not look like "never crossed."
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Stop",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+
+      expect(readNotificationRecorder(home)).toHaveLength(1);
+    });
+
+    test("SubagentStop samples and notifies for agent_id, never the parent session_id", () => {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "SubagentStop",
+        agent_id: "agent-1",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.tag).toBe("threshold-agent-1");
+    });
   });
 });

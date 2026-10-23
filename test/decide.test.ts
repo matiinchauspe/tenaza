@@ -5,6 +5,7 @@ import path from "node:path";
 import { decideAction } from "../src/decide";
 import { deriveInbox } from "../src/inbox";
 import { readSessionEvents } from "../src/log";
+import { readNotificationRecorder } from "../src/notify";
 
 describe("decideAction", () => {
   let home: string;
@@ -145,6 +146,50 @@ effect = "flag"
       });
 
       expect(result.decision).toBe("deny");
+    });
+  });
+
+  describe("notifications (ticket 08: 🟡 fires at the single point an Inbox item opens)", () => {
+    test("a human rule deny also sends exactly one 🟡", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.title).toContain("inbox #1");
+      expect(notifications[0]?.message).toContain("tenaza run 1");
+    });
+
+    test("an unenforceable human match (no block Capability) ALSO sends one 🟡 — never silently dropped (ADR 0001)", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+        "observe",
+      ]);
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.message).toContain("ya corrió");
+      expect(notifications[0]?.message).not.toContain("tenaza run");
+    });
+
+    test("a flag rule never sends a notification", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "railway run -- psql", tool: "Bash" });
+
+      expect(readNotificationRecorder(home)).toEqual([]);
+    });
+
+    test("an Action matching no Rule never sends a notification", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
+
+      expect(readNotificationRecorder(home)).toEqual([]);
+    });
+
+    test("two successive denies in the same Session send two 🟡, one per Inbox item", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 2", tool: "Bash" });
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(2);
+      expect(notifications[0]?.tag).toBe("inbox-1");
+      expect(notifications[1]?.tag).toBe("inbox-2");
     });
   });
 });

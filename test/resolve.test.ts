@@ -5,6 +5,7 @@ import path from "node:path";
 import { actionDecidedEvent } from "../src/contract/event";
 import { deriveInbox } from "../src/inbox";
 import { appendEvent, readHumanEvents } from "../src/log";
+import { readNotificationRecorder } from "../src/notify";
 import {
   resolveInboxItem,
   runInboxItem,
@@ -99,6 +100,16 @@ describe("resolveInboxItem (done / dismiss)", () => {
 
     expect(existsSync(marker)).toBe(false);
   });
+
+  test("a Resolution (ticket 08: 'resolutions send nothing') never sends a notification", () => {
+    // `openItem` writes the `action.decided` Event directly (bypassing
+    // `decideAction`, which is the only place 🟡 fires) — isolating this
+    // test to `resolveInboxItem`'s OWN behavior: resolving must add nothing.
+    openItem(home, "sess-1", "gh pr merge 58");
+    resolveInboxItem(home, 1, "done");
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
 });
 
 describe("runInboxItem", () => {
@@ -120,6 +131,14 @@ describe("runInboxItem", () => {
     expect(outcome).toEqual({ kind: "closed" });
     expect(deriveInbox(home)).toEqual([]);
     expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: "1", outcome: "done" } });
+  });
+
+  test("closing the item via `run` (ticket 08: 'resolutions send nothing') sends no notification either", async () => {
+    openItem(home, "sess-1", "true");
+
+    await runInboxItem(home, 1);
+
+    expect(readNotificationRecorder(home)).toEqual([]);
   });
 
   test("a stored `false` leaves the item open, reporting the exit code", async () => {

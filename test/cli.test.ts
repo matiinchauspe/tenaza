@@ -20,6 +20,14 @@ effect = "human"
 [[rule]]
 match = "railway run"
 effect = "flag"
+
+[[rule]]
+match = "true"
+effect = "human"
+
+[[rule]]
+match = "false"
+effect = "human"
 `,
     );
   });
@@ -110,5 +118,86 @@ effect = "flag"
     for (const line of lines) {
       expect(() => EventSchema.parse(JSON.parse(line))).not.toThrow();
     }
+  });
+
+  async function deny(command: string, session = "sess-1"): Promise<void> {
+    await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: session,
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+      }),
+    });
+  }
+
+  test("tenaza run <id> on a stored `true` closes the item as done", async () => {
+    await deny("true");
+
+    const result = await runCli(["run", "1"], { home });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("closed");
+
+    const status = await runCli(["status"], { home });
+    expect(status.stdout).not.toContain("#1");
+  });
+
+  test("tenaza run <id> on a stored `false` leaves the item open and reports the failure", async () => {
+    await deny("false");
+
+    const result = await runCli(["run", "1"], { home });
+
+    expect(result.exitCode).not.toBe(0);
+
+    const status = await runCli(["status"], { home });
+    expect(status.stdout).toContain("#1");
+  });
+
+  test("tenaza done <id> closes the item; status no longer lists it", async () => {
+    await deny("gh pr merge 58");
+
+    const result = await runCli(["done", "1"], { home });
+
+    expect(result.exitCode).toBe(0);
+    const status = await runCli(["status"], { home });
+    expect(status.stdout).not.toContain("#1");
+  });
+
+  test("tenaza dismiss <id> closes the item; status no longer lists it", async () => {
+    await deny("gh pr merge 58");
+
+    const result = await runCli(["dismiss", "1"], { home });
+
+    expect(result.exitCode).toBe(0);
+    const status = await runCli(["status"], { home });
+    expect(status.stdout).not.toContain("#1");
+  });
+
+  test("resolving an unknown id fails with a clear message, not a crash", async () => {
+    const result = await runCli(["done", "999"], { home });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("999");
+  });
+
+  test("resolving an already-closed item is a no-op, not an error", async () => {
+    await deny("gh pr merge 58");
+    await runCli(["done", "1"], { home });
+
+    const second = await runCli(["dismiss", "1"], { home });
+
+    expect(second.exitCode).toBe(0);
+  });
+
+  test("Tenaza never executes the stored command except through `run`", async () => {
+    const marker = path.join(home, "marker");
+    await deny(`gh pr merge 58 && touch ${marker}`);
+
+    await runCli(["done", "1"], { home });
+
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(marker)).toBe(false);
   });
 });

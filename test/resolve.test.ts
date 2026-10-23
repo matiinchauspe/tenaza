@@ -1,0 +1,136 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { actionDecidedEvent } from "../src/contract/event";
+import { deriveInbox } from "../src/inbox";
+import { appendEvent, readHumanEvents } from "../src/log";
+import {
+  resolveInboxItem,
+  runInboxItem,
+  UnknownInboxItemError,
+} from "../src/resolve";
+
+function openItem(home: string, session: string, command: string): void {
+  appendEvent(
+    home,
+    actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "deny", {
+      match: command,
+      effect: "human",
+    }),
+  );
+}
+
+describe("resolveInboxItem (done / dismiss)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-resolve-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("done closes an open item, writing one approval.resolved Event", () => {
+    openItem(home, "sess-1", "gh pr merge 58");
+
+    const result = resolveInboxItem(home, 1, "done");
+
+    expect(result).toEqual({ alreadyResolved: false });
+    expect(deriveInbox(home)).toEqual([]);
+
+    const events = readHumanEvents(home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "approval.resolved",
+      session: "sess-1",
+      data: { ref: "1", outcome: "done" },
+    });
+  });
+
+  test("dismiss closes an open item as dismissed", () => {
+    openItem(home, "sess-1", "gh pr merge 58");
+
+    const result = resolveInboxItem(home, 1, "dismissed");
+
+    expect(result).toEqual({ alreadyResolved: false });
+    expect(deriveInbox(home)).toEqual([]);
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { outcome: "dismissed" } });
+  });
+
+  test("resolving an already-closed item is a no-op: no error, no second Event", () => {
+    openItem(home, "sess-1", "gh pr merge 58");
+    resolveInboxItem(home, 1, "done");
+
+    const second = resolveInboxItem(home, 1, "dismissed");
+
+    expect(second).toEqual({ alreadyResolved: true });
+    expect(readHumanEvents(home)).toHaveLength(1); // still just the first Event
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { outcome: "done" } }); // unchanged
+  });
+
+  test("an unknown id throws UnknownInboxItemError, not a generic error", () => {
+    openItem(home, "sess-1", "gh pr merge 58");
+
+    expect(() => resolveInboxItem(home, 99, "done")).toThrow(UnknownInboxItemError);
+  });
+
+  test("done never executes the stored command", async () => {
+    const marker = path.join(home, "marker");
+    openItem(home, "sess-1", `touch ${marker}`);
+
+    resolveInboxItem(home, 1, "done");
+
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
+describe("runInboxItem", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-run-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a stored `true` closes the item as done", async () => {
+    openItem(home, "sess-1", "true");
+
+    const outcome = await runInboxItem(home, 1);
+
+    expect(outcome).toEqual({ kind: "closed" });
+    expect(deriveInbox(home)).toEqual([]);
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: "1", outcome: "done" } });
+  });
+
+  test("a stored `false` leaves the item open, reporting the exit code", async () => {
+    openItem(home, "sess-1", "false");
+
+    const outcome = await runInboxItem(home, 1);
+
+    expect(outcome).toEqual({ kind: "stays-open", exitCode: 1 });
+    expect(deriveInbox(home)).toHaveLength(1); // still open
+    expect(readHumanEvents(home)).toEqual([]); // no Event written on failure
+  });
+
+  test("running an already-resolved item is a no-op and never re-executes the command", async () => {
+    const marker = path.join(home, "marker");
+    openItem(home, "sess-1", `touch ${marker}`);
+    resolveInboxItem(home, 1, "dismissed");
+
+    const outcome = await runInboxItem(home, 1);
+
+    expect(outcome).toEqual({ kind: "already-resolved" });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("an unknown id throws UnknownInboxItemError", async () => {
+    openItem(home, "sess-1", "true");
+
+    await expect(runInboxItem(home, 99)).rejects.toThrow(UnknownInboxItemError);
+  });
+});

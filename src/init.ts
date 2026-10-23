@@ -8,16 +8,26 @@ import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import policyExampleToml from "../policy.example.toml" with { type: "text" };
 
 /**
+ * Pasted into the user's own script when `init` will not touch their
+ * settings (q20's exact worked line) — AND the exact command written into
+ * `statusLine` itself when `init` DOES touch the settings file (below). One
+ * shared string for both paths, deliberately: a bare `tenaza statusline`
+ * written straight into `statusLine` would dangle and ERROR once `tenaza`
+ * is uninstalled (ticket 10's own found gap), where this guarded form fails
+ * closed instead — `command -v tenaza` comes back empty, the statusline
+ * prints nothing, and Claude Code keeps working.
+ */
+export const STATUSLINE_PASTE_LINE = "command -v tenaza >/dev/null && tenaza statusline";
+
+/**
  * A plugin cannot set Claude Code's MAIN `statusLine` (only `agent` and
  * `subagentStatusLine` take effect from a plugin's own settings, per the
  * spec's Distribution section) — so `tenaza init` edits the user's OWN
  * settings file directly, once, the first time it finds no `statusLine`
- * there at all.
+ * there at all. ALWAYS the guarded command (`STATUSLINE_PASTE_LINE`), never
+ * a bare `tenaza statusline` — see that constant's own comment.
  */
-const STATUSLINE_VALUE = { type: "command", command: "tenaza statusline" };
-
-/** Pasted into the user's own script when `init` will not touch their settings (q20's exact worked line). */
-export const STATUSLINE_PASTE_LINE = "command -v tenaza >/dev/null && tenaza statusline";
+const STATUSLINE_VALUE = { type: "command", command: STATUSLINE_PASTE_LINE };
 
 export interface InitResult {
   /** `true` only when a fresh policy.toml was written; `false` means an existing one was left alone. */

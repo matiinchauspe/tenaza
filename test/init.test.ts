@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import policyExampleToml from "../policy.example.toml" with { type: "text" };
 import { policyPath } from "../src/paths";
-import { runInit } from "../src/init";
+import { runInit, STATUSLINE_PASTE_LINE } from "../src/init";
 
 describe("runInit (ticket 09)", () => {
   let home: string;
@@ -40,13 +40,13 @@ describe("runInit (ticket 09)", () => {
     expect(readFileSync(policyPath(home), "utf8")).toBe(handEdited);
   });
 
-  test("with no Claude settings file at all, init creates one with statusLine set", () => {
+  test("with no Claude settings file at all, init creates one with statusLine set to the GUARDED command (closes the uninstall gap: a bare `tenaza statusline` would dangle and error once the binary is gone)", () => {
     const result = runInit(home, settingsPath);
 
     expect(result.statusLine).toBe("set");
     expect(existsSync(settingsPath)).toBe(true);
     const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(settings.statusLine).toEqual({ type: "command", command: "tenaza statusline" });
+    expect(settings.statusLine).toEqual({ type: "command", command: STATUSLINE_PASTE_LINE });
   });
 
   test("with a statusLine already set, the settings file is left byte-identical and the paste line is returned", () => {
@@ -58,7 +58,7 @@ describe("runInit (ticket 09)", () => {
     const result = runInit(home, settingsPath);
 
     expect(result.statusLine).toBe("already-set");
-    expect(result.pasteLine).toBe("command -v tenaza >/dev/null && tenaza statusline");
+    expect(result.pasteLine).toBe(STATUSLINE_PASTE_LINE);
     expect(readFileSync(settingsPath, "utf8")).toBe(existing);
   });
 
@@ -72,7 +72,7 @@ describe("runInit (ticket 09)", () => {
     const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(settings.otherSetting).toBe(true);
     expect(settings.model).toBe("opus");
-    expect(settings.statusLine).toEqual({ type: "command", command: "tenaza statusline" });
+    expect(settings.statusLine).toEqual({ type: "command", command: STATUSLINE_PASTE_LINE });
   });
 
   test("an unreadable (malformed JSON) settings file is left untouched, never crashes", () => {
@@ -83,7 +83,7 @@ describe("runInit (ticket 09)", () => {
     const result = runInit(home, settingsPath);
 
     expect(result.statusLine).toBe("unreadable");
-    expect(result.pasteLine).toBe("command -v tenaza >/dev/null && tenaza statusline");
+    expect(result.pasteLine).toBe(STATUSLINE_PASTE_LINE);
     expect(readFileSync(settingsPath, "utf8")).toBe(malformed);
   });
 

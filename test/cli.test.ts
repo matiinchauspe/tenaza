@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { STATUSLINE_PASTE_LINE } from "../src/init";
 import { readNotificationRecorder } from "../src/notify";
 import { policyPath } from "../src/paths";
 import { runCli } from "./support/cli";
@@ -599,7 +600,7 @@ describe("tenaza init (black box, temporary TENAZA_HOME + fake Claude settings)"
 
     expect(result.exitCode).toBe(0);
     const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(settings.statusLine).toEqual({ type: "command", command: "tenaza statusline" });
+    expect(settings.statusLine).toEqual({ type: "command", command: STATUSLINE_PASTE_LINE });
   });
 
   test("AC3: with a statusLine already set, init leaves the settings file byte-identical and prints the guarded line", async () => {

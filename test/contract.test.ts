@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { EventSchema, actionDecidedEvent, approvalResolvedEvent } from "../src/contract/event";
+import {
+  EventSchema,
+  actionDecidedEvent,
+  approvalResolvedEvent,
+  sessionEndedEvent,
+  sessionStartedEvent,
+} from "../src/contract/event";
 
 describe("Event contract", () => {
   test("accepts a well-formed action.decided line", () => {
@@ -62,5 +68,40 @@ describe("Event contract", () => {
     expect(evt.type).toBe("approval.resolved");
     expect(evt.v).toBe(1);
     expect(evt).toMatchObject({ session: "sess-1", data: { ref: "1", outcome: "done" } });
+  });
+
+  test("sessionStartedEvent builds a schema-valid envelope, parent omitted for a top-level Session", () => {
+    const evt = sessionStartedEvent("sess-1", {
+      runtime: "claude",
+      cwd: "/repo",
+      capabilities: ["observe", "block"],
+    });
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("session.started");
+    expect(evt).toMatchObject({
+      session: "sess-1",
+      data: { runtime: "claude", cwd: "/repo", capabilities: ["observe", "block"] },
+    });
+    expect((evt as { data: { parent?: string } }).data.parent).toBeUndefined();
+  });
+
+  test("sessionStartedEvent carries a parent for a subagent Session", () => {
+    const evt = sessionStartedEvent("agent-1", {
+      parent: "sess-1",
+      runtime: "claude",
+      cwd: "/repo",
+      capabilities: ["observe", "block"],
+    });
+
+    expect(evt).toMatchObject({ session: "agent-1", data: { parent: "sess-1" } });
+  });
+
+  test("sessionEndedEvent builds a schema-valid envelope", () => {
+    const evt = sessionEndedEvent("sess-1", "clear");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("session.ended");
+    expect(evt).toMatchObject({ session: "sess-1", data: { reason: "clear" } });
   });
 });

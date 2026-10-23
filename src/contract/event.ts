@@ -89,6 +89,8 @@ export const EventSchema = z.discriminatedUnion("type", [
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
+export type SessionStartedEvent = Extract<Event, { type: "session.started" }>;
+export type SessionEndedEvent = Extract<Event, { type: "session.ended" }>;
 
 /** Build an `action.decided` Event envelope with the current timestamp. */
 export function actionDecidedEvent(
@@ -104,6 +106,42 @@ export function actionDecidedEvent(
     type: "action.decided",
     data: { action, decision, rule },
   }) as ActionDecidedEvent;
+}
+
+/**
+ * Build a `session.started` Event envelope with the current timestamp. No
+ * `parent` is a top-level Session; a `parent` names the Session that spawned
+ * this one (ticket 03: a Claude Code subagent, keyed by the hook's own
+ * `agent_id`, parented to the hook's `session_id`). `capabilities` is the
+ * Adapter's own declaration — the core degrades by Capability, never by
+ * runtime name (ADR 0001).
+ */
+export function sessionStartedEvent(
+  session: string,
+  data: { parent?: string; runtime: string; cwd: string; capabilities: Capability[] },
+): SessionStartedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "session.started",
+    data,
+  }) as SessionStartedEvent;
+}
+
+/**
+ * Build a `session.ended` Event envelope with the current timestamp. `reason`
+ * is the runtime's own word for why (e.g. Claude Code's SessionEnd reason, or
+ * the constant Tenaza uses for a SubagentStop).
+ */
+export function sessionEndedEvent(session: string, reason: string): SessionEndedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "session.ended",
+    data: { reason },
+  }) as SessionEndedEvent;
 }
 
 /**

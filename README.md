@@ -16,6 +16,7 @@ bun run build    # bun build --compile -> dist/tenaza
 ## Use
 
 ```bash
+tenaza init           # prepare this machine: write a starter Policy, wire up the statusline
 echo '<hook payload>' | tenaza hook claude   # PreToolUse, SessionStart, SubagentStart, SubagentStop, SessionEnd, Stop, PostToolUse
 echo '<hook payload>' | tenaza hook fake     # the test Adapter: start, action, end — never a real runtime
 tenaza status
@@ -29,6 +30,19 @@ tenaza label key=value [key=value …]   # announce Labels on the caller's own S
 
 Tenaza never executes a stored command except through `tenaza run`. Resolving an
 already-closed item is a no-op — safe to repeat.
+
+`tenaza init` prepares a machine, idempotently — running it twice changes nothing the second
+time. It writes `config/policy.toml` from the shipped `policy.example.toml` the FIRST time it
+finds none there, and never again: an existing `policy.toml` is always left alone, so edit it
+freely once it exists. The shipped example is a starting point, not a finished Policy — review
+and adjust its Rules (some of them are a stated best guess, e.g. the exact Railway/Neon
+production-write command strings) before trusting it. It also wires up Claude Code's own
+`statusLine` setting, because a plugin can set only `agent`/`subagentStatusLine`, never the main
+one: with no `statusLine` in the user's Claude Code settings, it sets it to run
+`tenaza statusline`; with one already there, it leaves that settings file byte-for-byte untouched
+and prints one line to paste into your own script instead:
+`command -v tenaza >/dev/null && tenaza statusline`. A settings file it cannot even parse as JSON
+is left untouched the same way, rather than risk a destructive rewrite.
 
 `tenaza status` shows every observed Session as a tree, grouped by project (derived from a
 `project` Label, else the git root of the Session's cwd, else the cwd itself). A Claude Code
@@ -76,7 +90,10 @@ grouping). A later announce adds or overrides keys; earlier ones remain.
 State lives under `TENAZA_HOME` (default `~/.tenaza/`): `config/policy.toml` for the Policy
 (an optional `[flag]` `threshold_tokens` overrides the default 200k), `state/sessions/<session>.jsonl`
 for each Session's Events, `state/sessions/<session>.toolcalls` for its running PostToolUse count
-(not an Event — never read as one), `state/human.jsonl` for Resolutions.
+(not an Event — never read as one), `state/human.jsonl` for Resolutions. `tenaza init` reads and
+edits Claude Code's OWN settings file (default `~/.claude/settings.json`, overridable with
+`TENAZA_CLAUDE_SETTINGS` — a different root than `TENAZA_HOME` entirely) to wire up the
+statusline.
 
 A hook fires a macOS notification the moment it opens an Inbox item (🟡, blocked or not — ADR
 0001) or a Session crosses the Flag threshold for the first time (🔴, once per Session — never on

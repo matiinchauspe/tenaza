@@ -83,4 +83,68 @@ effect = "flag"
     expect(response).toBeUndefined();
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
+
+  test("SessionStart writes session.started with no parent and the Adapter's declared Capabilities", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SessionStart",
+      cwd: "/repo",
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "sess-1",
+      type: "session.started",
+      data: { runtime: "claude", cwd: "/repo", capabilities: ["observe", "block"] },
+    });
+    expect((events[0] as { data: { parent?: string } }).data.parent).toBeUndefined();
+  });
+
+  test("SubagentStart writes session.started keyed by agent_id, parented to session_id", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "agent-1",
+      type: "session.started",
+      data: { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: ["observe", "block"] },
+    });
+  });
+
+  test("SubagentStop writes session.ended for the agent_id Session, never the parent", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ session: "agent-1", type: "session.ended" });
+  });
+
+  test("SessionEnd writes session.ended for session_id, carrying the runtime's reason", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SessionEnd",
+      reason: "clear",
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ session: "sess-1", type: "session.ended", data: { reason: "clear" } });
+  });
 });

@@ -18,7 +18,13 @@ bun run build    # bun build --compile -> dist/tenaza
 ```bash
 echo '<PreToolUse hook payload>' | tenaza hook claude
 tenaza status
+tenaza run <id>       # execute the stored command at your request; closes on exit 0
+tenaza done <id>      # close an item you ran yourself, by hand
+tenaza dismiss <id>   # close an item that no longer applies
 ```
 
+Tenaza never executes a stored command except through `tenaza run`. Resolving an
+already-closed item is a no-op — safe to repeat.
+
 State lives under `TENAZA_HOME` (default `~/.tenaza/`): `config/policy.toml` for the Policy,
-`state/sessions/<session>.jsonl` for each Session's Events.
+`state/sessions/<session>.jsonl` for each Session's Events, `state/human.jsonl` for Resolutions.

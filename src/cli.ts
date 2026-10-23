@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { handleClaudeHook } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
-import { tenazaHome } from "./paths";
+import { runInit } from "./init";
+import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import {
   type ResolutionOutcome,
   resolveInboxItem,
@@ -132,6 +133,38 @@ async function runRun(idArg: string | undefined): Promise<number> {
   }
 }
 
+/**
+ * `tenaza init` (ticket 09, q16): prepare a machine. Prints exactly what it
+ * did (or deliberately didn't) to each of the two files it touches — the
+ * Policy and Claude Code's own settings — so a human re-running it is never
+ * left guessing why nothing changed.
+ */
+function runInitCommand(): number {
+  const result = runInit();
+
+  process.stdout.write(
+    result.policyWritten
+      ? `tenaza: wrote ${policyPath()} from policy.example.toml — review it before trusting any Rule\n`
+      : `tenaza: left ${policyPath()} untouched (already exists)\n`,
+  );
+
+  if (result.statusLine === "set") {
+    process.stdout.write(`tenaza: set statusLine in ${claudeSettingsPath()} to run \`tenaza statusline\`\n`);
+  } else if (result.statusLine === "already-set") {
+    process.stdout.write(
+      `tenaza: statusLine already set in ${claudeSettingsPath()} — left it untouched. Paste this into your script:\n` +
+        `  ${result.pasteLine}\n`,
+    );
+  } else {
+    process.stdout.write(
+      `tenaza: could not read ${claudeSettingsPath()} as JSON — left it untouched. Paste this into your script:\n` +
+        `  ${result.pasteLine}\n`,
+    );
+  }
+
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, subcommand] = argv;
 
@@ -145,6 +178,10 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === "status") {
     return runStatus();
+  }
+
+  if (command === "init") {
+    return runInitCommand();
   }
 
   if (command === "statusline") {

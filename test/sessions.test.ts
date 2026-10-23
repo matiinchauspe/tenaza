@@ -1,0 +1,270 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { decideAction } from "../src/decide";
+import { appendEvent } from "../src/log";
+import {
+  buildSessionIndex,
+  categoryWord,
+  deriveProject,
+  isStalled,
+  nodeCategory,
+  renderSessionTree,
+  rollupCategory,
+} from "../src/sessions";
+import { sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+
+describe("buildSessionIndex", () => {
+  test("captures runtime, cwd, capabilities and parent from session.started", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("agent-1", {
+        parent: "sess-1",
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: ["observe", "block"],
+      }),
+    ]);
+
+    const node = index.get("agent-1");
+    expect(node).toMatchObject({
+      id: "agent-1",
+      parent: "sess-1",
+      runtime: "claude",
+      cwd: "/repo",
+      capabilities: ["observe", "block"],
+    });
+  });
+
+  test("a Session with no session.started still gets a node (ticket 01/02's lifecycle-less fixtures)", () => {
+    const index = buildSessionIndex([
+      {
+        v: 1,
+        ts: "2026-10-23T10:00:00.000Z",
+        session: "sess-1",
+        type: "action.decided",
+        data: {
+          action: { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+          decision: "deny",
+          rule: { match: "gh pr merge", effect: "human" },
+        },
+      },
+    ]);
+
+    const node = index.get("sess-1");
+    expect(node?.id).toBe("sess-1");
+    expect(node?.cwd).toBeUndefined();
+  });
+
+  test("lastEventTs tracks the MAX timestamp seen for that Session", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("sess-1", "clear"),
+    ]);
+
+    const node = index.get("sess-1");
+    expect(node?.startedAt).toBeDefined();
+    expect(node?.endedAt).toBeDefined();
+    expect(node?.lastEventTs).toBe(node?.endedAt);
+  });
+});
+
+describe("nodeCategory and rollupCategory", () => {
+  test("a started, un-ended Session with no open Inbox item is alive", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(nodeCategory(node, new Set())).toBe("alive");
+  });
+
+  test("a Session with an open Inbox item waits for the human, even over ended", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("sess-1", "clear"),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(nodeCategory(node, new Set(["sess-1"]))).toBe("waits");
+  });
+
+  test("an ended subagent (has a parent) reads as done; an ended top-level Session reads as ended", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("sess-1", "clear"),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("agent-1", "subagent_stop"),
+    ]);
+    expect(nodeCategory(index.get("sess-1")!, new Set())).toBe("ended");
+    expect(nodeCategory(index.get("agent-1")!, new Set())).toBe("done");
+  });
+
+  test("a parent rolls up its most urgent descendant: waits > alive > done > ended", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("parent", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("child-done", { parent: "parent", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("child-done", "subagent_stop"),
+      sessionStartedEvent("child-waits", { parent: "parent", runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const childrenOf = new Map([
+      ["parent", [index.get("child-done")!, index.get("child-waits")!]],
+    ]);
+
+    // child-waits has an open Inbox item -> outranks the parent's own "alive" and the other child's "done"
+    expect(rollupCategory(index.get("parent")!, childrenOf, new Set(["child-waits"]))).toBe("waits");
+    // with nothing waiting, the parent's own "alive" outranks its "done" child (self wins ties)
+    expect(rollupCategory(index.get("parent")!, childrenOf, new Set())).toBe("alive");
+  });
+});
+
+describe("deriveProject", () => {
+  test("a session.labeled project Label wins over everything else", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      { v: 1, ts: "2026-10-23T10:00:01.000Z", session: "sess-1", type: "session.labeled", data: { labels: { project: "reservee" } } },
+    ]);
+    const node = index.get("sess-1")!;
+    expect(deriveProject(node, () => "/some/git/root")).toBe("reservee");
+  });
+
+  test("falls back to the git root of cwd when there is no Label", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo/sub", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(deriveProject(node, (cwd) => (cwd === "/repo/sub" ? "/repo" : undefined))).toBe("/repo");
+  });
+
+  test("falls back to cwd itself when there is no git root", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(deriveProject(node, () => undefined)).toBe("/tmp/scratch");
+  });
+
+  test("a Session with no known cwd (no session.started) groups under one unknown-project bucket", () => {
+    const index = buildSessionIndex([
+      {
+        v: 1,
+        ts: "2026-10-23T10:00:00.000Z",
+        session: "sess-1",
+        type: "action.decided",
+        data: {
+          action: { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+          decision: "deny",
+          rule: { match: "gh pr merge", effect: "human" },
+        },
+      },
+    ]);
+    const node = index.get("sess-1")!;
+    expect(deriveProject(node, () => undefined)).toBe("(sin proyecto)");
+  });
+
+  test("two Sessions with different git roots derive different projects", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("a", { runtime: "claude", cwd: "/repos/tenaza", capabilities: [] }),
+      sessionStartedEvent("b", { runtime: "claude", cwd: "/repos/rudy", capabilities: [] }),
+    ]);
+    const resolve = (cwd: string) => cwd;
+    expect(deriveProject(index.get("a")!, resolve)).not.toBe(deriveProject(index.get("b")!, resolve));
+  });
+});
+
+describe("isStalled / categoryWord", () => {
+  test("no recent Event past the threshold reads as stalled", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    const started = new Date(node.startedAt!);
+    const farLater = new Date(started.getTime() + 60 * 60 * 1000); // 1h later
+    expect(isStalled(node, farLater, 15 * 60 * 1000)).toBe(true);
+    expect(isStalled(node, new Date(started.getTime() + 1000), 15 * 60 * 1000)).toBe(false);
+  });
+
+  test("categoryWord only swaps to the stalled word for the alive category", () => {
+    expect(categoryWord("alive", true)).not.toBe(categoryWord("alive", false));
+    expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
+    expect(categoryWord("done", true)).toBe(categoryWord("done", false));
+    expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+  });
+});
+
+describe("renderSessionTree (black box over a temporary TENAZA_HOME)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-sessions-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("an empty home renders no tree at all", () => {
+    expect(renderSessionTree(home)).toBe("");
+  });
+
+  test("a subagent renders nested under its parent, under their shared project", () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("parent", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe", "block"] }),
+    );
+    appendEvent(
+      home,
+      sessionStartedEvent("child", {
+        parent: "parent",
+        runtime: "claude",
+        cwd: "/tmp/scratch",
+        capabilities: ["observe", "block"],
+      }),
+    );
+
+    const out = renderSessionTree(home, new Date());
+
+    expect(out).toContain("/tmp/scratch");
+    expect(out).toContain("parent");
+    expect(out).toContain("child");
+    expect(out).toContain("●");
+    expect(out).toContain("sesión");
+    expect(out).toContain("subagente");
+    expect(out).toContain("vivo");
+    // the child must be indented under the parent, not listed as a second root
+    const parentLine = out.split("\n").find((l) => l.includes("parent"))!;
+    const childLine = out.split("\n").find((l) => l.includes("child") && !l.includes("parent"))!;
+    expect(childLine.startsWith(" ")).toBe(true);
+    expect(childLine.length).toBeGreaterThan(0);
+    expect(parentLine).toBeDefined();
+  });
+
+  test("a denied Session shows waits-for-the-human, es-AR word included", () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+`,
+    );
+    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+    const out = renderSessionTree(home);
+
+    expect(out).toContain("⏸");
+    expect(out).toContain("te espera");
+    expect(out).toContain("(sin proyecto)");
+  });
+
+  test("two Sessions in different git repos land in different project groups", () => {
+    appendEvent(home, sessionStartedEvent("a", { runtime: "claude", cwd: "/repos/tenaza", capabilities: [] }));
+    appendEvent(home, sessionStartedEvent("b", { runtime: "claude", cwd: "/repos/rudy", capabilities: [] }));
+
+    // cwd here isn't a real git repo, so both fall back to cwd itself as the project —
+    // still two DIFFERENT groups, proving the grouping key tracks derived project, not a shared default.
+    const out = renderSessionTree(home);
+
+    expect(out).toContain("/repos/tenaza");
+    expect(out).toContain("/repos/rudy");
+  });
+});

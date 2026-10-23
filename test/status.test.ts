@@ -3,8 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
+import { appendEvent } from "../src/log";
 import { renderStatus } from "../src/status";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { sessionStartedEvent } from "../src/contract/event";
 
 describe("renderStatus", () => {
   let home: string;
@@ -34,6 +36,27 @@ effect = "human"
     decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
     const output = renderStatus(home);
+    expect(output).toContain("#1  Bash: gh pr merge 58");
+  });
+
+  test("a fresh home with no observed Session renders no tree — just the Inbox, as before", () => {
+    const output = renderStatus(home);
+    expect(output).toBe("Inbox: (empty)\n");
+  });
+
+  test("the Session tree renders above the Inbox, both present together", () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe", "block"] }),
+    );
+    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+    const output = renderStatus(home);
+
+    const treeIndex = output.indexOf("/tmp/scratch");
+    const inboxIndex = output.indexOf("Inbox:");
+    expect(treeIndex).toBeGreaterThanOrEqual(0);
+    expect(inboxIndex).toBeGreaterThan(treeIndex);
     expect(output).toContain("#1  Bash: gh pr merge 58");
   });
 });

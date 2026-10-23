@@ -1,0 +1,13 @@
+{
+  "name": "tenaza",
+  "displayName": "Tenaza",
+  "version": "0.1.0",
+  "description": "Observes Claude Code sessions, enforces a Policy on human-reserved actions, and shows state — a decoupled control plane for coding agents.",
+  "author": {
+    "name": "matiinchauspe"
+  },
+  "homepage": "https://github.com/matiinchauspe/tenaza",
+  "repository": "https://github.com/matiinchauspe/tenaza",
+  "license": "MIT",
+  "keywords": ["observability", "policy", "hooks", "agents"]
+}

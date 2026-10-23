@@ -1,0 +1,14 @@
+{
+  "name": "tenaza",
+  "description": "Tenaza's own plugin, wiring Claude Code's hooks to the tenaza binary on PATH.",
+  "owner": {
+    "name": "matiinchauspe"
+  },
+  "plugins": [
+    {
+      "name": "tenaza",
+      "source": "./",
+      "description": "Observes Claude Code sessions, enforces a Policy on human-reserved actions, and shows state."
+    }
+  ]
+}

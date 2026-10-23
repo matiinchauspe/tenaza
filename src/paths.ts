@@ -39,3 +39,25 @@ export function toolCallCounterPath(
 ): string {
   return path.join(sessionsDir(home), `${session}.toolcalls`);
 }
+
+/**
+ * Where the notifier's test seam records "what would have been sent" (ticket
+ * 08) when `TENAZA_NOTIFY_RECORDER` swaps the real macOS sender for it — a
+ * plain JSONL file, never an Event: a notification attempt isn't part of the
+ * Event contract (nothing reads it back as domain state), it's the test
+ * oracle for the notifier port alone.
+ */
+export function notifyRecorderPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "notify-recorder.jsonl");
+}
+
+/**
+ * The last time a notification actually played a sound (ticket 08's burst
+ * window: "one sound per ~2s") — a plain ISO timestamp, never an Event, and
+ * GLOBAL (not per-Session): a burst can span different Sessions or Inbox
+ * items, so the cooldown is shared the same way `tenaza hook` itself has no
+ * daemon to hold it in memory across invocations (ADR 0002).
+ */
+export function notifySoundStatePath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "notify-sound-at");
+}

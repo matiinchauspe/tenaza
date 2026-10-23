@@ -3,6 +3,15 @@ import { tenazaHome } from "./paths";
 import { renderSessionTree } from "./sessions";
 
 /**
+ * The es-AR marker for an Inbox item a Capability-lacking caller could not
+ * actually deny (ticket 06, ADR 0001) — the command already ran, so neither
+ * `status`'s own line nor a notifier (ticket 08) should ever invite a second
+ * `tenaza run` on it. Exported so the notifier reuses the EXACT same words
+ * rather than a second, driftable copy.
+ */
+export const UNBLOCKED_MARKER = "(ya corrió — no se pudo bloquear)";
+
+/**
  * `#id  Tool: command` — the Inbox's per-item line, from the spec's
  * Visibility section. v1 only normalizes `shell` Actions, each carrying the
  * originating tool's name (e.g. "Bash") for this display. Kept BYTE-FOR-BYTE
@@ -14,7 +23,7 @@ import { renderSessionTree } from "./sessions";
 export function formatInboxLine(item: InboxItem): string {
   const { action } = item;
   const base = `#${item.id}  ${action.tool}: ${action.command}`;
-  return item.blocked ? base : `${base}  (ya corrió — no se pudo bloquear)`;
+  return item.blocked ? base : `${base}  ${UNBLOCKED_MARKER}`;
 }
 
 /**

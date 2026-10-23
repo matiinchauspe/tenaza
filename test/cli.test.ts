@@ -200,4 +200,69 @@ effect = "human"
     const { existsSync } = await import("node:fs");
     expect(existsSync(marker)).toBe(false);
   });
+
+  test("the real `tenaza label` invocation only exits 0 — it never does the labeling itself", async () => {
+    const result = await runCli(["label", "ticket=RES-131", "project=reservee"], { home });
+
+    expect(result.exitCode).toBe(0);
+    // the real CLI subprocess has no agent_id/session_id to act on — the
+    // PreToolUse hook is what actually writes session.labeled (ADR 0003) —
+    // so this invocation alone must leave no Session log behind at all.
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(path.join(home, "state", "sessions"))).toBe(false);
+  });
+
+  test("`tenaza label` with no args, or any args, still exits 0", async () => {
+    const result = await runCli(["label"], { home });
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("hook claude on a `tenaza label` command inside a subagent labels agent_id's Session, project groups it, and status shows the ticket Label on the row (AC1, AC2)", async () => {
+    await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "tenaza label ticket=RES-131 project=reservee" },
+        agent_id: "agent-1",
+      }),
+    });
+    await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({ session_id: "sess-1", hook_event_name: "SubagentStart", agent_id: "agent-1", cwd: "/workspace" }),
+    });
+
+    const status = await runCli(["status"], { home });
+
+    expect(status.stdout).toContain("reservee");
+    expect(status.stdout).toContain("RES-131");
+    expect(status.stdout).toContain("agent-1");
+  });
+
+  test("a later announce adds and overrides keys on the same Session; earlier keys remain (AC4)", async () => {
+    const announce = (command: string) =>
+      runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-1",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command },
+        }),
+      });
+
+    await announce("tenaza label ticket=RES-131");
+    await announce("tenaza label project=reservee");
+    await announce("tenaza label ticket=RES-200");
+
+    const { readSessionEvents } = await import("../src/log");
+    const { buildSessionIndex } = await import("../src/sessions");
+    const events = readSessionEvents("sess-1", home);
+    const index = buildSessionIndex(events);
+
+    // ticket overridden to the latest value; project from the earlier
+    // announce remains untouched by the later one.
+    expect(index.get("sess-1")?.labels).toEqual({ ticket: "RES-200", project: "reservee" });
+  });
 });

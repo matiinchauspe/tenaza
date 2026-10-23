@@ -110,6 +110,15 @@ async function main(argv: string[]): Promise<number> {
     return runResolve(subcommand, "dismissed");
   }
 
+  if (command === "label") {
+    // The real work happens in the PreToolUse hook, which alone knows this
+    // call's agent_id/session_id (ADR 0003) — this subprocess has neither,
+    // so it does nothing with its args and only ever exits 0, whatever they
+    // are. Never fails: a confusing error here would be the opposite of
+    // the point of announcing this way.
+    return 0;
+  }
+
   process.stderr.write(`tenaza: unknown command "${argv.join(" ")}"\n`);
   return 1;
 }

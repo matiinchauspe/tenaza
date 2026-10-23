@@ -5,6 +5,9 @@ import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
 import { readSessionEvents } from "../../src/log";
 
+const fixture = (name: string) =>
+  path.join(import.meta.dir, "..", "fixtures", "transcripts", name);
+
 describe("Claude Code PreToolUse adapter", () => {
   let home: string;
 
@@ -97,7 +100,7 @@ effect = "flag"
     expect(events[0]).toMatchObject({
       session: "sess-1",
       type: "session.started",
-      data: { runtime: "claude", cwd: "/repo", capabilities: ["observe", "block"] },
+      data: { runtime: "claude", cwd: "/repo", capabilities: ["observe", "block", "measure"] },
     });
     expect((events[0] as { data: { parent?: string } }).data.parent).toBeUndefined();
   });
@@ -117,7 +120,7 @@ effect = "flag"
     expect(events[0]).toMatchObject({
       session: "agent-1",
       type: "session.started",
-      data: { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: ["observe", "block"] },
+      data: { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: ["observe", "block", "measure"] },
     });
   });
 
@@ -146,5 +149,138 @@ effect = "flag"
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ session: "sess-1", type: "session.ended", data: { reason: "clear" } });
+  });
+
+  test("SessionEnd with a transcript_path ALSO samples usage for session_id (q9)", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SessionEnd",
+      reason: "clear",
+      transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(2);
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.ended" }));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 75704 } }),
+    );
+  });
+
+  test("SubagentStop with a transcript_path ALSO samples usage for agent_id, not session_id", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 242170 } }),
+    );
+  });
+
+  test("Stop samples usage for session_id, without ending the Session", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Stop",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "sess-1",
+      type: "usage.sampled",
+      data: { context_tokens: 242170 },
+    });
+  });
+
+  test("Stop with a transcript that yields no usage writes nothing — never a zero sample", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Stop",
+      transcript_path: fixture("no-usage.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("Stop with no transcript_path at all degrades silently — no crash, no sample", () => {
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Stop",
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("PostToolUse below the 25th call counts but writes nothing", () => {
+    for (let i = 1; i < 25; i++) {
+      const response = handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+      expect(response).toBeUndefined();
+    }
+
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("PostToolUse on exactly the 25th call samples usage for session_id, and not before", () => {
+    for (let i = 1; i < 25; i++) {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+
+    const response = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "usage.sampled", data: { context_tokens: 75704 } });
+  });
+
+  test("PostToolUse counts are scoped per Session, never shared across sessions", () => {
+    for (let i = 1; i < 25; i++) {
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+    // sess-2's own 25th call must trigger its own sample, unaffected by sess-1's count.
+    for (let i = 1; i < 25; i++) {
+      handleClaudeHook(home, {
+        session_id: "sess-2",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+    expect(readSessionEvents("sess-2", home)).toHaveLength(0);
+
+    handleClaudeHook(home, {
+      session_id: "sess-2",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+    expect(readSessionEvents("sess-2", home)).toHaveLength(1);
   });
 });

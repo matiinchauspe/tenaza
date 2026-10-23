@@ -1,7 +1,9 @@
 import type { Action, Capability } from "../contract/event";
-import { sessionEndedEvent, sessionStartedEvent } from "../contract/event";
+import { sessionEndedEvent, sessionStartedEvent, usageSampledEvent } from "../contract/event";
 import { decideAction } from "../decide";
 import { appendEvent } from "../log";
+import { measureContextTokens } from "../transcript";
+import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
 
 /** The subset of Claude Code's PreToolUse hook payload Tenaza reads. */
 export interface ClaudeHookPayload {
@@ -29,18 +31,43 @@ export interface ClaudeSubagentStartPayload {
   cwd: string;
 }
 
-/** A subagent Session ending — `agent_id` names it, not the parent `session_id`. */
+/**
+ * A subagent Session ending — `agent_id` names it, not the parent
+ * `session_id`. `transcript_path` is optional: a payload that omits it (or
+ * names a transcript with no readable usage) still ends the Session, just
+ * without a usage sample — degrades silently, never a crash (q9).
+ */
 export interface ClaudeSubagentStopPayload {
   session_id: string;
   hook_event_name: "SubagentStop";
   agent_id: string;
+  transcript_path?: string;
 }
 
-/** The top-level Session ending, carrying the runtime's own reason. */
+/** The top-level Session ending, carrying the runtime's own reason. `transcript_path` is optional — see `ClaudeSubagentStopPayload`. */
 export interface ClaudeSessionEndPayload {
   session_id: string;
   hook_event_name: "SessionEnd";
   reason: string;
+  transcript_path?: string;
+}
+
+/** The main agent finishing one turn — samples usage, but never ends the Session (that's SessionEnd's job). */
+export interface ClaudeStopPayload {
+  session_id: string;
+  hook_event_name: "Stop";
+  transcript_path?: string;
+}
+
+/**
+ * One tool call completing. Counted toward the "every 25 tool calls" sample
+ * (q9) — never logged itself, since an ordinary tool call matches no Policy
+ * Rule and the Event contract only records what the Policy decided on.
+ */
+export interface ClaudePostToolUsePayload {
+  session_id: string;
+  hook_event_name: "PostToolUse";
+  transcript_path?: string;
 }
 
 export type ClaudeHookInput =
@@ -48,7 +75,9 @@ export type ClaudeHookInput =
   | ClaudeSessionStartPayload
   | ClaudeSubagentStartPayload
   | ClaudeSubagentStopPayload
-  | ClaudeSessionEndPayload;
+  | ClaudeSessionEndPayload
+  | ClaudeStopPayload
+  | ClaudePostToolUsePayload;
 
 export interface ClaudeHookResponse {
   hookSpecificOutput: {
@@ -61,10 +90,11 @@ export interface ClaudeHookResponse {
 /**
  * What the Claude Code Adapter can do today — declared on every
  * `session.started` it writes, so the core degrades by Capability, never by
- * runtime name (ADR 0001). `measure` (usage.sampled) and `stop` are not yet
- * implemented, so neither is claimed here.
+ * runtime name (ADR 0001). `measure` (usage.sampled) is implemented as of
+ * ticket 04; `stop` (actually halting a Session) is not — v1 never stops a
+ * Session (q9).
  */
-const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block"];
+const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block", "measure"];
 
 /**
  * Normalize a PreToolUse payload into a runtime-neutral Action. Only `Bash`
@@ -123,6 +153,20 @@ function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookR
   return undefined;
 }
 
+/**
+ * Sample `session`'s context size from `transcriptPath` and append
+ * `usage.sampled` — but only when the transcript actually yields a number.
+ * No transcript, a missing file, or one with no readable usage all degrade
+ * to doing nothing: a zero sample would be a LIE ("this Session uses no
+ * context"), not an honest "unknown" (q9).
+ */
+function sampleUsage(home: string, session: string, transcriptPath: string | undefined): void {
+  if (!transcriptPath) return;
+  const contextTokens = measureContextTokens(transcriptPath);
+  if (contextTokens === undefined) return;
+  appendEvent(home, usageSampledEvent(session, { context_tokens: contextTokens }));
+}
+
 /** SessionStart: a new top-level Session — no parent. */
 export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
   appendEvent(
@@ -151,22 +195,41 @@ export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPa
 /**
  * SubagentStop: the subagent Session (`agent_id`) ended. Claude Code's own
  * SubagentStop payload carries no free-text reason, so this constant is
- * Tenaza's own word for it — distinct from SessionEnd's runtime-supplied one.
+ * Tenaza's own word for it — distinct from SessionEnd's runtime-supplied
+ * one. Also samples usage for `agent_id` (q9) — a subagent's context is its
+ * own, never folded into its parent's.
  */
 export function handleSubagentStop(home: string, payload: ClaudeSubagentStopPayload): void {
   appendEvent(home, sessionEndedEvent(payload.agent_id, "subagent_stop"));
+  sampleUsage(home, payload.agent_id, payload.transcript_path);
 }
 
-/** SessionEnd: the top-level Session (`session_id`) ended, with the runtime's own reason. */
+/** SessionEnd: the top-level Session (`session_id`) ended, with the runtime's own reason. Also samples usage (q9). */
 export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload): void {
   appendEvent(home, sessionEndedEvent(payload.session_id, payload.reason));
+  sampleUsage(home, payload.session_id, payload.transcript_path);
+}
+
+/** Stop: the main agent finished a turn — sample usage for `session_id`. Never ends the Session. */
+export function handleStop(home: string, payload: ClaudeStopPayload): void {
+  sampleUsage(home, payload.session_id, payload.transcript_path);
+}
+
+/**
+ * PostToolUse: count one tool call for `session_id`, sampling usage on
+ * exactly the 25th (and every 25th after) — AC2's own boundary.
+ */
+export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): void {
+  const count = countToolCall(home, payload.session_id);
+  if (!shouldSampleOnToolCall(count)) return;
+  sampleUsage(home, payload.session_id, payload.transcript_path);
 }
 
 /**
  * Dispatch one Claude Code hook call by its `hook_event_name`. Only
- * PreToolUse ever answers back with a permission decision; every lifecycle
- * event (SessionStart, SubagentStart, SubagentStop, SessionEnd) just appends
- * its Event and tells the host nothing.
+ * PreToolUse ever answers back with a permission decision; every other
+ * event (lifecycle, Stop, PostToolUse) just appends what it has and tells
+ * the host nothing.
  */
 export function handleClaudeHook(
   home: string,
@@ -186,6 +249,12 @@ export function handleClaudeHook(
       return undefined;
     case "SessionEnd":
       handleSessionEnd(home, payload);
+      return undefined;
+    case "Stop":
+      handleStop(home, payload);
+      return undefined;
+    case "PostToolUse":
+      handlePostToolUse(home, payload);
       return undefined;
     default:
       return undefined;

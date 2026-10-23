@@ -2,11 +2,12 @@ import type { Capability } from "./contract/event";
 import { type Action, actionDecidedEvent } from "./contract/event";
 import { deriveInbox } from "./inbox";
 import { appendEvent } from "./log";
+import { notifyNewInboxItem } from "./notify";
 import { loadPolicy, matchRule, type Rule } from "./policy";
 
 export type DecisionResult =
   | { decision: "allow"; logged: false }
-  | { decision: "allow"; logged: true; rule: Rule }
+  | { decision: "allow"; logged: true; rule: Rule; inboxId?: number }
   | { decision: "deny"; logged: true; rule: Rule; inboxId: number };
 
 /**
@@ -23,6 +24,12 @@ export type DecisionResult =
  * `capabilities` defaults to the pre-ticket-06 assumption (`observe` +
  * `block`) so a caller that predates Capability-awareness keeps denying
  * exactly as before.
+ *
+ * A `human` match — enforced or not — is also where 🟡 fires (ticket 08):
+ * the ONE place every Adapter opens an Inbox item, so it is the one place
+ * that needs to know a Notification exists at all. `notifyNewInboxItem`
+ * never throws and never changes what's returned below — a failing
+ * notifier must never fail the hook or its allow/deny answer.
  */
 export function decideAction(
   home: string,
@@ -38,13 +45,18 @@ export function decideAction(
   const decision = canDeny ? "deny" : "allow";
   appendEvent(home, actionDecidedEvent(session, action, decision, rule));
 
-  if (decision === "deny") {
+  if (rule.effect === "human") {
     const inbox = deriveInbox(home);
     const justOpened = inbox[inbox.length - 1];
     if (!justOpened) {
-      throw new Error("decideAction: wrote a deny but the Inbox came back empty");
+      throw new Error("decideAction: wrote a human match but the Inbox came back empty");
     }
-    return { decision: "deny", logged: true, rule, inboxId: justOpened.id };
+    notifyNewInboxItem(home, justOpened.id);
+
+    if (decision === "deny") {
+      return { decision: "deny", logged: true, rule, inboxId: justOpened.id };
+    }
+    return { decision: "allow", logged: true, rule, inboxId: justOpened.id };
   }
 
   return { decision: "allow", logged: true, rule };

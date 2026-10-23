@@ -266,6 +266,81 @@ effect = "human"
     expect(index.get("sess-1")?.labels).toEqual({ ticket: "RES-200", project: "reservee" });
   });
 
+  describe("statusline (ticket 07)", () => {
+    test("a fresh home prints the calm form", async () => {
+      const result = await runCli(["statusline"], { home });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0\n");
+    });
+
+    test("accepts the statusline JSON on stdin without failing, and ignores fields it does not use (AC3)", async () => {
+      const payload = JSON.stringify({
+        hook_event_name: "Status",
+        session_id: "claude-cli-session",
+        model: { id: "claude-x", display_name: "Claude X" },
+        workspace: { current_dir: "/some/where" },
+        cost: { total_cost_usd: 0.42 },
+      });
+
+      const result = await runCli(["statusline"], { home, stdin: payload });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("malformed / non-JSON stdin never crashes it either — tenaza derives its own state, never the caller's", async () => {
+      const result = await runCli(["statusline"], { home, stdin: "not json at all {{{" });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("with two open items, names the most urgent (most recent) one and counts both (AC1)", async () => {
+      await deny("false", "sess-1");
+      await deny("gh pr merge 58", "sess-2");
+
+      const result = await runCli(["statusline"], { home });
+
+      expect(result.stdout.trim()).toBe("tenaza │ ● 2 vivas · ⚑ 0 · ✉ 2 → #2 gh pr merge");
+    });
+
+    test("counts always agree with `tenaza status` for the same state (AC4)", async () => {
+      await deny("false", "sess-1");
+      await deny("gh pr merge 58", "sess-2");
+      await runCli(["done", "1"], { home });
+
+      const [statusResult, statuslineResult] = await Promise.all([
+        runCli(["status"], { home }),
+        runCli(["statusline"], { home }),
+      ]);
+
+      const inboxLinesInStatus = statusResult.stdout
+        .split("\n")
+        .filter((line) => /^\s*#\d/.test(line)).length;
+      const inboxCountInStatusline = Number(statuslineResult.stdout.match(/✉ (\d+)/)?.[1]);
+
+      expect(inboxCountInStatusline).toBe(inboxLinesInStatus);
+      expect(inboxCountInStatusline).toBe(1);
+      expect(statuslineResult.stdout.trim()).toBe("tenaza │ ● 2 vivas · ⚑ 0 · ✉ 1 → #2 gh pr merge");
+    });
+
+    test("an unblocked Inbox item (hook fake, no block Capability) still counts toward ✉", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      const result = await runCli(["statusline"], { home });
+
+      expect(result.stdout.trim()).toContain("✉ 1 → #1 gh pr merge");
+    });
+  });
+
   describe("hook fake (ADR 0001, ticket 06: proves the core degrades by Capability, never by runtime name)", () => {
     test("a Session from the fake Adapter (no measure) shows 'sin datos' in the tree — no bar, no ⚑ (AC1)", async () => {
       await runCli(["hook", "fake"], {

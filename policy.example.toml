@@ -1,0 +1,61 @@
+# Tenaza's starter Policy (q6, q10, q16). `tenaza init` copies this file
+# VERBATIM to ~/.tenaza/config/policy.toml the first time it runs — never
+# again once that file exists. It is yours from that point on: edit it
+# freely, Tenaza never reads this shipped copy again.
+#
+# Matching is a plain substring on the normalized command (`match` in
+# `command.includes(...)`), the FIRST matching [[rule]] in file order wins.
+# This is a guardrail against honest agent mistakes, never a security
+# boundary — a determined agent (or a differently-worded command) can walk
+# around any Rule here.
+
+[[rule]]
+# Yunque's PR-merge seam (skills/_shared/execution-convention.md): landing a
+# PR is reserved for the human.
+match = "gh pr merge"
+effect = "human"
+
+[[rule]]
+# Yunque's worktree-cleanup seam: removing a worktree is reserved for the
+# human.
+match = "git worktree remove"
+effect = "human"
+
+[[rule]]
+# Railway: setting environment variables. BEST GUESS, confirm it matches
+# what you actually type — assumes the current Railway CLI's
+# `railway variables --set "KEY=VALUE"` form; adjust the string if your
+# CLI version or your own habit differs.
+match = "railway variables --set"
+effect = "human"
+
+[[rule]]
+# Railway: running a command against the production environment. BEST
+# GUESS — assumes you name the environment explicitly on the command itself
+# (`railway run --environment production ...`). If you instead switch the
+# linked environment first (`railway environment production`) and then run
+# a bare `railway run ...`, THIS RULE WILL NOT CATCH IT — adjust the string
+# to however you actually invoke a prod run, or add a second [[rule]] for
+# the switch itself.
+match = "railway run --environment production"
+effect = "human"
+
+[[rule]]
+# Neon: running SQL against the production database via a shell command
+# (e.g. `psql`). BEST GUESS, and a real limitation worth knowing: Tenaza v1
+# only normalizes shell (Bash) commands into Actions, so a Neon SQL write
+# issued through an MCP tool call — never a shell command — is INVISIBLE to
+# this Policy no matter what you write here. This rule only ever catches a
+# prod SQL write you run yourself from a terminal. Replace the string below
+# with however your own production connection is actually invoked (your
+# prod connection string's env var name, a project script like
+# `bun run db:prod`, etc.) — the literal below is a placeholder, not a
+# working default.
+match = "psql $PROD_DATABASE_URL"
+effect = "human"
+
+[flag]
+# The context size (tokens) past which a Session is Flagged in `status` and
+# `statusline` — shown, never enforced (q9). 200k is the shipped default;
+# uncomment and change it to override.
+# threshold_tokens = 200000

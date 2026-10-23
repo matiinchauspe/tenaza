@@ -13,6 +13,20 @@ export function policyPath(home: string = tenazaHome()): string {
   return path.join(home, "config", "policy.toml");
 }
 
+/**
+ * Where Claude Code's OWN settings file lives — `tenaza init` reads and
+ * edits it to wire up the statusline (q20). A different root than
+ * TENAZA_HOME entirely (Claude Code's home, not Tenaza's), so it is never
+ * derived from it. Resolved here, the ONE place, exactly like
+ * `tenazaHome()`: `TENAZA_CLAUDE_SETTINGS` overrides it outright when set
+ * (env), and every caller also takes it as an optional parameter (argument)
+ * the same way every other path in this file takes `home` — so a test can
+ * pass a temporary file directly without touching the environment at all.
+ */
+export function claudeSettingsPath(): string {
+  return process.env.TENAZA_CLAUDE_SETTINGS ?? path.join(homedir(), ".claude", "settings.json");
+}
+
 export function sessionsDir(home: string = tenazaHome()): string {
   return path.join(home, "state", "sessions");
 }

@@ -77,3 +77,16 @@ State lives under `TENAZA_HOME` (default `~/.tenaza/`): `config/policy.toml` for
 (an optional `[flag]` `threshold_tokens` overrides the default 200k), `state/sessions/<session>.jsonl`
 for each Session's Events, `state/sessions/<session>.toolcalls` for its running PostToolUse count
 (not an Event — never read as one), `state/human.jsonl` for Resolutions.
+
+A hook fires a macOS notification the moment it opens an Inbox item (🟡, blocked or not — ADR
+0001) or a Session crosses the Flag threshold for the first time (🔴, once per Session — never on
+an edit, a Session ending on its own, or a Resolution). It's sent with `osascript -e 'display
+notification …'` — nothing to install beyond macOS itself, but with a real limitation worth
+knowing: `display notification` has no identifier/group parameter, so Tenaza cannot ask
+Notification Center to REPLACE an earlier banner (a tool like `terminal-notifier` could, at the
+cost of a second Homebrew dependency — not taken in v1). A burst of matches within ~2s still
+notifies for each one, but only the first plays a sound. Setting `TENAZA_NOTIFY_RECORDER=1`
+swaps the real sender for a recorder at `state/notify-recorder.jsonl` instead — the test seam
+`bun test` always runs under (see `bunfig.toml`), so no test ever pops a real notification. A
+failing notifier (no `osascript`, a denied permission, …) never fails the hook or changes its
+allow/deny answer.

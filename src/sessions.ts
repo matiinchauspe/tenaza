@@ -1,7 +1,9 @@
 import type { Capability, Event } from "./contract/event";
+import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
+import { loadPolicy } from "./policy";
 
 /**
  * The four states the ticket names for a Session's row (and what a parent
@@ -38,6 +40,8 @@ export interface SessionNode {
   endedReason?: string;
   /** The latest `ts` across every Event naming this Session — the basis for `age` and `isStalled`. */
   lastEventTs?: string;
+  /** The context size from the LATEST `usage.sampled` Event this Session has (q9). `undefined` means never sampled, never zero. */
+  contextTokens?: number;
 }
 
 function emptyNode(id: string): SessionNode {
@@ -71,6 +75,10 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.endedReason = event.data.reason;
     } else if (event.type === "session.labeled") {
       Object.assign(node.labels, event.data.labels);
+    } else if (event.type === "usage.sampled") {
+      // Last write wins, same as endedAt/endedReason above — the file's own
+      // chronological order is the only ordering Tenaza trusts (ADR 0002).
+      node.contextTokens = event.data.context_tokens;
     }
   }
 
@@ -245,6 +253,7 @@ function renderNode(
   childrenOf: ReadonlyMap<string, SessionNode[]>,
   waiting: ReadonlySet<string>,
   now: Date,
+  thresholdTokens: number,
   prefix: string,
   isLast: boolean,
   isRoot: boolean,
@@ -253,8 +262,10 @@ function renderNode(
   const category = rollupCategory(node, childrenOf, waiting);
   const stalled = isStalled(node, now);
   const head = isRoot ? "  " : `${prefix}${isLast ? "└ " : "├ "}`;
+  const bar = formatContextBar(node.contextTokens, thresholdTokens);
+  const num = formatContextNumber(node.contextTokens, thresholdTokens);
   lines.push(
-    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${categoryWord(category, stalled)}  ${formatAge(node, now)}`,
+    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${bar} ${num}  ${categoryWord(category, stalled)}  ${formatAge(node, now)}`,
   );
 
   const children = childrenOf.get(node.id) ?? [];
@@ -264,6 +275,7 @@ function renderNode(
       childrenOf,
       waiting,
       now,
+      thresholdTokens,
       isRoot ? "  " : prefix + (isLast ? "  " : "│ "),
       i === children.length - 1,
       false,
@@ -274,9 +286,11 @@ function renderNode(
 
 /**
  * `tenaza status`'s Session tree, grouped per project — the spec's variant
- * D, minus the context bar (that depends on `usage.sampled`, out of this
- * ticket's scope). Empty when no Session has ever been observed, so it adds
- * nothing to a fresh `status` (ticket 01/02's own output stays unchanged).
+ * D, now WITH the context bar (ticket 04, q9): 15 cells over 300k, a `┊`
+ * mark at the Policy's threshold (default 200k), red past it, and the
+ * number as `243k` / `⚑243k`. Empty when no Session has ever been observed,
+ * so it adds nothing to a fresh `status` (ticket 01/02's own output stays
+ * unchanged).
  */
 export function renderSessionTree(home: string = tenazaHome(), now: Date = new Date()): string {
   const events = readAllSessionEvents(home);
@@ -287,12 +301,15 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   const childrenOf = childrenIndex(nodes);
   const waiting = new Set(deriveInbox(home).map((row) => row.session));
   const groups = groupRootsByProject(nodes);
+  const thresholdTokens = loadPolicy(home).thresholdTokens;
 
   const lines: string[] = [];
   for (const project of [...groups.keys()].sort()) {
     lines.push(project);
     const roots = groups.get(project) ?? [];
-    roots.forEach((root, i) => renderNode(root, childrenOf, waiting, now, "", i === roots.length - 1, true, lines));
+    roots.forEach((root, i) =>
+      renderNode(root, childrenOf, waiting, now, thresholdTokens, "", i === roots.length - 1, true, lines),
+    );
     lines.push("");
   }
   return lines.join("\n");

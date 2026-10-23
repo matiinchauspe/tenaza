@@ -13,7 +13,7 @@ import {
   renderSessionTree,
   rollupCategory,
 } from "../src/sessions";
-import { sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+import { sessionEndedEvent, sessionStartedEvent, usageSampledEvent } from "../src/contract/event";
 
 describe("buildSessionIndex", () => {
   test("captures runtime, cwd, capabilities and parent from session.started", () => {
@@ -66,6 +66,26 @@ describe("buildSessionIndex", () => {
     expect(node?.startedAt).toBeDefined();
     expect(node?.endedAt).toBeDefined();
     expect(node?.lastEventTs).toBe(node?.endedAt);
+  });
+
+  test("contextTokens captures the LATEST usage.sampled, not the max or first (q9)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      usageSampledEvent("sess-1", { context_tokens: 242_170 }),
+      usageSampledEvent("sess-1", { context_tokens: 80_000 }),
+    ]);
+
+    // the LAST sample wins, even though it's the smaller number — the file's
+    // own order decides, same convention measureContextTokens uses.
+    expect(index.get("sess-1")?.contextTokens).toBe(80_000);
+  });
+
+  test("a Session with no usage.sampled event has contextTokens undefined, not zero", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+
+    expect(index.get("sess-1")?.contextTokens).toBeUndefined();
   });
 });
 
@@ -266,5 +286,52 @@ effect = "human"
 
     expect(out).toContain("/repos/tenaza");
     expect(out).toContain("/repos/rudy");
+  });
+
+  test("a Session below the threshold shows no red overflow and no ⚑ (AC3)", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 100_000 }));
+
+    const out = renderSessionTree(home);
+    const line = out.split("\n").find((l) => l.includes("sess-1"))!;
+
+    expect(line).toContain("100k");
+    expect(line).not.toContain("⚑");
+    expect(line).not.toContain("\x1b[31m");
+  });
+
+  test("a Session past the default 200k threshold shows the red overflow and ⚑ (AC3)", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 242_170 }));
+
+    const out = renderSessionTree(home);
+    const line = out.split("\n").find((l) => l.includes("sess-1"))!;
+
+    expect(line).toContain("⚑242k");
+    expect(line).toContain("\x1b[31m");
+  });
+
+  test("a custom Policy threshold moves the mark and what counts as flagged (AC4)", () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), "\n[flag]\nthreshold_tokens = 100000\n");
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    // 120k is below the DEFAULT 200k threshold but above this custom 100k one.
+    appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 120_000 }));
+
+    const out = renderSessionTree(home);
+    const line = out.split("\n").find((l) => l.includes("sess-1"))!;
+
+    expect(line).toContain("⚑120k");
+    expect(line).toContain("\x1b[31m");
+  });
+
+  test("a Session never sampled shows the empty bar and a dash, not a crash", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+
+    const out = renderSessionTree(home);
+    const line = out.split("\n").find((l) => l.includes("sess-1"))!;
+
+    expect(line).toContain("—");
+    expect(line).not.toContain("⚑");
   });
 });

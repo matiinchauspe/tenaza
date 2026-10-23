@@ -19,6 +19,7 @@ bun run build    # bun build --compile -> dist/tenaza
 echo '<hook payload>' | tenaza hook claude   # PreToolUse, SessionStart, SubagentStart, SubagentStop, SessionEnd, Stop, PostToolUse
 echo '<hook payload>' | tenaza hook fake     # the test Adapter: start, action, end — never a real runtime
 tenaza status
+tenaza statusline     # one line for Claude Code's statusLine; reads and ignores any JSON on stdin
 tenaza run <id>       # execute the stored command at your request; closes on exit 0
                       # refuses on an item that already ran once, unblocked (see below)
 tenaza done <id>      # close an item you ran yourself, by hand
@@ -42,6 +43,17 @@ shows its `ticket` Label when one was announced, else its structural role ("sesi
 there instead — no bar, no `⚑` — the core degrading by Capability, never by runtime name (ADR
 0001; the `fake` Adapter behind `tenaza hook fake` is what exercises this, and the `human`-Rule
 case below, in tests). The Inbox follows below the tree.
+
+`tenaza statusline` folds the same derived state into one terse line:
+`tenaza │ ● 4 vivas · ⚑ 1 >200k · ✉ 2 → #14 gh pr merge` (calm:
+`tenaza │ ● 2 vivas · ⚑ 0 · ✉ 0`). `vivas` counts every Session not yet done
+or ended; `⚑` counts Sessions at or past the Policy's threshold (the number
+tracks a custom one, never a hardcoded 200k); `✉` is the open Inbox's own
+length, blocked or not — an unblocked item (see below) still counts and can
+still be the one named, since it is still open and still real. The named item
+is the MOST RECENTLY opened one. Claude Code pipes its own statusline JSON on
+stdin; Tenaza drains and ignores it outright, deriving its line only from its
+own state.
 
 The Inbox holds every Action that matched a `human` Rule. The common case is a deny an Adapter
 with the `block` Capability enforced — `#id  Tool: command`, awaiting `tenaza run <id>`. An

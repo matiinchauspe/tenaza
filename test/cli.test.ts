@@ -265,4 +265,130 @@ effect = "human"
     // announce remains untouched by the later one.
     expect(index.get("sess-1")?.labels).toEqual({ ticket: "RES-200", project: "reservee" });
   });
+
+  describe("hook fake (ADR 0001, ticket 06: proves the core degrades by Capability, never by runtime name)", () => {
+    test("a Session from the fake Adapter (no measure) shows 'sin datos' in the tree — no bar, no ⚑ (AC1)", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+
+      const status = await runCli(["status"], { home });
+
+      const line = status.stdout.split("\n").find((l) => l.includes("fake-1"));
+      expect(line).toContain("sin datos");
+      expect(line).not.toContain("⚑");
+    });
+
+    test("without block, a human-ruled command is NOT denied — the printed response is allow, not deny (AC2)", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+
+      const result = await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      expect(result.exitCode).toBe(0);
+      const response = JSON.parse(result.stdout);
+      expect(response.decision).toBe("allow");
+    });
+
+    test("that same unenforceable human match is still RECORDED and SURFACED in the Inbox, not silently dropped (AC2)", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      const status = await runCli(["status"], { home });
+
+      expect(status.stdout).toContain("#1  fake: gh pr merge 58");
+      expect(status.stdout).toContain("ya corrió");
+    });
+
+    test("run REFUSES an unblocked item — never executes the command a second time, exits non-zero, es-AR message naming done/dismiss", async () => {
+      const marker = path.join(home, "marker");
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({
+          kind: "action",
+          session: "fake-1",
+          command: `gh pr merge 58 && touch ${marker}`,
+        }),
+      });
+
+      const result = await runCli(["run", "1"], { home });
+
+      expect(result.exitCode).not.toBe(0);
+      const { existsSync } = await import("node:fs");
+      expect(existsSync(marker)).toBe(false);
+      expect(result.stderr).toContain("ya corrió");
+      expect(result.stderr).toContain("no se pudo bloquear");
+      expect(result.stderr).toContain("tenaza done 1");
+      expect(result.stderr).toContain("tenaza dismiss 1");
+
+      // refusing to run is not a resolution — the item stays open afterward
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("done still closes an unblocked item, exactly as for a blocked one", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      const result = await runCli(["done", "1"], { home });
+
+      expect(result.exitCode).toBe(0);
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("dismiss still closes an unblocked item, exactly as for a blocked one", async () => {
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "start", session: "fake-1", cwd: "/tmp/fake" }),
+      });
+      await runCli(["hook", "fake"], {
+        home,
+        stdin: JSON.stringify({ kind: "action", session: "fake-1", command: "gh pr merge 58" }),
+      });
+
+      const result = await runCli(["dismiss", "1"], { home });
+
+      expect(result.exitCode).toBe(0);
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("the SAME command through the Claude Adapter (declares block) IS denied — the two Adapters diverge only by Capability, never by a hardcoded name", async () => {
+      const result = await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-1",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr merge 58" },
+        }),
+      });
+
+      const response = JSON.parse(result.stdout);
+      expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+  });
 });

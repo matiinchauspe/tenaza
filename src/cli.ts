@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { handleClaudeHook } from "./adapters/claude";
+import { handleFakeHook } from "./adapters/fake";
 import { tenazaHome } from "./paths";
 import {
   type ResolutionOutcome,
@@ -17,6 +18,24 @@ async function runHookClaude(): Promise<number> {
   const raw = await readStdin();
   const payload = JSON.parse(raw);
   const response = handleClaudeHook(tenazaHome(), payload);
+  if (response) {
+    process.stdout.write(`${JSON.stringify(response)}\n`);
+  }
+  return 0;
+}
+
+/**
+ * `hook fake` — the test Adapter's own entry point (ADR 0001, ticket 06): a
+ * repo-internal tool for the black-box test seam, never wired into a real
+ * agent runtime. Naming "claude" and "fake" here, in the CLI's own command
+ * dispatch, is unavoidable wiring (routing one argument to one Adapter
+ * module) — never the CORE branching ADR 0001 forbids, which lives in
+ * `decide.ts`/`sessions.ts` and knows Capabilities only, never this string.
+ */
+async function runHookFake(): Promise<number> {
+  const raw = await readStdin();
+  const payload = JSON.parse(raw);
+  const response = handleFakeHook(tenazaHome(), payload);
   if (response) {
     process.stdout.write(`${JSON.stringify(response)}\n`);
   }
@@ -77,6 +96,16 @@ async function runRun(idArg: string | undefined): Promise<number> {
       process.stdout.write(`tenaza: inbox #${id} is already closed\n`);
       return 0;
     }
+    if (outcome.kind === "unblockable") {
+      // ADR 0001, ticket 06: this Action already ran once, unblocked — `run`
+      // would execute it a SECOND time, so it refuses outright. Human-facing
+      // CLI copy, es-AR, same as `status`'s own Inbox marker for this case.
+      process.stderr.write(
+        `tenaza: inbox #${id} ya corrió y no se pudo bloquear — no se puede volver a correr. ` +
+          `Cerralo con \`tenaza done ${id}\` o \`tenaza dismiss ${id}\`.\n`,
+      );
+      return 1;
+    }
     process.stderr.write(
       `tenaza: inbox #${id} stays open — command exited ${outcome.exitCode}\n`,
     );
@@ -92,6 +121,10 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === "hook" && subcommand === "claude") {
     return await runHookClaude();
+  }
+
+  if (command === "hook" && subcommand === "fake") {
+    return await runHookFake();
   }
 
   if (command === "status") {

@@ -191,7 +191,7 @@ function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookR
     }
   }
 
-  const result = decideAction(home, payload.session_id, action);
+  const result = decideAction(home, payload.session_id, action, CLAUDE_CAPABILITIES);
 
   if (result.decision === "deny") {
     return buildHookResponse("deny", denyMessage(result.inboxId));

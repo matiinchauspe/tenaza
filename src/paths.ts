@@ -27,3 +27,15 @@ export function sessionLogPath(
 export function humanLogPath(home: string = tenazaHome()): string {
   return path.join(home, "state", "human.jsonl");
 }
+
+/**
+ * The running PostToolUse counter for one Session (ticket 04, q9) — a plain
+ * number, never an Event, beside the Session's own log so it still keeps one
+ * writer per file (ADR 0002).
+ */
+export function toolCallCounterPath(
+  session: string,
+  home: string = tenazaHome(),
+): string {
+  return path.join(sessionsDir(home), `${session}.toolcalls`);
+}

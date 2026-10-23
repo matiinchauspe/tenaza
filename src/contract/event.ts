@@ -96,12 +96,32 @@ export function actionDecidedEvent(
   action: Action,
   decision: Decision,
   rule: { match: string; effect: Effect },
-): Event {
+): ActionDecidedEvent {
   return EventSchema.parse({
     v: 1,
     ts: new Date().toISOString(),
     session,
     type: "action.decided",
     data: { action, decision, rule },
+  }) as ActionDecidedEvent;
+}
+
+/**
+ * Build an `approval.resolved` Event envelope with the current timestamp.
+ * `session` is the Session whose denied Action this Resolution closes (not
+ * who is resolving it — the human, through the CLI); `ref` is the Inbox
+ * item's stable id, as a string.
+ */
+export function approvalResolvedEvent(
+  session: string,
+  ref: string,
+  outcome: "done" | "dismissed",
+): Event {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "approval.resolved",
+    data: { ref, outcome },
   });
 }

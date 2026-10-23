@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { EventSchema, actionDecidedEvent } from "../src/contract/event";
+import { EventSchema, actionDecidedEvent, approvalResolvedEvent } from "../src/contract/event";
 
 describe("Event contract", () => {
   test("accepts a well-formed action.decided line", () => {
@@ -53,5 +53,14 @@ describe("Event contract", () => {
     expect(() => EventSchema.parse(evt)).not.toThrow();
     expect(evt.type).toBe("action.decided");
     expect(evt.v).toBe(1);
+  });
+
+  test("approvalResolvedEvent builds a schema-valid envelope", () => {
+    const evt = approvalResolvedEvent("sess-1", "1", "done");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("approval.resolved");
+    expect(evt.v).toBe(1);
+    expect(evt).toMatchObject({ session: "sess-1", data: { ref: "1", outcome: "done" } });
   });
 });

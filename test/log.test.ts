@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, EventSchema } from "../src/contract/event";
-import { appendEvent, readAllSessionEvents } from "../src/log";
-import { sessionLogPath } from "../src/paths";
+import { actionDecidedEvent, approvalResolvedEvent, EventSchema } from "../src/contract/event";
+import { appendEvent, appendHumanEvent, readAllSessionEvents, readHumanEvents } from "../src/log";
+import { humanLogPath, sessionLogPath } from "../src/paths";
 
 describe("Session log", () => {
   let home: string;
@@ -83,5 +83,50 @@ describe("Session log", () => {
 
   test("readAllSessionEvents returns an empty list when no sessions exist yet", () => {
     expect(readAllSessionEvents(home)).toEqual([]);
+  });
+});
+
+describe("Human log", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-human-log-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("appendHumanEvent writes to state/human.jsonl, creating it on first write", () => {
+    const evt = approvalResolvedEvent("sess-1", "1", "done");
+
+    appendHumanEvent(home, evt);
+
+    const raw = readFileSync(humanLogPath(home), "utf8");
+    const lines = raw.trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(EventSchema.parse(JSON.parse(lines[0]!))).toEqual(evt);
+  });
+
+  test("appendHumanEvent never touches the originating Session's own log", () => {
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", "1", "done"));
+
+    expect(readAllSessionEvents(home)).toEqual([]);
+  });
+
+  test("readHumanEvents returns an empty list when human.jsonl doesn't exist yet", () => {
+    expect(readHumanEvents(home)).toEqual([]);
+  });
+
+  test("readHumanEvents reads every line, validated, in file order", () => {
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", "1", "done"));
+    appendHumanEvent(home, approvalResolvedEvent("sess-2", "2", "dismissed"));
+
+    const events = readHumanEvents(home);
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.type === "approval.resolved" && e.data.ref)).toEqual([
+      "1",
+      "2",
+    ]);
   });
 });

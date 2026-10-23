@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readNotificationRecorder } from "../src/notify";
+import { policyPath } from "../src/paths";
 import { runCli } from "./support/cli";
 
 describe("tenaza CLI (black box, temporary TENAZA_HOME)", () => {
@@ -543,5 +544,85 @@ effect = "human"
 
       expect(readNotificationRecorder(home)).toEqual([]);
     });
+  });
+});
+
+describe("tenaza init (black box, temporary TENAZA_HOME + fake Claude settings)", () => {
+  let home: string;
+  let settingsPath: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-init-cli-home-"));
+    const settingsDir = mkdtempSync(path.join(tmpdir(), "tenaza-init-cli-settings-"));
+    settingsPath = path.join(settingsDir, "settings.json");
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(path.dirname(settingsPath), { recursive: true, force: true });
+  });
+
+  test("AC1: on a clean TENAZA_HOME, the Policy init writes blocks `gh pr merge` through the hook seam", async () => {
+    const initResult = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+    expect(initResult.exitCode).toBe(0);
+    expect(existsSync(policyPath(home))).toBe(true);
+
+    const hookResult = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "gh pr merge 58 --merge" },
+      }),
+    });
+
+    expect(hookResult.exitCode).toBe(0);
+    const response = JSON.parse(hookResult.stdout);
+    expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(response.hookSpecificOutput.permissionDecisionReason).toContain("inbox #1");
+  });
+
+  test("AC2: an existing policy.toml is never overwritten by init", async () => {
+    mkdirSync(path.dirname(policyPath(home)), { recursive: true });
+    const handEdited = "# hand-edited, do not touch\n";
+    writeFileSync(policyPath(home), handEdited);
+
+    const result = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(policyPath(home), "utf8")).toBe(handEdited);
+  });
+
+  test("AC3: with no statusLine set, init sets it", async () => {
+    const result = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+
+    expect(result.exitCode).toBe(0);
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(settings.statusLine).toEqual({ type: "command", command: "tenaza statusline" });
+  });
+
+  test("AC3: with a statusLine already set, init leaves the settings file byte-identical and prints the guarded line", async () => {
+    mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const existing = '{\n  "statusLine": {\n    "type": "command",\n    "command": "my-own-script.sh"\n  }\n}\n';
+    writeFileSync(settingsPath, existing);
+
+    const result = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("command -v tenaza >/dev/null && tenaza statusline");
+    expect(readFileSync(settingsPath, "utf8")).toBe(existing);
+  });
+
+  test("AC4: running init twice changes nothing the second time", async () => {
+    await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+    const policyAfterFirst = readFileSync(policyPath(home), "utf8");
+    const settingsAfterFirst = readFileSync(settingsPath, "utf8");
+
+    const second = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+
+    expect(second.exitCode).toBe(0);
+    expect(readFileSync(policyPath(home), "utf8")).toBe(policyAfterFirst);
+    expect(readFileSync(settingsPath, "utf8")).toBe(settingsAfterFirst);
   });
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
+  claudeSettingsPath,
   humanLogPath,
   policyPath,
   sessionLogPath,
@@ -35,5 +36,24 @@ describe("TENAZA_HOME resolution", () => {
       "/tmp/some-tenaza-home/state/sessions/sess-1.jsonl",
     );
     expect(humanLogPath()).toBe("/tmp/some-tenaza-home/state/human.jsonl");
+  });
+});
+
+describe("Claude settings path resolution (ticket 09)", () => {
+  const original = process.env.TENAZA_CLAUDE_SETTINGS;
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.TENAZA_CLAUDE_SETTINGS;
+    else process.env.TENAZA_CLAUDE_SETTINGS = original;
+  });
+
+  test("defaults to ~/.claude/settings.json when TENAZA_CLAUDE_SETTINGS is unset", () => {
+    delete process.env.TENAZA_CLAUDE_SETTINGS;
+    expect(claudeSettingsPath()).toBe(path.join(homedir(), ".claude", "settings.json"));
+  });
+
+  test("honours TENAZA_CLAUDE_SETTINGS when set, never derived from TENAZA_HOME", () => {
+    process.env.TENAZA_CLAUDE_SETTINGS = "/tmp/some-settings.json";
+    expect(claudeSettingsPath()).toBe("/tmp/some-settings.json");
   });
 });

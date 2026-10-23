@@ -17,10 +17,10 @@ export interface CliResult {
  */
 export async function runCli(
   args: string[],
-  options: { home: string; stdin?: string } = { home: "" },
+  options: { home: string; stdin?: string; env?: Record<string, string> } = { home: "" },
 ): Promise<CliResult> {
   const proc = Bun.spawn(["bun", "run", CLI_ENTRY, ...args], {
-    env: { ...process.env, TENAZA_HOME: options.home },
+    env: { ...process.env, TENAZA_HOME: options.home, ...options.env },
     stdin: options.stdin !== undefined ? new TextEncoder().encode(options.stdin) : "ignore",
     stdout: "pipe",
     stderr: "pipe",

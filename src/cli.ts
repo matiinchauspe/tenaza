@@ -9,6 +9,7 @@ import {
   UnknownInboxItemError,
 } from "./resolve";
 import { renderStatus } from "./status";
+import { formatStatusline } from "./statusline";
 
 async function readStdin(): Promise<string> {
   return await new Response(Bun.stdin.stream()).text();
@@ -44,6 +45,21 @@ async function runHookFake(): Promise<number> {
 
 function runStatus(): number {
   process.stdout.write(renderStatus(tenazaHome()));
+  return 0;
+}
+
+/**
+ * `tenaza statusline` (ticket 07, q19/q20): Claude Code pipes its own
+ * statusline JSON on stdin (model, cost, workspace, …) — Tenaza's line comes
+ * entirely from its OWN derived state (no daemon, ADR 0002), never from that
+ * payload, so stdin is drained and ignored outright rather than parsed. That
+ * also makes AC3 ("accepts the statusline JSON on stdin without failing, and
+ * ignores fields it does not use") hold even for malformed or non-JSON
+ * input: there is nothing here that could ever throw on it.
+ */
+async function runStatusline(): Promise<number> {
+  await readStdin();
+  process.stdout.write(`${formatStatusline(tenazaHome())}\n`);
   return 0;
 }
 
@@ -129,6 +145,10 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === "status") {
     return runStatus();
+  }
+
+  if (command === "statusline") {
+    return await runStatusline();
   }
 
   if (command === "run") {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadPolicy, matchRule } from "../src/policy";
+import { DEFAULT_CONTEXT_THRESHOLD, loadPolicy, matchRule } from "../src/policy";
 
 describe("Policy", () => {
   let home: string;
@@ -40,6 +40,37 @@ effect = "flag"
   test("an absent policy file yields no rules, not an error", () => {
     const policy = loadPolicy(home);
     expect(policy.rules).toEqual([]);
+  });
+
+  test("an absent policy file yields the default 200k threshold", () => {
+    const policy = loadPolicy(home);
+    expect(policy.thresholdTokens).toBe(DEFAULT_CONTEXT_THRESHOLD);
+    expect(DEFAULT_CONTEXT_THRESHOLD).toBe(200_000);
+  });
+
+  test("a policy.toml without a [flag] section still yields the default threshold", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+`,
+    );
+
+    expect(loadPolicy(home).thresholdTokens).toBe(DEFAULT_CONTEXT_THRESHOLD);
+  });
+
+  test("a custom [flag] threshold_tokens overrides the default", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[flag]
+threshold_tokens = 150000
+`,
+    );
+
+    expect(loadPolicy(home).thresholdTokens).toBe(150_000);
   });
 
   test("matchRule finds a human rule by substring on the command", () => {

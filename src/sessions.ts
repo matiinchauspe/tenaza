@@ -230,9 +230,15 @@ function groupRootsByProject(
   return groups;
 }
 
-/** "subagente" for any Session with a parent, "sesión" otherwise — structural, nothing guessed. */
+/**
+ * The ticket Label when one was announced, else the structural role —
+ * "subagente" for any Session with a parent, "sesión" otherwise (ticket 03's
+ * own fallback, now filled in by ticket 05: `ticket` is shown opaquely,
+ * exactly as announced, never validated or parsed — only `project` is
+ * interpreted, per the Label's own definition).
+ */
 export function roleOf(node: SessionNode): string {
-  return node.parent !== undefined ? "subagente" : "sesión";
+  return node.labels.ticket ?? (node.parent !== undefined ? "subagente" : "sesión");
 }
 
 export function formatAge(node: SessionNode, now: Date): string {

@@ -11,9 +11,15 @@ import {
   isStalled,
   nodeCategory,
   renderSessionTree,
+  roleOf,
   rollupCategory,
 } from "../src/sessions";
-import { sessionEndedEvent, sessionStartedEvent, usageSampledEvent } from "../src/contract/event";
+import {
+  sessionEndedEvent,
+  sessionLabeledEvent,
+  sessionStartedEvent,
+  usageSampledEvent,
+} from "../src/contract/event";
 
 describe("buildSessionIndex", () => {
   test("captures runtime, cwd, capabilities and parent from session.started", () => {
@@ -187,6 +193,35 @@ describe("deriveProject", () => {
     ]);
     const resolve = (cwd: string) => cwd;
     expect(deriveProject(index.get("a")!, resolve)).not.toBe(deriveProject(index.get("b")!, resolve));
+  });
+
+  test("a later session.labeled event overrides an earlier key but leaves other keys alone (AC4)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionLabeledEvent("sess-1", { ticket: "RES-131" }),
+      sessionLabeledEvent("sess-1", { project: "reservee" }),
+      sessionLabeledEvent("sess-1", { ticket: "RES-200" }),
+    ]);
+    expect(index.get("sess-1")?.labels).toEqual({ ticket: "RES-200", project: "reservee" });
+  });
+});
+
+describe("roleOf", () => {
+  test("a Session with no ticket Label falls back to its structural role", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    expect(roleOf(index.get("sess-1")!)).toBe("sesión");
+    expect(roleOf(index.get("agent-1")!)).toBe("subagente");
+  });
+
+  test("a Session with a ticket Label shows it in place of the role, verbatim (AC3)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionLabeledEvent("agent-1", { ticket: "RES-131" }),
+    ]);
+    expect(roleOf(index.get("agent-1")!)).toBe("RES-131");
   });
 });
 

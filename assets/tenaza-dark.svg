@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 190" width="280" height="190" role="img" aria-label="Tenaza">
+  <title>Tenaza</title>
+  <rect x="20" y="74" width="62" height="42" rx="5" fill="#D97706"/>
+  <rect x="28" y="82" width="30" height="8" rx="3" fill="#FBBF24" opacity=".7"/>
+  <path fill="none" stroke="#E9E4D8" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" d="M58 66H98L130 95L254 60"/>
+  <path fill="none" stroke="#E9E4D8" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" d="M58 124H98L130 95L254 130"/>
+  <circle cx="130" cy="95" r="13" fill="#E9E4D8"/>
+  <circle cx="130" cy="95" r="4.5" fill="#D97706"/>
+</svg>

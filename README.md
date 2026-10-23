@@ -1,109 +1,209 @@
-# Tenaza
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/tenaza-dark.svg">
+    <img src="assets/tenaza-light.svg" alt="Tenaza" width="200">
+  </picture>
+</p>
 
-A decoupled control plane for coding agents: observes agent Sessions, enforces a Policy on
-human-reserved Actions, and shows state. It never launches work. See `GLOSSARY.md` for its
-ubiquitous language and `docs/adr/` for the decisions behind its shape.
+<h1 align="center">Tenaza</h1>
+
+<p align="center">
+  <strong>Hold your coding agents with tongs.</strong><br>
+  See every session, keep the dangerous moves for yourself, and know when a context is running hot.
+</p>
+
+---
+
+A *tenaza* is the blacksmith's tongs: the tool that holds hot metal so your hands don't have
+to. Tenaza does that for coding agents. It hooks into Claude Code and:
+
+- **Watches** every session and subagent, grouped by project, with a live context bar.
+- **Holds back** the actions you reserve for yourself, like `gh pr merge` or a production write.
+  The agent is told to stop and tell you, and the action waits in your **Inbox**.
+- **Taps you on the shoulder** with a macOS notification when something waits for you, or when
+  a session crosses its context threshold.
+
+It never launches work and never runs a command on its own. Your agents do the work, and Tenaza
+keeps the parts you reserved for your own hands.
+
+<p align="center">
+  <img src="assets/status.svg" alt="tenaza status showing two projects, a session waiting for the human, a flagged session past 200k, and the Inbox" width="760">
+</p>
+
+## Install
+
+Requires macOS and [Claude Code](https://code.claude.com).
+
+```bash
+brew install matiinchauspe/tap/tenaza
+tenaza init
+```
+
+Then, inside Claude Code, add the plugin that wires up the hooks:
+
+```
+/plugin marketplace add matiinchauspe/tenaza
+/plugin install tenaza@tenaza
+```
+
+That's it. Every session from now on, main or subagent, is observed.
+
+`tenaza init` does two things, and running it again changes nothing:
+
+1. Writes a starter Policy to `~/.tenaza/config/policy.toml`, but never over an existing one.
+2. Points Claude Code's statusline at Tenaza, but only if you don't have one yet. If you do,
+   your settings are left untouched and it prints a line for you to add to your own script.
+
+## A day with Tenaza
+
+An agent tries to merge a PR:
+
+```
+gh pr merge 58 --merge
+```
+
+Claude Code's hook asks Tenaza first. The Policy reserves `gh pr merge` for you, so the call is
+denied, and the agent reads:
+
+> Reserved for the human, inbox #1. Do not retry or work around it. Tell the user, and continue.
+
+A notification appears (🟡 *Tenaza · te espera · inbox #1*), and the item waits:
+
+```bash
+tenaza status         # the session tree and the Inbox
+tenaza run 1          # run the stored command yourself, now; closes the item on success
+tenaza done 1         # or: you ran it by hand
+tenaza dismiss 1      # or: it no longer applies
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `tenaza init` | Prepare this machine: a starter Policy and the statusline. |
+| `tenaza status` | Sessions as a tree per project, with context bars, then the Inbox. |
+| `tenaza statusline` | One terse line for Claude Code's statusline. |
+| `tenaza run <id>` | Run an Inbox item's command at your request. Closes on exit 0. |
+| `tenaza done <id>` | Close an item you ran yourself. |
+| `tenaza dismiss <id>` | Close an item that no longer applies. |
+| `tenaza label key=value …` | Let an agent label its own session (e.g. `ticket=RES-131 project=reservee`). |
+| `tenaza hook claude` | The entry point Claude Code's hooks call. You never run it by hand. |
+
+Tenaza only ever executes a stored command through `tenaza run`, and closing an item twice is
+harmless.
+
+## The Policy
+
+`~/.tenaza/config/policy.toml` is a list of Rules. Each matches text in a shell command, and the
+first match wins:
+
+```toml
+[[rule]]
+match = "gh pr merge"
+effect = "human"   # deny it, and put it in your Inbox
+
+[[rule]]
+match = "git push --force"
+effect = "flag"    # let it run, but record it
+
+[flag]
+threshold_tokens = 200000   # when a session's context is flagged
+```
+
+The starter Policy reserves `gh pr merge`, `git worktree remove` and a few production writes.
+**Review it before you trust it:** the production-write rules are a best guess at how you type
+those commands, and each one says so in a comment.
+
+A Policy is a guardrail against honest mistakes, not a security boundary. An agent that words a
+command differently walks right past a Rule.
+
+## Reading the screen
+
+| | |
+| --- | --- |
+| `⏸` *te espera* | Something in this session waits for you in the Inbox. |
+| `●` *vivo* | Working. It reads *sin señal* if it has gone quiet for 15 minutes. |
+| `✓` *terminó* / `○` *cerró* | A subagent finished, or a session closed. |
+| `████░░┊░░` | Context used, 20k tokens per cell. `┊` marks your threshold, and cells past it turn red. |
+| `⚑242k` | The session crossed the threshold. Tenaza only shows it, never stops it. |
+
+A parent session shows the most urgent state among its subagents, so a waiting subagent is never
+hidden. The statusline folds all of this into one line:
+
+```
+tenaza │ ● 2 vivas · ⚑ 1 >200k · ✉ 1 → #1 gh pr merge
+```
+
+## Labels
+
+An agent can name the work it is doing by running `tenaza label ticket=RES-131 project=reservee`.
+The hook catches the command and labels the session the call really came from, even inside a
+subagent. The `ticket` label replaces the role on the session's row, and `project` decides the
+group. Without a `project` label, sessions group by their git repository.
+
+[Yunque](https://github.com/matiinchauspe/yunque), the agent harness Tenaza was built alongside,
+announces these labels for you.
+
+## Notifications
+
+- 🟡 when an action lands in your Inbox.
+- 🔴 the first time a session crosses the context threshold.
+
+Nothing else notifies: no edits, no sessions ending, no resolutions. Several matches within two
+seconds play a single sound. Notifications are sent with `osascript`, so there is nothing extra
+to install, but macOS may ask for permission the first time. A failed notification never changes
+whether an action is allowed.
+
+## How it works
+
+```
+Claude Code hook ──► tenaza hook claude ──► ~/.tenaza/state/sessions/<session>.jsonl
+                                                        │
+                       tenaza status / statusline ◄─────┘   (state is derived on read)
+```
+
+There is no daemon. Each hook runs a short command that appends Events to one log per session,
+and every view is derived from those logs when you ask for it. An adapter translates each agent
+runtime's hooks into Tenaza's Events and declares what it can do (`observe`, `block`, `measure`).
+The core degrades by that declaration, never by the runtime's name. The decisions behind this
+shape live in [`docs/adr/`](docs/adr/).
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `TENAZA_HOME` | `~/.tenaza` | Policy and session state. |
+| `TENAZA_CLAUDE_SETTINGS` | `~/.claude/settings.json` | The settings file `tenaza init` edits. |
+
+## Limits in v1
+
+- **Claude Code only.** The core is runtime-free; other adapters can come later.
+- **Shell commands only.** Rules match Bash commands. Tool calls to MCP servers are not checked
+  yet, so a production write through an MCP tool goes unseen.
+- **Subagent attribution is partial.** A subagent's blocked action and tool-call count are
+  recorded under its parent session.
+- **macOS notifications cannot be replaced.** Each one is a new banner.
+- **Release binaries are unsigned.** Installing through Homebrew avoids the Gatekeeper prompt.
+
+## Uninstall
+
+```bash
+brew uninstall tenaza
+rm -rf ~/.tenaza
+```
+
+Then, inside Claude Code: `/plugin uninstall tenaza@tenaza`. Claude Code keeps working as before,
+statusline included: the line `tenaza init` wrote prints nothing once `tenaza` is gone.
 
 ## Develop
 
 ```bash
 bun install
-bun test        # black-box, against a temporary TENAZA_HOME
+bun test             # black-box tests against a temporary TENAZA_HOME; never a real notification
 bun run typecheck
-bun run build    # bun build --compile -> dist/tenaza
+bun run build        # a single binary at dist/tenaza
 ```
 
-## Use
+Releases are built by CI on every `v*` tag, for macOS arm64 and x64.
 
-```bash
-tenaza init           # prepare this machine: write a starter Policy, wire up the statusline
-echo '<hook payload>' | tenaza hook claude   # PreToolUse, SessionStart, SubagentStart, SubagentStop, SessionEnd, Stop, PostToolUse
-echo '<hook payload>' | tenaza hook fake     # the test Adapter: start, action, end — never a real runtime
-tenaza status
-tenaza statusline     # one line for Claude Code's statusLine; reads and ignores any JSON on stdin
-tenaza run <id>       # execute the stored command at your request; closes on exit 0
-                      # refuses on an item that already ran once, unblocked (see below)
-tenaza done <id>      # close an item you ran yourself, by hand
-tenaza dismiss <id>   # close an item that no longer applies
-tenaza label key=value [key=value …]   # announce Labels on the caller's own Session
-```
+## License
 
-Tenaza never executes a stored command except through `tenaza run`. Resolving an
-already-closed item is a no-op — safe to repeat.
-
-`tenaza init` prepares a machine, idempotently — running it twice changes nothing the second
-time. It writes `config/policy.toml` from the shipped `policy.example.toml` the FIRST time it
-finds none there, and never again: an existing `policy.toml` is always left alone, so edit it
-freely once it exists. The shipped example is a starting point, not a finished Policy — review
-and adjust its Rules (some of them are a stated best guess, e.g. the exact Railway/Neon
-production-write command strings) before trusting it. It also wires up Claude Code's own
-`statusLine` setting, because a plugin can set only `agent`/`subagentStatusLine`, never the main
-one: with no `statusLine` in the user's Claude Code settings, it sets it to run
-`tenaza statusline`; with one already there, it leaves that settings file byte-for-byte untouched
-and prints one line to paste into your own script instead:
-`command -v tenaza >/dev/null && tenaza statusline`. A settings file it cannot even parse as JSON
-is left untouched the same way, rather than risk a destructive rewrite.
-
-`tenaza status` shows every observed Session as a tree, grouped by project (derived from a
-`project` Label, else the git root of the Session's cwd, else the cwd itself). A Claude Code
-subagent is its own Session, nested under its parent; a parent's glyph rolls up its most urgent
-descendant (waits for the human > alive > done > ended). Each row carries a context bar — 15
-cells over 300k (20k per cell), a `┊` mark at the Policy's threshold (default 200k), cells past
-it in red, and the number as `243k`, or `⚑243k` once Flagged. The Claude Adapter samples it by
-parsing the Session's own transcript at `Stop`, `SubagentStop` and `SessionEnd`, and every 25
-tool calls on `PostToolUse` — v1 never stops a Session for its size, only shows it. Each row
-shows its `ticket` Label when one was announced, else its structural role ("sesión" /
-"subagente"). A Session whose Adapter never declared the `measure` Capability shows `sin datos`
-there instead — no bar, no `⚑` — the core degrading by Capability, never by runtime name (ADR
-0001; the `fake` Adapter behind `tenaza hook fake` is what exercises this, and the `human`-Rule
-case below, in tests). The Inbox follows below the tree.
-
-`tenaza statusline` folds the same derived state into one terse line:
-`tenaza │ ● 4 vivas · ⚑ 1 >200k · ✉ 2 → #14 gh pr merge` (calm:
-`tenaza │ ● 2 vivas · ⚑ 0 · ✉ 0`). `vivas` counts every Session not yet done
-or ended; `⚑` counts Sessions at or past the Policy's threshold (the number
-tracks a custom one, never a hardcoded 200k); `✉` is the open Inbox's own
-length, blocked or not — an unblocked item (see below) still counts and can
-still be the one named, since it is still open and still real. The named item
-is the MOST RECENTLY opened one. Claude Code pipes its own statusline JSON on
-stdin; Tenaza drains and ignores it outright, deriving its line only from its
-own state.
-
-The Inbox holds every Action that matched a `human` Rule. The common case is a deny an Adapter
-with the `block` Capability enforced — `#id  Tool: command`, awaiting `tenaza run <id>`. An
-Adapter WITHOUT `block` cannot actually stop the call, so Tenaza never claims it denied one: the
-Action is still recorded and still shown, marked `(ya corrió — no se pudo bloquear)`. On such an
-item `tenaza run` REFUSES outright — no spawn, no Event, exit code 1, an es-AR message explaining
-it already ran and naming `tenaza done <id>` / `tenaza dismiss <id>` — since running it again
-would execute the command a SECOND time (a merge, a prod write, …). `done` and `dismiss` close it
-exactly as they would any other item.
-
-An agent doesn't know its own Session id, so it announces Labels by running `tenaza label
-ticket=RES-131 project=reservee`; the Claude Code Adapter's `PreToolUse` hook intercepts that
-exact command and writes `session.labeled` into the RIGHT Session's log — the one the hook
-itself fired in (`agent_id` when the call came from inside a subagent, `session_id` otherwise),
-never the one the agent happened to spell in the command (ADR 0003). The command's own process
-exit code is always 0 regardless of its args; it never does the labeling itself and never fails.
-Labels are opaque strings, stored and shown as given — only `project` is ever interpreted (for
-grouping). A later announce adds or overrides keys; earlier ones remain.
-
-State lives under `TENAZA_HOME` (default `~/.tenaza/`): `config/policy.toml` for the Policy
-(an optional `[flag]` `threshold_tokens` overrides the default 200k), `state/sessions/<session>.jsonl`
-for each Session's Events, `state/sessions/<session>.toolcalls` for its running PostToolUse count
-(not an Event — never read as one), `state/human.jsonl` for Resolutions. `tenaza init` reads and
-edits Claude Code's OWN settings file (default `~/.claude/settings.json`, overridable with
-`TENAZA_CLAUDE_SETTINGS` — a different root than `TENAZA_HOME` entirely) to wire up the
-statusline.
-
-A hook fires a macOS notification the moment it opens an Inbox item (🟡, blocked or not — ADR
-0001) or a Session crosses the Flag threshold for the first time (🔴, once per Session — never on
-an edit, a Session ending on its own, or a Resolution). It's sent with `osascript -e 'display
-notification …'` — nothing to install beyond macOS itself, but with a real limitation worth
-knowing: `display notification` has no identifier/group parameter, so Tenaza cannot ask
-Notification Center to REPLACE an earlier banner (a tool like `terminal-notifier` could, at the
-cost of a second Homebrew dependency — not taken in v1). A burst of matches within ~2s still
-notifies for each one, but only the first plays a sound. Setting `TENAZA_NOTIFY_RECORDER=1`
-swaps the real sender for a recorder at `state/notify-recorder.jsonl` instead — the test seam
-`bun test` always runs under (see `bunfig.toml`), so no test ever pops a real notification. A
-failing notifier (no `osascript`, a denied permission, …) never fails the hook or changes its
-allow/deny answer.
+[MIT](LICENSE)

@@ -42,7 +42,24 @@ describe("Inbox derivation", () => {
       id: 1,
       session: "sess-1",
       action: { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+      blocked: true,
     });
+  });
+
+  test("a human match the caller could NOT deny (no block Capability) still becomes an Inbox item, marked not blocked (ADR 0001, ticket 06)", () => {
+    appendEvent(
+      home,
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        "allow",
+        { match: "gh pr merge", effect: "human" },
+      ),
+    );
+
+    const inbox = deriveInbox(home);
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({ id: 1, session: "sess-1", blocked: false });
   });
 
   test("a flag allow never becomes an Inbox item", () => {
@@ -203,11 +220,42 @@ describe("buildInboxRows (pure)", () => {
   test("an empty list of denies builds an empty list of rows", () => {
     expect(buildInboxRows([])).toEqual([]);
   });
+
+  test("blocked reflects the Event's own decision: deny -> true, allow -> false (ADR 0001, ticket 06)", () => {
+    const rows = buildInboxRows([
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 1", tool: "Bash" },
+        "deny",
+        { match: "gh pr merge", effect: "human" },
+      ),
+      actionDecidedEvent(
+        "sess-2",
+        { kind: "shell", command: "gh pr merge 2", tool: "Bash" },
+        "allow",
+        { match: "gh pr merge", effect: "human" },
+      ),
+    ]);
+
+    expect(rows.map((r) => r.blocked)).toEqual([true, false]);
+  });
 });
 
 describe("dedupOutstanding (pure)", () => {
-  const rowA = { id: 1, session: "sess-1", ts: "t1", action: { kind: "shell" as const, command: "a", tool: "Bash" } };
-  const rowB = { id: 2, session: "sess-2", ts: "t2", action: { kind: "shell" as const, command: "b", tool: "Bash" } };
+  const rowA = {
+    id: 1,
+    session: "sess-1",
+    ts: "t1",
+    action: { kind: "shell" as const, command: "a", tool: "Bash" },
+    blocked: true,
+  };
+  const rowB = {
+    id: 2,
+    session: "sess-2",
+    ts: "t2",
+    action: { kind: "shell" as const, command: "b", tool: "Bash" },
+    blocked: true,
+  };
 
   test("drops a row whose id is in the resolved set", () => {
     expect(dedupOutstanding([rowA, rowB], new Set(["1"]))).toEqual([rowB]);

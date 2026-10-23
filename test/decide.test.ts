@@ -86,4 +86,65 @@ effect = "flag"
 
     expect(second.decision === "deny" && second.inboxId).toBe(2);
   });
+
+  describe("Capability-gated denial (ADR 0001)", () => {
+    test("a human rule DENIES when the caller declares the block Capability", () => {
+      const result = decideAction(
+        home,
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        ["observe", "block"],
+      );
+
+      expect(result.decision).toBe("deny");
+    });
+
+    test("a human rule CANNOT deny without the block Capability — degrades to allow, same shape as a flag match", () => {
+      const result = decideAction(
+        home,
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        ["observe"],
+      );
+
+      expect(result.decision).toBe("allow");
+      expect(result.logged).toBe(true);
+    });
+
+    test("without block, the Action is still RECORDED — never silently dropped", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+        "observe",
+      ]);
+
+      const events = readSessionEvents("sess-1", home);
+      expect(events).toHaveLength(1);
+      // The log stays honest: the Policy's own verdict for this Rule is
+      // "human", and the decision truthfully reads "allow" — it was never
+      // actually blocked, so claiming "deny" here would be a lie.
+      expect(events[0]).toMatchObject({
+        type: "action.decided",
+        data: { decision: "allow", rule: { effect: "human" } },
+      });
+    });
+
+    test("without block, the Action is still SURFACED in the Inbox — not silently dropped", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+        "observe",
+      ]);
+
+      const inbox = deriveInbox(home);
+      expect(inbox).toHaveLength(1);
+      expect(inbox[0]).toMatchObject({ blocked: false, session: "sess-1" });
+    });
+
+    test("with no Capabilities given at all, the Policy's own human Rule still enforces as before (back-compat default)", () => {
+      const result = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+
+      expect(result.decision).toBe("deny");
+    });
+  });
 });

@@ -5,11 +5,16 @@ import { renderSessionTree } from "./sessions";
 /**
  * `#id  Tool: command` — the Inbox's per-item line, from the spec's
  * Visibility section. v1 only normalizes `shell` Actions, each carrying the
- * originating tool's name (e.g. "Bash") for this display.
+ * originating tool's name (e.g. "Bash") for this display. Kept BYTE-FOR-BYTE
+ * for a blocked item (tickets 01/02/03's own choice) — only an unblocked one
+ * (ticket 06, ADR 0001: a `human` match a Capability-lacking caller could not
+ * actually deny) appends the es-AR marker, since that command already ran
+ * and `tenaza run` would run it a SECOND time.
  */
 export function formatInboxLine(item: InboxItem): string {
   const { action } = item;
-  return `#${item.id}  ${action.tool}: ${action.command}`;
+  const base = `#${item.id}  ${action.tool}: ${action.command}`;
+  return item.blocked ? base : `${base}  (ya corrió — no se pudo bloquear)`;
 }
 
 /**

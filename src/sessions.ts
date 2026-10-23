@@ -254,6 +254,23 @@ export function formatAge(node: SessionNode, now: Date): string {
   return `${days}d`;
 }
 
+/** Spanish for "no data" — reserved for a Session from an Adapter that never declared the `measure` Capability at all (ADR 0001). Distinct from the empty-bar-plus-dash convention `formatContextBar`/`formatContextNumber` already use for "has `measure`, just not sampled yet": that one is honest uncertainty on a Capability that COULD answer; this one is a Capability that structurally never will. */
+const NO_MEASURE_CAPABILITY = "sin datos";
+
+/**
+ * The tree row's context column: the bar + number pair when this Session's
+ * Adapter declared `measure`, or the Capability-gated "no data" text when it
+ * didn't — never both, and never inferred from whether a sample happens to
+ * exist (a stray `usage.sampled` on a non-measuring Session, e.g. a test
+ * fixture, is deliberately ignored: the Capability gates this, not the
+ * data). The core degrades by Capability here, never by runtime name (ADR
+ * 0001, exercised by ticket 06).
+ */
+export function formatContextColumn(node: SessionNode, thresholdTokens: number): string {
+  if (!node.capabilities.includes("measure")) return NO_MEASURE_CAPABILITY;
+  return `${formatContextBar(node.contextTokens, thresholdTokens)} ${formatContextNumber(node.contextTokens, thresholdTokens)}`;
+}
+
 function renderNode(
   node: SessionNode,
   childrenOf: ReadonlyMap<string, SessionNode[]>,
@@ -268,10 +285,9 @@ function renderNode(
   const category = rollupCategory(node, childrenOf, waiting);
   const stalled = isStalled(node, now);
   const head = isRoot ? "  " : `${prefix}${isLast ? "└ " : "├ "}`;
-  const bar = formatContextBar(node.contextTokens, thresholdTokens);
-  const num = formatContextNumber(node.contextTokens, thresholdTokens);
+  const contextColumn = formatContextColumn(node, thresholdTokens);
   lines.push(
-    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${bar} ${num}  ${categoryWord(category, stalled)}  ${formatAge(node, now)}`,
+    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${contextColumn}  ${categoryWord(category, stalled)}  ${formatAge(node, now)}`,
   );
 
   const children = childrenOf.get(node.id) ?? [];

@@ -324,7 +324,14 @@ effect = "human"
   });
 
   test("a Session below the threshold shows no red overflow and no ⚑ (AC3)", () => {
-    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/tmp/scratch",
+        capabilities: ["observe", "block", "measure"],
+      }),
+    );
     appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 100_000 }));
 
     const out = renderSessionTree(home);
@@ -336,7 +343,14 @@ effect = "human"
   });
 
   test("a Session past the default 200k threshold shows the red overflow and ⚑ (AC3)", () => {
-    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/tmp/scratch",
+        capabilities: ["observe", "block", "measure"],
+      }),
+    );
     appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 242_170 }));
 
     const out = renderSessionTree(home);
@@ -349,7 +363,14 @@ effect = "human"
   test("a custom Policy threshold moves the mark and what counts as flagged (AC4)", () => {
     mkdirSync(path.join(home, "config"), { recursive: true });
     writeFileSync(path.join(home, "config", "policy.toml"), "\n[flag]\nthreshold_tokens = 100000\n");
-    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/tmp/scratch",
+        capabilities: ["observe", "block", "measure"],
+      }),
+    );
     // 120k is below the DEFAULT 200k threshold but above this custom 100k one.
     appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 120_000 }));
 
@@ -361,12 +382,37 @@ effect = "human"
   });
 
   test("a Session never sampled shows the empty bar and a dash, not a crash", () => {
-    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/tmp/scratch",
+        capabilities: ["observe", "block", "measure"],
+      }),
+    );
 
     const out = renderSessionTree(home);
     const line = out.split("\n").find((l) => l.includes("sess-1"))!;
 
     expect(line).toContain("—");
     expect(line).not.toContain("⚑");
+  });
+
+  test("a Session from an Adapter WITHOUT the measure Capability shows 'sin datos' — no bar, no ⚑ (ADR 0001, ticket 06 AC1)", () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe"] }),
+    );
+    // Even if a usage.sampled Event somehow landed anyway, lacking `measure`
+    // still reads as "sin datos" — the Capability, not the data, gates this.
+    appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 242_170 }));
+
+    const out = renderSessionTree(home);
+    const line = out.split("\n").find((l) => l.includes("sess-1"))!;
+
+    expect(line).toContain("sin datos");
+    expect(line).not.toContain("⚑");
+    expect(line).not.toContain("█");
+    expect(line).not.toContain("░");
   });
 });

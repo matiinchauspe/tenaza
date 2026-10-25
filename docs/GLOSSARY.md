@@ -67,7 +67,9 @@ _Avoid_: Alert, warning, alarm
 An Action that matched a `human` Rule, carrying the exact command, surfaced for the human: denied
 and awaiting their run when the Adapter has the `block` Capability to enforce it, or — when it
 doesn't — already allowed (the call could not actually be stopped) but still recorded and shown,
-never silently dropped (ADR 0001).
+never silently dropped (ADR 0001). It is born **live** when a Daemon is up — its agent holds,
+waiting for the human's answer in the Live surface — and turns **pending** (denied, awaiting
+their run) when the wait window lapses; one item, one id, throughout.
 _Avoid_: Approval, pending, ticket
 
 **Resolution**:
@@ -76,6 +78,17 @@ executes the stored command on their request and closes the item on exit 0 — b
 item that already ran once, unblocked, rather than run it a second time) or `dismissed` (no
 longer applies). Tenaza never runs a command on its own initiative.
 _Avoid_: Approval, ack
+
+**Live surface**:
+The local page where the human watches their Sessions and Inbox change on their own, and acts on
+them.
+_Avoid_: Dashboard, UI, panel
+
+**Daemon**:
+The Tenaza process kept running by the OS service manager: it serves the Live surface, notices
+the silences no hook sees, and runs a stored command only on the human's click — never on its own.
+No hook depends on it, so its absence never leaves anything unsafe (ADR 0004).
+_Avoid_: Server, service, agent
 
 ## Not Tenaza's language
 

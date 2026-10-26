@@ -44,7 +44,10 @@ An agent's attempted operation, normalized by the Adapter into a runtime-neutral
 _Avoid_: Tool call, command
 
 **Rule**:
-One entry of the Policy: an Action pattern and the Effect applied when it matches.
+One entry of the Policy: a pattern and the Effect applied when an Action matches it — for a
+`shell` Action, a word sequence that runs inside a command the Action actually executes (text the
+command only carries, like a quoted argument or a heredoc body, never matches); for an `mcp`
+Action, a tool name with optional conditions on its arguments.
 _Avoid_: Guard, filter
 
 **Effect**:
@@ -52,7 +55,8 @@ What a matching Rule does: `human` (deny, and open an Inbox item) or `flag` (all
 _Avoid_: Verdict, outcome
 
 **Policy**:
-The user's set of Rules and thresholds — one global file with optional per-project sections.
+The user's set of Rules and thresholds — one global file for every project; a Rule for a tool a
+project lacks simply never matches.
 A guardrail against honest agent mistakes, not a security boundary.
 _Avoid_: Config, permissions
 

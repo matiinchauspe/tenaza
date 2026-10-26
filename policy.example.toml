@@ -3,11 +3,32 @@
 # again once that file exists. It is yours from that point on: edit it
 # freely, Tenaza never reads this shipped copy again.
 #
-# Matching is a plain substring on the normalized command (`match` in
-# `command.includes(...)`), the FIRST matching [[rule]] in file order wins.
-# This is a guardrail against honest agent mistakes, never a security
-# boundary — a determined agent (or a differently-worded command) can walk
-# around any Rule here.
+# Matching parses the command with tree-sitter-bash and looks for a Rule's
+# words as a CONTIGUOUS RUN anywhere in a command the line actually
+# executes (ticket 03, ADR 0006) — `timeout 60 gh pr merge 58` and
+# `sudo gh pr merge 58` both match with no launcher table to keep current,
+# while a quoted string, a heredoc body or a commit message that only
+# MENTIONS the words never does. `bash`/`sh`/`zsh -c` strings and `eval`
+# are re-parsed; `$(...)` and backticks are commands, wherever they sit.
+# The FIRST matching [[rule]] in file order still wins. A line that fails
+# to parse (an unterminated quote, zsh-only syntax) falls back to the old
+# plain-substring check (`match` in `command.includes(...)`) instead of
+# going silent. This is a guardrail against honest agent mistakes, never a
+# security boundary — a determined agent (or a differently-worded command)
+# can walk around any Rule here.
+#
+# Known misses — none of these are caught, on purpose: no per-launcher
+# table, no variable tracking, no re-running a written file.
+#   - `ssh host "gh pr merge 58"` — the remote command is one quoted
+#     string, data to the local shell.
+#   - `C=gh; $C pr merge 58` — variable indirection.
+#   - a script written to a file, then run (e.g. `./deploy.sh`).
+#   - `git -C some/dir worktree remove x` — an interleaved global flag
+#     breaks the contiguous run (`git`, then `-C dir`, only THEN
+#     `worktree remove` — never a run of exactly `git worktree remove`).
+# Known rare false positive: an UNQUOTED `echo gh pr merge` is itself a
+# real command whose argv literally contains the words in order — there is
+# nothing left to tell that apart from a deliberate one.
 
 [[rule]]
 # Yunque's PR-merge seam (skills/_shared/execution-convention.md): landing a

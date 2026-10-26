@@ -135,6 +135,189 @@ effect = "human"
     });
   }
 
+  describe("rule matching (ticket 03, decision 02, ADR 0006): a Rule matches an EXECUTED command, not raw text", () => {
+    test("a wrapped launcher still denies with no launcher table: timeout 60 gh pr merge 58", async () => {
+      await deny("timeout 60 gh pr merge 58");
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("sudo gh pr merge 58 still denies, the same way", async () => {
+      await deny("sudo gh pr merge 58");
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("bash -c re-parses its script string and still denies", async () => {
+      await deny('bash -c "gh pr merge 58"');
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("eval re-parses its argument and still denies", async () => {
+      await deny('eval "gh pr merge 58"');
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("a $(...) command substitution is its own candidate and still denies", async () => {
+      await deny("echo $(gh pr merge 58)");
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    test("a backtick substitution still denies", async () => {
+      await deny("echo `gh pr merge 58`");
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+
+    /**
+     * The five live false positives recorded while charting this map
+     * (map.md's Problem section; decision 02's Log) — a quoted string and a
+     * heredoc body are data, never an executed command's own words. Each
+     * one is reconstructed from what the Log and the research note
+     * describe, not replayed byte-for-byte (none of those sessions recorded
+     * the literal command text verbatim) — the regression is the SHAPE of
+     * the false positive, which this asserts directly.
+     */
+    describe("the five recorded live false positives never deny", () => {
+      test("the reviewer's rg: a search that only mentions the words inside a quoted string", async () => {
+        const result = await runCli(["hook", "claude"], {
+          home,
+          stdin: JSON.stringify({
+            session_id: "sess-1",
+            hook_event_name: "PreToolUse",
+            tool_name: "Bash",
+            tool_input: { command: 'rg "gh pr merge"' },
+          }),
+        });
+
+        expect(result.stdout.trim()).toBe("");
+        const status = await runCli(["status"], { home });
+        expect(status.stdout).not.toContain("#1");
+      });
+
+      test("inbox #2: a heredoc writing a ticket file whose text names the reserved command", async () => {
+        await deny(
+          "cat <<'EOF' > ticket.md\n" +
+            "Blocked by: none. The example command is gh pr merge, written here as data.\n" +
+            "EOF\n",
+        );
+
+        const status = await runCli(["status"], { home });
+        expect(status.stdout).not.toContain("#1");
+      });
+
+      test("inbox #4: a heredoc writing the Tenaza handoff, whose text names the reserved command", async () => {
+        await deny(
+          "cat <<'EOF' > handoff.md\n" +
+            "Pending by hand: one gh pr merge answered live, one left to lapse into pending.\n" +
+            "EOF\n",
+        );
+
+        const status = await runCli(["status"], { home });
+        expect(status.stdout).not.toContain("#1");
+      });
+
+      test("inbox #5: a heredoc writing a benchmark fixture, whose text names the reserved command", async () => {
+        await deny(
+          "cat <<'EOF' > bench-fixture.md\n" +
+            "The fixture below uses gh pr merge as an example no shipped Rule should catch here.\n" +
+            "EOF\n",
+        );
+
+        const status = await runCli(["status"], { home });
+        expect(status.stdout).not.toContain("#1");
+      });
+
+      test("a commit message that only names the reserved command is data too (User Story 4)", async () => {
+        await deny('git commit -m "docs: mention gh pr merge and git worktree remove as examples"');
+
+        const status = await runCli(["status"], { home });
+        expect(status.stdout).not.toContain("#1");
+      });
+    });
+
+    test("a parse failure falls back to the v0.1 substring match and records reason parse_error", async () => {
+      await deny('echo "unterminated gh pr merge');
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+
+      const { EventSchema } = await import("../src/contract/event");
+      const raw = await Bun.file(path.join(home, "state", "sessions", "sess-1.jsonl")).text();
+      const events = raw
+        .trim()
+        .split("\n")
+        .map((line) => EventSchema.parse(JSON.parse(line)));
+      const decided = events.find((event) => event.type === "action.decided");
+      expect(decided?.type === "action.decided" ? decided.data.rule.reason : undefined).toBe(
+        "parse_error",
+      );
+    });
+
+    test("a parse failure with nothing matching by raw substring either is allowed, not a crash", async () => {
+      const result = await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-1",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: 'echo "unterminated and unrelated' },
+        }),
+      });
+
+      expect(result.exitCode).toBe(0);
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("a NESTED bash -c that fails to parse is a full parse failure, not a silent drop of that layer (orchestrator review)", async () => {
+      // The outer `bash -c '...'` parses cleanly; only the WRAPPED script
+      // (`gh pr merge 58; if`, a dangling `if`) fails. Before the fix, the
+      // outer argv kept the whole thing as one quoted token and the Rule
+      // never matched — allowed, where v0.1's raw substring denied it.
+      await deny("bash -c 'gh pr merge 58; if'");
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+
+      const { EventSchema } = await import("../src/contract/event");
+      const raw = await Bun.file(path.join(home, "state", "sessions", "sess-1.jsonl")).text();
+      const decided = raw
+        .trim()
+        .split("\n")
+        .map((line) => EventSchema.parse(JSON.parse(line)))
+        .find((event) => event.type === "action.decided");
+      expect(decided?.type === "action.decided" ? decided.data.rule.reason : undefined).toBe(
+        "parse_error",
+      );
+    });
+
+    test("a 4-deep nested bash -c still denies — hitting the reparse depth cap falls back to the raw substring, never a false allow", async () => {
+      // Each level is single-quoted via the standard close/insert/reopen
+      // idiom (`'"'"'`), so this is valid bash at every depth (verified by
+      // actually round-tripping it through a real bash subprocess while
+      // building this fixture). MAX_REPARSE_DEPTH allows 3 successful
+      // unwraps, so the 4th layer is left unresolved on purpose.
+      const singleQuote = (text: string): string => `'${text.split("'").join(`'"'"'`)}'`;
+      let script = "gh pr merge 58";
+      for (let depth = 0; depth < 4; depth++) script = `bash -c ${singleQuote(script)}`;
+
+      await deny(script);
+
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1");
+    });
+  });
+
   test("tenaza run <id> on a stored `true` closes the item as done", async () => {
     await deny("true");
 

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readHealth } from "../src/health";
+import { readNotificationRecorder } from "../src/notify";
 import { healthPath, policyPath, sessionLogPath } from "../src/paths";
 import { runCli } from "./support/cli";
 
@@ -194,5 +196,126 @@ effect = "human"
 
     expect(status.exitCode).toBe(0);
     expect(statusline.exitCode).toBe(0);
+  });
+});
+
+/**
+ * Black-box seam the ticket names (ticket 02): `tenaza hook claude` with a
+ * `SessionStart` payload, in a fresh temporary `TENAZA_HOME` — the
+ * self-check itself. A separate `describe` from ticket 01's own, so each
+ * test starts from a truly fresh home (no default `policy.toml` already
+ * written) rather than the one the outer suite's `beforeEach` seeds.
+ */
+describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning channels", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-selfcheck-hook-"));
+  });
+
+  afterEach(() => {
+    try {
+      chmodSync(path.join(home, "state"), 0o755);
+    } catch {
+      // Not every test leaves `state/` behind, or leaves it unwritable.
+    }
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function sessionStartPayload(sessionId: string): string {
+    return JSON.stringify({ session_id: sessionId, hook_event_name: "SessionStart", cwd: "/tmp/project" });
+  }
+
+  async function sessionStart(sessionId = "sess-start") {
+    return runCli(["hook", "claude"], { home, stdin: sessionStartPayload(sessionId) });
+  }
+
+  test("a fresh, healthy home: SessionStart prints nothing, writes no health.json, and notifies nobody", async () => {
+    const result = await sessionStart();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("");
+    expect(existsSync(healthPath(home))).toBe(false);
+    expect(readNotificationRecorder(home)).toHaveLength(0);
+  });
+
+  test("a malformed policy.toml WITH a last-known-good Policy: a systemMessage naming the fallback, health.json not grave, no notification", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+    await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-0",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      }),
+    }); // establishes the LKG via an ordinary healthy read
+
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken");
+
+    const result = await sessionStart();
+    expect(result.exitCode).toBe(0);
+    const response = JSON.parse(result.stdout);
+    expect(response.systemMessage).toContain("using the last valid policy");
+    expect(response.hookSpecificOutput).toBeUndefined();
+
+    expect(readHealth(home)).toMatchObject({ grave: false });
+    expect(readNotificationRecorder(home)).toHaveLength(0); // not grave — no macOS notification
+  });
+
+  test("a malformed policy.toml with NO last-known-good Policy ever: a grave systemMessage and grave health.json", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken");
+
+    const result = await sessionStart();
+    expect(result.exitCode).toBe(0);
+    const response = JSON.parse(result.stdout);
+    expect(response.systemMessage).toContain("no Rules are active");
+    expect(response.hookSpecificOutput).toBeUndefined();
+
+    expect(readHealth(home)).toMatchObject({ grave: true });
+  });
+
+  test("an unwritable state directory: reported by name in the systemMessage, no notification — and the next healthy SessionStart leaves nothing behind", async () => {
+    mkdirSync(path.join(home, "state"), { recursive: true });
+    chmodSync(path.join(home, "state"), 0o500);
+
+    const result = await sessionStart();
+    expect(result.exitCode).toBe(0);
+    const response = JSON.parse(result.stdout);
+    expect(response.systemMessage).toContain("state directory");
+
+    // `state/` being unwritable also means `recordDegraded`'s OWN write of
+    // `health.json` (under that same directory) can't land either — the
+    // systemMessage above is the one channel that still gets through on a
+    // call this broken. `recordDegraded` never throws over it (its own
+    // doc), so the hook call itself stays non-blocking either way.
+    expect(readHealth(home)).toBeUndefined();
+    expect(readNotificationRecorder(home)).toHaveLength(0); // not grave — and couldn't be written anyway
+
+    chmodSync(path.join(home, "state"), 0o755);
+    await sessionStart("sess-start-2");
+    expect(existsSync(healthPath(home))).toBe(false);
+  });
+
+  test("SubagentStart never runs the self-check — it is SessionStart's own job, once per top-level session", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken"); // grave, if the self-check ran here too
+
+    const result = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-parent",
+        hook_event_name: "SubagentStart",
+        agent_id: "sub-1",
+        cwd: "/tmp/project",
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("");
+    expect(existsSync(healthPath(home))).toBe(false);
+    expect(readNotificationRecorder(home)).toHaveLength(0);
   });
 });

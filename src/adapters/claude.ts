@@ -6,6 +6,7 @@ import {
   usageSampledEvent,
 } from "../contract/event";
 import { decideAction } from "../decide";
+import { runSelfCheck } from "../health";
 import { appendEvent, readSessionEvents } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { loadPolicy, policyWarning } from "../policy";
@@ -265,16 +266,28 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
   }
 }
 
-/** SessionStart: a new top-level Session — no parent. */
+/**
+ * SessionStart: a new top-level Session — no parent. Its own append is
+ * wrapped in its own catch (ADR 0007, ticket 02) — recording the start is a
+ * side effect, not a decision, and a write failure here (e.g. an unwritable
+ * state dir) must never crash the whole hook call and skip the self-check
+ * that `runClaudeHookSafely` runs right after. A Session left without its
+ * own `session.started` still gets one backfilled from a later Event's
+ * `cwd` (ticket 05, M6).
+ */
 export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
-  appendEvent(
-    home,
-    sessionStartedEvent(payload.session_id, {
-      runtime: "claude",
-      cwd: payload.cwd,
-      capabilities: CLAUDE_CAPABILITIES,
-    }),
-  );
+  try {
+    appendEvent(
+      home,
+      sessionStartedEvent(payload.session_id, {
+        runtime: "claude",
+        cwd: payload.cwd,
+        capabilities: CLAUDE_CAPABILITIES,
+      }),
+    );
+  } catch {
+    // See the doc comment above.
+  }
 }
 
 /** SubagentStart: its own Session, keyed by `agent_id`, parented to `session_id`. */
@@ -424,6 +437,22 @@ function withPolicyDegradation(home: string, response: ClaudeHookResponse | unde
 }
 
 /**
+ * Compose the SessionStart self-check (ADR 0007, ticket 02) onto whatever
+ * `handleClaudeHook` already did for this event — today, always nothing:
+ * `handleSessionStart` only ever appends an Event and returns void. Mirrors
+ * `withPolicyDegradation`'s own shape for PreToolUse: every check passing
+ * stays silent, any check failing becomes BOTH this call's `systemMessage`
+ * and the `degraded` report `runHookClaude` (cli.ts) writes to
+ * `state/health.json` — and, when it's grave, fires the macOS notification
+ * through the same report.
+ */
+function withSelfCheck(home: string): HookOutcome {
+  const fault = runSelfCheck(home);
+  if (!fault) return { output: undefined };
+  return { output: { systemMessage: fault.message }, degraded: fault };
+}
+
+/**
  * Run one `tenaza hook claude` call (ADR 0007, ticket 01): a top-level
  * try/catch around the ENTIRE dispatch — payload parsing included — so ANY
  * unanticipated fault degrades to "no block, the call goes ahead" instead
@@ -433,17 +462,27 @@ function withPolicyDegradation(home: string, response: ClaudeHookResponse | unde
  * further down (`decideAction`, `loadPolicy`, `readLog`) and surface here
  * as `degraded` rather than a throw; this catch is strictly the backstop
  * for everything else — a malformed payload among them.
+ *
+ * Two events get their own post-processing on top of `handleClaudeHook`'s
+ * own dispatch (ticket 02): PreToolUse re-checks the Policy
+ * (`withPolicyDegradation`, ticket 01), and SessionStart runs the self-check
+ * (`withSelfCheck`, once per top-level session — never SubagentStart, which
+ * stays exactly as `handleClaudeHook` already left it). Every other event
+ * passes `handleClaudeHook`'s response straight through, unchanged.
  */
 export function runClaudeHookSafely(home: string, raw: string): HookOutcome {
   try {
     const payload = JSON.parse(raw);
     const response = handleClaudeHook(home, payload);
 
-    if (payload?.hook_event_name !== "PreToolUse") {
-      return { output: response };
+    if (payload?.hook_event_name === "PreToolUse") {
+      return withPolicyDegradation(home, response);
+    }
+    if (payload?.hook_event_name === "SessionStart") {
+      return withSelfCheck(home);
     }
 
-    return withPolicyDegradation(home, response);
+    return { output: response };
   } catch (error) {
     const message = `Tenaza guardrail degraded (${faultMessage(error)}) — Claude Code's own permission checks still apply.`;
     return { output: faultResponse(message), degraded: { message, grave: false } };

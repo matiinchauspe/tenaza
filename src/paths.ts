@@ -85,3 +85,14 @@ export function notifySoundStatePath(home: string = tenazaHome()): string {
 export function policyLkgPath(home: string = tenazaHome()): string {
   return path.join(home, "state", "policy.lkg.json");
 }
+
+/**
+ * Tenaza's own degraded state (ADR 0007, ticket 01) — written OUTSIDE the
+ * Session logs that might be the very thing that's broken, so a corrupt log
+ * can never also hide the signal that something is corrupt. Written on a
+ * degraded hook answer, cleared on the next healthy one; `tenaza
+ * status`/`statusline` reading it to show a mark is a later ticket.
+ */
+export function healthPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "health.json");
+}

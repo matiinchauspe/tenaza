@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 import { runClaudeHookSafely } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
-import { recordDegraded, recordHealthy } from "./health";
+import { readHealth, recordDegraded, recordHealthy } from "./health";
 import { runInit } from "./init";
+import { notifyGraveFault } from "./notify";
 import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import {
   type ResolutionOutcome,
@@ -18,12 +19,42 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * `hook claude` (ADR 0007, ticket 01): the whole dispatch runs through
+ * Has Tenaza just crossed INTO this grave fault, rather than already being
+ * in it (orchestrator review, ticket 02)? Reads `state/health.json` as it
+ * stood BEFORE this call's own `recordDegraded` — absent, healthy, a
+ * non-grave fault, or a DIFFERENT grave message (a distinct fault earns its
+ * own alert even while another grave one never cleared) all count as a
+ * transition; the SAME grave message repeating does not. Without this, a
+ * grave Policy fault — which makes EVERY PreToolUse call grave — would ring
+ * once per Bash/MCP call across every parallel agent, not once per fault
+ * (the spec's own "a macOS notification... for grave faults", singular per
+ * fault, not per call).
+ *
+ * Concurrency: this read and the `recordDegraded` write right after it are
+ * two separate, non-atomic steps, and `tenaza hook claude` runs as a fresh
+ * process per call — two hooks racing on the FIRST grave call can both read
+ * "healthy" before either writes, so both notify. Accepted, not fixed with
+ * a lock: it costs one duplicate banner on the rare race that opens a
+ * grave state, never a banner per ordinary call once it's already open.
+ */
+function enteredGraveState(home: string, degraded: { message: string; grave: boolean }): boolean {
+  if (!degraded.grave) return false;
+  const previous = readHealth(home);
+  return previous === undefined || !previous.grave || previous.cause !== degraded.message;
+}
+
+/**
+ * `hook claude` (ADR 0007, tickets 01-02): the whole dispatch runs through
  * `runClaudeHookSafely`, which never throws — on any fault, known or not,
  * it hands back a non-blocking answer plus a `systemMessage` naming it.
  * This entry point's own job is just the surrounding bookkeeping: read
- * stdin, print whatever comes back, and keep `state/health.json` in step
- * (written on a degraded answer, cleared by the next healthy one).
+ * stdin, print whatever comes back, keep `state/health.json` in step
+ * (written on a degraded answer, cleared by the next healthy one), and —
+ * the ONE call site, so it covers a grave fault however it was noticed
+ * (the SessionStart self-check or a PreToolUse call hitting the same
+ * Policy state) — fire the macOS notification on the TRANSITION into a
+ * grave state only, never on every call it stays grave through (see
+ * `enteredGraveState`'s own doc).
  */
 async function runHookClaude(): Promise<number> {
   const home = tenazaHome();
@@ -31,7 +62,9 @@ async function runHookClaude(): Promise<number> {
   const { output, degraded } = runClaudeHookSafely(home, raw);
 
   if (degraded) {
+    const shouldNotify = enteredGraveState(home, degraded);
     recordDegraded(home, degraded.message, degraded.grave);
+    if (shouldNotify) notifyGraveFault(home, degraded.message);
   } else {
     recordHealthy(home);
   }

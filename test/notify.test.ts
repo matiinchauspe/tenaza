@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { usageSampledEvent } from "../src/contract/event";
 import {
+  buildGraveFaultNotification,
   buildInboxOpenedNotification,
   buildThresholdCrossedNotification,
   maxUsageSample,
   NOTIFY_BURST_WINDOW_MS,
+  notifyGraveFault,
   readNotificationRecorder,
   sendNotification,
   shouldNotifyThresholdCrossing,
@@ -137,6 +139,49 @@ describe("buildThresholdCrossedNotification (🔴)", () => {
     expect(notification.subtitle).toBe("reservee / RES-131 / sesión b71");
     expect(notification.message).toBe("242k tokens");
     expect(notification.tag).toBe("threshold-b71");
+  });
+});
+
+describe("buildGraveFaultNotification (ADR 0007, ticket 02: grave-only)", () => {
+  test("es-AR chrome around the (English) fault message, a stable deterministic tag", () => {
+    const notification = buildGraveFaultNotification("policy.toml is invalid and no last-known-good policy exists yet — no Rules are active.");
+
+    expect(notification).toEqual({
+      tag: "health-grave",
+      title: "🔴 Tenaza · degradado",
+      subtitle: "guardrail apagado",
+      message: "policy.toml is invalid and no last-known-good policy exists yet — no Rules are active.",
+    });
+  });
+
+  test("the tag never changes with the message — never random, never time-based", () => {
+    expect(buildGraveFaultNotification("a").tag).toBe(buildGraveFaultNotification("b").tag);
+  });
+});
+
+describe("notifyGraveFault (the ONE call site: cli.ts's runHookClaude, when degraded.grave)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-grave-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("records the grave-fault notification through the SAME recorder seam", () => {
+    notifyGraveFault(home, "no Rules are active", new Date(0));
+
+    const recorded = readNotificationRecorder(home);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.title).toBe("🔴 Tenaza · degradado");
+    expect(recorded[0]?.message).toBe("no Rules are active");
+  });
+
+  test("never throws, even when its own bookkeeping fails", () => {
+    writeFileSync(path.join(home, "state"), "not a directory");
+    expect(() => notifyGraveFault(home, "whatever")).not.toThrow();
   });
 });
 

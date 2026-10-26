@@ -136,6 +136,42 @@ export function buildThresholdCrossedNotification(context: {
   };
 }
 
+/**
+ * 🔴 — Tenaza itself is gravely degraded (ADR 0007, ticket 02): "binary
+ * missing" can never reach this call site at all (nothing Tenaza owns runs
+ * when its own binary isn't on PATH — that case prints its guard message
+ * straight from `hooks.json`'s shell form, no notifier involved), so in
+ * practice this fires for the OTHER grave case decision 01 names: no
+ * last-known-good Policy ever, where every Rule is off. `message` carries
+ * whatever `degraded.message` already says (English, same as every other
+ * systemMessage) — only the title/subtitle chrome around it is es-AR, per
+ * the project's own human-facing-copy split.
+ */
+export function buildGraveFaultNotification(message: string): Notification {
+  return {
+    tag: "health-grave",
+    title: "🔴 Tenaza · degradado",
+    subtitle: "guardrail apagado",
+    message,
+  };
+}
+
+/**
+ * Fire 🔴 for a grave fault — the ONE call site (`cli.ts`'s `runHookClaude`,
+ * right where `degraded.grave` is already decided, so it covers a grave
+ * fault however it was noticed: the SessionStart self-check or a PreToolUse
+ * call hitting the same Policy state). Swallows its own lookups failing
+ * too, not just `sendNotification`'s own guard — same shape as
+ * `notifyNewInboxItem`/`notifyThresholdCrossed` above.
+ */
+export function notifyGraveFault(home: string, message: string, now: Date = new Date()): void {
+  try {
+    sendNotification(home, buildGraveFaultNotification(message), now);
+  } catch {
+    // See `sendNotification`'s own doc.
+  }
+}
+
 function readLastSoundAt(home: string): Date | undefined {
   const file = notifySoundStatePath(home);
   if (!existsSync(file)) return undefined;

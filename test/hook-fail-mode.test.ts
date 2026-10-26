@@ -202,9 +202,10 @@ effect = "human"
 /**
  * Black-box seam the ticket names (ticket 02): `tenaza hook claude` with a
  * `SessionStart` payload, in a fresh temporary `TENAZA_HOME` — the
- * self-check itself. A separate `describe` from ticket 01's own, so each
- * test starts from a truly fresh home (no default `policy.toml` already
- * written) rather than the one the outer suite's `beforeEach` seeds.
+ * self-check and the grave-only notification via the recorder. A separate
+ * `describe` from ticket 01's own, so each test starts from a truly fresh
+ * home (no default `policy.toml` already written) rather than the one the
+ * outer suite's `beforeEach` seeds.
  */
 describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning channels", () => {
   let home: string;
@@ -264,7 +265,7 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(readNotificationRecorder(home)).toHaveLength(0); // not grave — no macOS notification
   });
 
-  test("a malformed policy.toml with NO last-known-good Policy ever: a grave systemMessage and grave health.json", async () => {
+  test("a malformed policy.toml with NO last-known-good Policy ever: a grave systemMessage, grave health.json, and the ONE macOS notification", async () => {
     mkdirSync(path.join(home, "config"), { recursive: true });
     writeFileSync(policyPath(home), "[[rule\nmatch = broken");
 
@@ -275,6 +276,63 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(response.hookSpecificOutput).toBeUndefined();
 
     expect(readHealth(home)).toMatchObject({ grave: true });
+
+    const notifications = readNotificationRecorder(home);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.title).toBe("🔴 Tenaza · degradado");
+  });
+
+  test("a PreToolUse call hitting the SAME grave Policy fault also fires the macOS notification — the channel is not SessionStart-only", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken");
+
+    const result = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "gh pr merge 1" },
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
+  test("orchestrator review: N consecutive grave calls notify exactly ONCE, not once per call", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken"); // grave: no LKG ever
+
+    await sessionStart("sess-a");
+    await sessionStart("sess-b");
+    await sessionStart("sess-c");
+
+    expect(readHealth(home)).toMatchObject({ grave: true }); // still grave throughout
+    expect(readNotificationRecorder(home)).toHaveLength(1); // the SAME grave fault persisting rings once
+  });
+
+  test("orchestrator review: a healthy answer in between lets the next grave fault notify again", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken"); // grave: no LKG ever
+
+    await sessionStart("sess-a");
+    await sessionStart("sess-b");
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+
+    // Clear the fault: no policy.toml at all is an ordinary healthy state
+    // (`policyWarning` returns undefined when the file is simply absent).
+    rmSync(policyPath(home), { force: true });
+    await sessionStart("sess-c");
+    expect(readHealth(home)).toBeUndefined();
+
+    // The grave fault recurs — it's a NEW transition into grave, so it
+    // notifies again.
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken again");
+    await sessionStart("sess-d");
+
+    expect(readHealth(home)).toMatchObject({ grave: true });
+    expect(readNotificationRecorder(home)).toHaveLength(2);
   });
 
   test("an unwritable state directory: reported by name in the systemMessage, no notification — and the next healthy SessionStart leaves nothing behind", async () => {

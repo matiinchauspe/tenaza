@@ -202,10 +202,11 @@ effect = "human"
 /**
  * Black-box seam the ticket names (ticket 02): `tenaza hook claude` with a
  * `SessionStart` payload, in a fresh temporary `TENAZA_HOME` — the
- * self-check and the grave-only notification via the recorder. A separate
- * `describe` from ticket 01's own, so each test starts from a truly fresh
- * home (no default `policy.toml` already written) rather than the one the
- * outer suite's `beforeEach` seeds.
+ * self-check, the grave-only notification via the recorder, and the
+ * statusline mark end to end. A separate `describe` from ticket 01's own,
+ * so each test starts from a truly fresh home (no default `policy.toml`
+ * already written) rather than the one the outer suite's `beforeEach`
+ * seeds.
  */
 describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning channels", () => {
   let home: string;
@@ -280,6 +281,9 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     const notifications = readNotificationRecorder(home);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.title).toBe("🔴 Tenaza · degradado");
+
+    const statusline = await runCli(["statusline"], { home });
+    expect(statusline.stdout).toContain("degradado");
   });
 
   test("a PreToolUse call hitting the SAME grave Policy fault also fires the macOS notification — the channel is not SessionStart-only", async () => {

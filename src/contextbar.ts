@@ -8,8 +8,9 @@
 export const BAR_CELLS = 15;
 export const TOKENS_PER_CELL = 20_000;
 
-const RED = "\x1b[31m";
-const RESET = "\x1b[0m";
+/** The one "needs you" red the line uses — reused by `statusline.ts`'s own "degradado" mark (ADR 0007, ticket 02) so the statusline never shows two different reds for two different urgencies. */
+export const RED = "\x1b[31m";
+export const RESET = "\x1b[0m";
 
 function clampCell(cell: number): number {
   return Math.max(0, Math.min(BAR_CELLS, cell));

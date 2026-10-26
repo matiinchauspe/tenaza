@@ -8,6 +8,8 @@ import {
   sessionStartedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
+import { RED, RESET } from "../src/contextbar";
+import { recordDegraded, recordHealthy } from "../src/health";
 import { appendEvent } from "../src/log";
 import { deriveStatuslineCounts, firstWords, formatStatusline } from "../src/statusline";
 
@@ -176,5 +178,23 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
     appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 120_000 }));
 
     expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 1 >100k · ✉ 0");
+  });
+
+  test("ADR 0007 (ticket 02): a red 'degradado' mark while state/health.json reports a fault", () => {
+    expect(formatStatusline(home)).not.toContain("degradado");
+
+    recordDegraded(home, "policy.toml is invalid", true);
+
+    expect(formatStatusline(home)).toBe(`tenaza │ ${RED}degradado${RESET} · ● 0 vivas · ⚑ 0 · ✉ 0`);
+  });
+
+  test("ADR 0007 (ticket 02): the mark clears the moment the next healthy answer does", () => {
+    recordDegraded(home, "a torn log line was skipped");
+    expect(formatStatusline(home)).toContain("degradado");
+
+    recordHealthy(home);
+
+    expect(formatStatusline(home)).not.toContain("degradado");
+    expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
   });
 });

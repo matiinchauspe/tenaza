@@ -1,3 +1,5 @@
+import { RED, RESET } from "./contextbar";
+import { readHealth } from "./health";
 import { type InboxItem, deriveInbox } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
@@ -95,6 +97,20 @@ function formatInbox(count: number, top: InboxItem | undefined): string {
 }
 
 /**
+ * The "degradado" mark (ADR 0007, ticket 02): red, exactly while
+ * `state/health.json` reports ANY fault — grave or not, since the
+ * statusline is the one AMBIENT channel (decision 01's own word for it)
+ * that reaches a human who never reads a `systemMessage` and never sees a
+ * SessionStart warning. Empty string, never a bare space, when healthy —
+ * so a caller can splice it into the line without a stray `·` showing up
+ * for nothing. Reuses `contextbar.ts`'s own red: one "this needs you" color
+ * across the line, never two.
+ */
+function formatHealthMark(home: string): string {
+  return readHealth(home) === undefined ? "" : `${RED}degradado${RESET} ·`;
+}
+
+/**
  * `tenaza │ ● <n> vivas · ⚑ <n> >200k · ✉ <n> → #<id> <first words>` — the
  * spec's own format (q19), calm when `⚑` and `✉` are both 0 (no `>Nk`
  * suffix, no arrow). The `>Nk` suffix reflects the Policy's ACTUAL threshold
@@ -106,9 +122,11 @@ export function formatStatusline(home: string = tenazaHome()): string {
   const counts = deriveStatuslineCounts(home);
   const thresholdTokens = loadPolicy(home).thresholdTokens;
   const top = mostUrgentInboxItem(home);
+  const healthMark = formatHealthMark(home);
 
   return [
     "tenaza │",
+    ...(healthMark ? [healthMark] : []),
     `● ${counts.live} vivas ·`,
     `${formatFlagged(counts.flagged, thresholdTokens)} ·`,
     formatInbox(counts.inbox, top),

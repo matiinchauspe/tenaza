@@ -74,21 +74,21 @@ threshold_tokens = 150000
     expect(loadPolicy(home).thresholdTokens).toBe(150_000);
   });
 
-  test("matchRule finds a human rule by substring on the command", () => {
+  test("matchRule finds a human rule as a contiguous run in the parsed command", async () => {
     const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
     const action = { kind: "shell" as const, command: "gh pr merge 58 --merge", tool: "Bash" };
 
-    expect(matchRule(action, policy)).toEqual({ match: "gh pr merge", effect: "human" });
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
   });
 
-  test("matchRule returns undefined when nothing matches", () => {
+  test("matchRule returns undefined when nothing matches", async () => {
     const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
     const action = { kind: "shell" as const, command: "ls -la", tool: "Bash" };
 
-    expect(matchRule(action, policy)).toBeUndefined();
+    expect(await matchRule(action, policy)).toBeUndefined();
   });
 
-  test("matchRule returns the first matching rule, in file order", () => {
+  test("matchRule returns the first matching rule, in file order", async () => {
     const policy = {
       rules: [
         { match: "gh pr", effect: "flag" as const },
@@ -97,7 +97,90 @@ threshold_tokens = 150000
     };
     const action = { kind: "shell" as const, command: "gh pr merge 58", tool: "Bash" };
 
-    expect(matchRule(action, policy)).toEqual({ match: "gh pr", effect: "flag" });
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr", effect: "flag" } });
+  });
+});
+
+describe("matchRule (ticket 03, decision 02): matching parsed commands, not raw substrings", () => {
+  test("a wrapped launcher matches with no launcher table: timeout 60 gh pr merge 58", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: "timeout 60 gh pr merge 58", tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
+  });
+
+  test("sudo gh pr merge 58 matches the same way", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: "sudo gh pr merge 58", tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
+  });
+
+  test("a search that only mentions the words in a quoted string never matches", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: 'rg "gh pr merge"', tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toBeUndefined();
+  });
+
+  test("a heredoc body that only writes the reserved words as text never matches", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = {
+      kind: "shell" as const,
+      command: "cat <<'EOF' > ticket.md\nmentions gh pr merge as an example\nEOF\n",
+      tool: "Bash",
+    };
+
+    expect(await matchRule(action, policy)).toBeUndefined();
+  });
+
+  test("bash -c re-parses its script and still matches", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: 'bash -c "gh pr merge 58"', tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
+  });
+
+  test("eval re-parses its argument and still matches", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: 'eval "gh pr merge 58"', tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
+  });
+
+  test("a command substitution $(...) is its own candidate and still matches", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: "echo $(gh pr merge 58)", tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toEqual({ rule: { match: "gh pr merge", effect: "human" } });
+  });
+
+  test("a parse failure falls back to the v0.1 raw-substring match and reports reason parse_error", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = {
+      kind: "shell" as const,
+      command: 'echo "unterminated gh pr merge',
+      tool: "Bash",
+    };
+
+    expect(await matchRule(action, policy)).toEqual({
+      rule: { match: "gh pr merge", effect: "human" },
+      reason: "parse_error",
+    });
+  });
+
+  test("a parse failure that still matches nothing by raw substring returns undefined, not a reason with no rule", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: 'echo "unterminated and unrelated', tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toBeUndefined();
+  });
+
+  test("the prefilter: a command naming none of the Policy's Rules is undefined with no parse attempted", async () => {
+    const policy = { rules: [{ match: "gh pr merge", effect: "human" as const }] };
+    const action = { kind: "shell" as const, command: "ls -la", tool: "Bash" };
+
+    expect(await matchRule(action, policy)).toBeUndefined();
   });
 });
 

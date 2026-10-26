@@ -4,6 +4,7 @@ import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import { type Action, EffectSchema } from "./contract/event";
 import { policyLkgPath, policyPath, tenazaHome } from "./paths";
+import { matchesContiguousRun, parseExecutedCommands, words } from "./shellparse";
 
 /**
  * One entry of the Policy: a text pattern matched against a normalized
@@ -169,13 +170,72 @@ export function policyWarning(home: string = tenazaHome()): PolicyWarning | unde
   };
 }
 
+export interface MatchOutcome {
+  rule: Rule;
+  /** Set exactly when the command failed to parse and matching fell back to the v0.1 raw-substring check (ticket 03) — never set on a clean parse. */
+  reason?: "parse_error";
+}
+
 /**
- * The first Rule, in file order, whose `match` text appears in the Action's
- * command. `undefined` means the Action matched nothing. Takes only the
- * `rules` a Policy carries — never the whole `Policy` shape — since matching
- * an Action has nothing to do with the Flag threshold.
+ * Could ANY `shell` Rule's first word possibly appear as a match in
+ * `command`? If none of them is even present as a raw substring, no Rule —
+ * parsed correctly or not — can ever match it: a Rule's full `match` text
+ * can only be a substring of `command` if its own first word is too, and
+ * the SAME holds for a parsed contiguous-run match, since every word a Rule
+ * needs (its first one included) must appear SOMEWHERE in the executed
+ * text for a run to exist. This is the prefilter (decision 02): the cheap
+ * check that lets the hot path skip tree-sitter entirely on an ordinary
+ * Bash call that names no Rule at all.
  */
-export function matchRule(action: Action, policy: Pick<Policy, "rules">): Rule | undefined {
+function mayMatchSomeRule(command: string, rules: readonly Rule[]): boolean {
+  return rules.some((rule) => {
+    const [first] = words(rule.match);
+    return first !== undefined && command.includes(first);
+  });
+}
+
+/** The v0.1 behavior: the first Rule, in file order, whose `match` text is a raw substring of the command — the fallback a parse failure degrades to, never "no match" (the guard must never go empty). */
+function matchByRawSubstring(command: string, rules: readonly Rule[]): Rule | undefined {
+  return rules.find((rule) => command.includes(rule.match));
+}
+
+/**
+ * The first Rule, in file order, that matches the Action (ticket 03,
+ * decision 02, ADR 0006): the command is parsed with tree-sitter-bash, and
+ * a Rule matches when its words appear as a CONTIGUOUS RUN anywhere in some
+ * executed command's argv — `timeout 60 gh pr merge 58` and
+ * `sudo gh pr merge 58` match with no launcher table, while `rg "gh pr
+ * merge"`, a heredoc body and a commit message never do, because a quoted
+ * string stays one argv word. A parse failure or parser error falls back to
+ * the v0.1 raw-substring match and reports `reason: "parse_error"` — the
+ * caller logs that onto the Event. `undefined` means the Action matched
+ * nothing at all. Takes only the `rules` a Policy carries — never the whole
+ * `Policy` shape — since matching an Action has nothing to do with the Flag
+ * threshold.
+ *
+ * Async because loading the grammar (`parseExecutedCommands`) is: the cost
+ * is paid only past the prefilter below, which is why it stays synchronous
+ * and checked FIRST — most Bash calls return right there, with no `await`
+ * ever reached.
+ */
+export async function matchRule(
+  action: Action,
+  policy: Pick<Policy, "rules">,
+): Promise<MatchOutcome | undefined> {
   if (action.kind !== "shell") return undefined;
-  return policy.rules.find((rule) => action.command.includes(rule.match));
+  if (!mayMatchSomeRule(action.command, policy.rules)) return undefined;
+
+  const parsed = await parseExecutedCommands(action.command);
+  if (!parsed) {
+    const rule = matchByRawSubstring(action.command, policy.rules);
+    return rule ? { rule, reason: "parse_error" } : undefined;
+  }
+
+  for (const rule of policy.rules) {
+    const ruleWords = words(rule.match);
+    if (parsed.commands.some((argv) => matchesContiguousRun(ruleWords, argv))) {
+      return { rule };
+    }
+  }
+  return undefined;
 }

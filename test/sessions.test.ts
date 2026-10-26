@@ -22,7 +22,7 @@ import {
 } from "../src/contract/event";
 
 describe("buildSessionIndex", () => {
-  test("captures runtime, cwd, capabilities and parent from session.started", () => {
+  test("captures runtime, cwd, capabilities and parent from session.started", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("agent-1", {
         parent: "sess-1",
@@ -42,7 +42,7 @@ describe("buildSessionIndex", () => {
     });
   });
 
-  test("a Session with no session.started still gets a node (ticket 01/02's lifecycle-less fixtures)", () => {
+  test("a Session with no session.started still gets a node (ticket 01/02's lifecycle-less fixtures)", async () => {
     const index = buildSessionIndex([
       {
         v: 1,
@@ -62,7 +62,7 @@ describe("buildSessionIndex", () => {
     expect(node?.cwd).toBeUndefined();
   });
 
-  test("lastEventTs tracks the MAX timestamp seen for that Session", () => {
+  test("lastEventTs tracks the MAX timestamp seen for that Session", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionEndedEvent("sess-1", "clear"),
@@ -74,7 +74,7 @@ describe("buildSessionIndex", () => {
     expect(node?.lastEventTs).toBe(node?.endedAt);
   });
 
-  test("contextTokens captures the LATEST usage.sampled, not the max or first (q9)", () => {
+  test("contextTokens captures the LATEST usage.sampled, not the max or first (q9)", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       usageSampledEvent("sess-1", { context_tokens: 242_170 }),
@@ -86,7 +86,7 @@ describe("buildSessionIndex", () => {
     expect(index.get("sess-1")?.contextTokens).toBe(80_000);
   });
 
-  test("a Session with no usage.sampled event has contextTokens undefined, not zero", () => {
+  test("a Session with no usage.sampled event has contextTokens undefined, not zero", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
     ]);
@@ -96,7 +96,7 @@ describe("buildSessionIndex", () => {
 });
 
 describe("nodeCategory and rollupCategory", () => {
-  test("a started, un-ended Session with no open Inbox item is alive", () => {
+  test("a started, un-ended Session with no open Inbox item is alive", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
     ]);
@@ -104,7 +104,7 @@ describe("nodeCategory and rollupCategory", () => {
     expect(nodeCategory(node, new Set())).toBe("alive");
   });
 
-  test("a Session with an open Inbox item waits for the human, even over ended", () => {
+  test("a Session with an open Inbox item waits for the human, even over ended", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionEndedEvent("sess-1", "clear"),
@@ -113,7 +113,7 @@ describe("nodeCategory and rollupCategory", () => {
     expect(nodeCategory(node, new Set(["sess-1"]))).toBe("waits");
   });
 
-  test("an ended subagent (has a parent) reads as done; an ended top-level Session reads as ended", () => {
+  test("an ended subagent (has a parent) reads as done; an ended top-level Session reads as ended", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionEndedEvent("sess-1", "clear"),
@@ -124,7 +124,7 @@ describe("nodeCategory and rollupCategory", () => {
     expect(nodeCategory(index.get("agent-1")!, new Set())).toBe("done");
   });
 
-  test("a parent rolls up its most urgent descendant: waits > alive > done > ended", () => {
+  test("a parent rolls up its most urgent descendant: waits > alive > done > ended", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("parent", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionStartedEvent("child-done", { parent: "parent", runtime: "claude", cwd: "/repo", capabilities: [] }),
@@ -143,7 +143,7 @@ describe("nodeCategory and rollupCategory", () => {
 });
 
 describe("deriveProject", () => {
-  test("a session.labeled project Label wins over everything else", () => {
+  test("a session.labeled project Label wins over everything else", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       { v: 1, ts: "2026-10-23T10:00:01.000Z", session: "sess-1", type: "session.labeled", data: { labels: { project: "reservee" } } },
@@ -152,7 +152,7 @@ describe("deriveProject", () => {
     expect(deriveProject(node, () => "/some/git/root")).toBe("reservee");
   });
 
-  test("falls back to the git root of cwd when there is no Label", () => {
+  test("falls back to the git root of cwd when there is no Label", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo/sub", capabilities: [] }),
     ]);
@@ -160,7 +160,7 @@ describe("deriveProject", () => {
     expect(deriveProject(node, (cwd) => (cwd === "/repo/sub" ? "/repo" : undefined))).toBe("/repo");
   });
 
-  test("falls back to cwd itself when there is no git root", () => {
+  test("falls back to cwd itself when there is no git root", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
     ]);
@@ -168,7 +168,7 @@ describe("deriveProject", () => {
     expect(deriveProject(node, () => undefined)).toBe("/tmp/scratch");
   });
 
-  test("a Session with no known cwd (no session.started) groups under one unknown-project bucket", () => {
+  test("a Session with no known cwd (no session.started) groups under one unknown-project bucket", async () => {
     const index = buildSessionIndex([
       {
         v: 1,
@@ -186,7 +186,7 @@ describe("deriveProject", () => {
     expect(deriveProject(node, () => undefined)).toBe("(sin proyecto)");
   });
 
-  test("two Sessions with different git roots derive different projects", () => {
+  test("two Sessions with different git roots derive different projects", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("a", { runtime: "claude", cwd: "/repos/tenaza", capabilities: [] }),
       sessionStartedEvent("b", { runtime: "claude", cwd: "/repos/rudy", capabilities: [] }),
@@ -195,7 +195,7 @@ describe("deriveProject", () => {
     expect(deriveProject(index.get("a")!, resolve)).not.toBe(deriveProject(index.get("b")!, resolve));
   });
 
-  test("a later session.labeled event overrides an earlier key but leaves other keys alone (AC4)", () => {
+  test("a later session.labeled event overrides an earlier key but leaves other keys alone (AC4)", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionLabeledEvent("sess-1", { ticket: "RES-131" }),
@@ -207,7 +207,7 @@ describe("deriveProject", () => {
 });
 
 describe("roleOf", () => {
-  test("a Session with no ticket Label falls back to its structural role", () => {
+  test("a Session with no ticket Label falls back to its structural role", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
@@ -216,7 +216,7 @@ describe("roleOf", () => {
     expect(roleOf(index.get("agent-1")!)).toBe("subagente");
   });
 
-  test("a Session with a ticket Label shows it in place of the role, verbatim (AC3)", () => {
+  test("a Session with a ticket Label shows it in place of the role, verbatim (AC3)", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionLabeledEvent("agent-1", { ticket: "RES-131" }),
@@ -226,7 +226,7 @@ describe("roleOf", () => {
 });
 
 describe("isStalled / categoryWord", () => {
-  test("no recent Event past the threshold reads as stalled", () => {
+  test("no recent Event past the threshold reads as stalled", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
     ]);
@@ -237,7 +237,7 @@ describe("isStalled / categoryWord", () => {
     expect(isStalled(node, new Date(started.getTime() + 1000), 15 * 60 * 1000)).toBe(false);
   });
 
-  test("categoryWord only swaps to the stalled word for the alive category", () => {
+  test("categoryWord only swaps to the stalled word for the alive category", async () => {
     expect(categoryWord("alive", true)).not.toBe(categoryWord("alive", false));
     expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
     expect(categoryWord("done", true)).toBe(categoryWord("done", false));
@@ -256,11 +256,11 @@ describe("renderSessionTree (black box over a temporary TENAZA_HOME)", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("an empty home renders no tree at all", () => {
+  test("an empty home renders no tree at all", async () => {
     expect(renderSessionTree(home)).toBe("");
   });
 
-  test("a subagent renders nested under its parent, under their shared project", () => {
+  test("a subagent renders nested under its parent, under their shared project", async () => {
     appendEvent(
       home,
       sessionStartedEvent("parent", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe", "block"] }),
@@ -292,7 +292,7 @@ describe("renderSessionTree (black box over a temporary TENAZA_HOME)", () => {
     expect(parentLine).toBeDefined();
   });
 
-  test("a denied Session shows waits-for-the-human, es-AR word included", () => {
+  test("a denied Session shows waits-for-the-human, es-AR word included", async () => {
     mkdirSync(path.join(home, "config"), { recursive: true });
     writeFileSync(
       path.join(home, "config", "policy.toml"),
@@ -302,7 +302,7 @@ match = "gh pr merge"
 effect = "human"
 `,
     );
-    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
     const out = renderSessionTree(home);
 
@@ -311,7 +311,7 @@ effect = "human"
     expect(out).toContain("(sin proyecto)");
   });
 
-  test("two Sessions in different git repos land in different project groups", () => {
+  test("two Sessions in different git repos land in different project groups", async () => {
     appendEvent(home, sessionStartedEvent("a", { runtime: "claude", cwd: "/repos/tenaza", capabilities: [] }));
     appendEvent(home, sessionStartedEvent("b", { runtime: "claude", cwd: "/repos/rudy", capabilities: [] }));
 
@@ -323,7 +323,7 @@ effect = "human"
     expect(out).toContain("/repos/rudy");
   });
 
-  test("a Session below the threshold shows no red overflow and no ⚑ (AC3)", () => {
+  test("a Session below the threshold shows no red overflow and no ⚑ (AC3)", async () => {
     appendEvent(
       home,
       sessionStartedEvent("sess-1", {
@@ -342,7 +342,7 @@ effect = "human"
     expect(line).not.toContain("\x1b[31m");
   });
 
-  test("a Session past the default 200k threshold shows the red overflow and ⚑ (AC3)", () => {
+  test("a Session past the default 200k threshold shows the red overflow and ⚑ (AC3)", async () => {
     appendEvent(
       home,
       sessionStartedEvent("sess-1", {
@@ -360,7 +360,7 @@ effect = "human"
     expect(line).toContain("\x1b[31m");
   });
 
-  test("a custom Policy threshold moves the mark and what counts as flagged (AC4)", () => {
+  test("a custom Policy threshold moves the mark and what counts as flagged (AC4)", async () => {
     mkdirSync(path.join(home, "config"), { recursive: true });
     writeFileSync(path.join(home, "config", "policy.toml"), "\n[flag]\nthreshold_tokens = 100000\n");
     appendEvent(
@@ -381,7 +381,7 @@ effect = "human"
     expect(line).toContain("\x1b[31m");
   });
 
-  test("a Session never sampled shows the empty bar and a dash, not a crash", () => {
+  test("a Session never sampled shows the empty bar and a dash, not a crash", async () => {
     appendEvent(
       home,
       sessionStartedEvent("sess-1", {
@@ -398,7 +398,7 @@ effect = "human"
     expect(line).not.toContain("⚑");
   });
 
-  test("a Session from an Adapter WITHOUT the measure Capability shows 'sin datos' — no bar, no ⚑ (ADR 0001, ticket 06 AC1)", () => {
+  test("a Session from an Adapter WITHOUT the measure Capability shows 'sin datos' — no bar, no ⚑ (ADR 0001, ticket 06 AC1)", async () => {
     appendEvent(
       home,
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe"] }),

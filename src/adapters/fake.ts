@@ -52,9 +52,12 @@ function normalizeFakeAction(payload: FakeActionPayload): Action {
  * ADR 0001's degradation — this Adapter never checks `block` itself, it
  * only reports whatever the core already decided, honestly.
  */
-function handleFakeAction(home: string, payload: FakeActionPayload): FakeHookResponse | undefined {
+async function handleFakeAction(
+  home: string,
+  payload: FakeActionPayload,
+): Promise<FakeHookResponse | undefined> {
   const action = normalizeFakeAction(payload);
-  const result = decideAction(home, payload.session, action, FAKE_CAPABILITIES);
+  const result = await decideAction(home, payload.session, action, FAKE_CAPABILITIES);
 
   if (result.decision === "deny") {
     // Unreachable while FAKE_CAPABILITIES excludes "block" — decideAction
@@ -75,7 +78,10 @@ function handleFakeAction(home: string, payload: FakeActionPayload): FakeHookRes
 }
 
 /** Dispatch one fake hook call by its `kind`. Only "action" ever answers back; "start" and "end" just append what they have. */
-export function handleFakeHook(home: string, payload: FakeHookInput): FakeHookResponse | undefined {
+export async function handleFakeHook(
+  home: string,
+  payload: FakeHookInput,
+): Promise<FakeHookResponse | undefined> {
   switch (payload.kind) {
     case "start":
       appendEvent(
@@ -89,7 +95,7 @@ export function handleFakeHook(home: string, payload: FakeHookInput): FakeHookRe
       );
       return undefined;
     case "action":
-      return handleFakeAction(home, payload);
+      return await handleFakeAction(home, payload);
     case "end":
       appendEvent(home, sessionEndedEvent(payload.session, payload.reason ?? "fake_end"));
       return undefined;

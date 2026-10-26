@@ -30,13 +30,13 @@ effect = "flag"
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("declares Capabilities that deliberately EXCLUDE measure and block", () => {
+  test("declares Capabilities that deliberately EXCLUDE measure and block", async () => {
     expect(FAKE_CAPABILITIES).not.toContain("measure");
     expect(FAKE_CAPABILITIES).not.toContain("block");
   });
 
-  test("start appends session.started with its own (narrower) Capabilities", () => {
-    handleFakeHook(home, { kind: "start", session: "sess-1", cwd: "/tmp/scratch" });
+  test("start appends session.started with its own (narrower) Capabilities", async () => {
+    await handleFakeHook(home, { kind: "start", session: "sess-1", cwd: "/tmp/scratch" });
 
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
@@ -46,14 +46,14 @@ effect = "flag"
     });
   });
 
-  test("a human-ruled action CANNOT be denied without block — the response is allow, not deny (AC2)", () => {
-    const response = handleFakeHook(home, { kind: "action", session: "sess-1", command: "gh pr merge 58" });
+  test("a human-ruled action CANNOT be denied without block — the response is allow, not deny (AC2)", async () => {
+    const response = await handleFakeHook(home, { kind: "action", session: "sess-1", command: "gh pr merge 58" });
 
     expect(response?.decision).toBe("allow");
   });
 
-  test("that same action is still RECORDED and SURFACED, not silently dropped (AC2)", () => {
-    handleFakeHook(home, { kind: "action", session: "sess-1", command: "gh pr merge 58" });
+  test("that same action is still RECORDED and SURFACED, not silently dropped (AC2)", async () => {
+    await handleFakeHook(home, { kind: "action", session: "sess-1", command: "gh pr merge 58" });
 
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
@@ -64,8 +64,8 @@ effect = "flag"
     expect(inbox[0]).toMatchObject({ blocked: false, session: "sess-1" });
   });
 
-  test("a flag-ruled action is unaffected — still allowed and logged, exactly as any Adapter would", () => {
-    const response = handleFakeHook(home, { kind: "action", session: "sess-1", command: "railway run -- psql" });
+  test("a flag-ruled action is unaffected — still allowed and logged, exactly as any Adapter would", async () => {
+    const response = await handleFakeHook(home, { kind: "action", session: "sess-1", command: "railway run -- psql" });
 
     expect(response?.decision).toBe("allow");
     const events = readSessionEvents("sess-1", home);
@@ -73,15 +73,15 @@ effect = "flag"
     expect(events[0]).toMatchObject({ type: "action.decided", data: { decision: "allow", rule: { effect: "flag" } } });
   });
 
-  test("an action matching no Rule returns no response and logs nothing", () => {
-    const response = handleFakeHook(home, { kind: "action", session: "sess-1", command: "ls -la" });
+  test("an action matching no Rule returns no response and logs nothing", async () => {
+    const response = await handleFakeHook(home, { kind: "action", session: "sess-1", command: "ls -la" });
 
     expect(response).toBeUndefined();
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("end appends session.ended", () => {
-    handleFakeHook(home, { kind: "end", session: "sess-1", reason: "done" });
+  test("end appends session.ended", async () => {
+    await handleFakeHook(home, { kind: "end", session: "sess-1", reason: "done" });
 
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);

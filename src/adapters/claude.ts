@@ -208,7 +208,10 @@ function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: num
  * separately, below), or it normalized but matched no Rule (allowed and NOT
  * logged, per the Policy's own rule).
  */
-function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookResponse | undefined {
+async function handlePreToolUse(
+  home: string,
+  payload: ClaudeHookPayload,
+): Promise<ClaudeHookResponse | undefined> {
   const action = normalizeClaudeAction(payload);
   if (!action) return undefined;
 
@@ -224,7 +227,7 @@ function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookR
     }
   }
 
-  const result = decideAction(home, payload.session_id, action, CLAUDE_CAPABILITIES);
+  const result = await decideAction(home, payload.session_id, action, CLAUDE_CAPABILITIES);
   const skippedLines = result.logged ? result.skippedLines : undefined;
 
   if (result.decision === "deny") {
@@ -342,13 +345,13 @@ export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayloa
  * event (lifecycle, Stop, PostToolUse) just appends what it has and tells
  * the host nothing.
  */
-export function handleClaudeHook(
+export async function handleClaudeHook(
   home: string,
   payload: ClaudeHookInput,
-): ClaudeHookResponse | undefined {
+): Promise<ClaudeHookResponse | undefined> {
   switch (payload.hook_event_name) {
     case "PreToolUse":
-      return handlePreToolUse(home, payload);
+      return await handlePreToolUse(home, payload);
     case "SessionStart":
       handleSessionStart(home, payload);
       return undefined;
@@ -470,10 +473,10 @@ function withSelfCheck(home: string): HookOutcome {
  * stays exactly as `handleClaudeHook` already left it). Every other event
  * passes `handleClaudeHook`'s response straight through, unchanged.
  */
-export function runClaudeHookSafely(home: string, raw: string): HookOutcome {
+export async function runClaudeHookSafely(home: string, raw: string): Promise<HookOutcome> {
   try {
     const payload = JSON.parse(raw);
-    const response = handleClaudeHook(home, payload);
+    const response = await handleClaudeHook(home, payload);
 
     if (payload?.hook_event_name === "PreToolUse") {
       return withPolicyDegradation(home, response);

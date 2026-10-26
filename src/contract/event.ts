@@ -34,6 +34,14 @@ export type Action = z.infer<typeof ActionSchema>;
 export const RuleRefSchema = z.object({
   match: z.string(),
   effect: EffectSchema,
+  /**
+   * Set exactly when THIS match came from the v0.1 raw-substring fallback
+   * because the command failed to parse (ticket 03, decision 02, ADR
+   * 0006) — absent on a clean tree-sitter match, never written as
+   * `undefined`. A per-decision fact about how the match was reached, not
+   * a property of the Rule itself (which never carries this).
+   */
+  reason: z.enum(["parse_error"]).optional(),
 });
 
 const SessionStartedData = z.object({
@@ -94,19 +102,25 @@ export type SessionLabeledEvent = Extract<Event, { type: "session.labeled" }>;
 export type SessionEndedEvent = Extract<Event, { type: "session.ended" }>;
 export type UsageSampledEvent = Extract<Event, { type: "usage.sampled" }>;
 
-/** Build an `action.decided` Event envelope with the current timestamp. */
+/**
+ * Build an `action.decided` Event envelope with the current timestamp.
+ * `reason` (ticket 03) is folded into the stored `rule` ref only when it's
+ * actually set — never written as an explicit `undefined` key, so every
+ * pre-ticket-03 caller and assertion is unaffected.
+ */
 export function actionDecidedEvent(
   session: string,
   action: Action,
   decision: Decision,
   rule: { match: string; effect: Effect },
+  reason?: "parse_error",
 ): ActionDecidedEvent {
   return EventSchema.parse({
     v: 1,
     ts: new Date().toISOString(),
     session,
     type: "action.decided",
-    data: { action, decision, rule },
+    data: { action, decision, rule: reason ? { ...rule, reason } : rule },
   }) as ActionDecidedEvent;
 }
 

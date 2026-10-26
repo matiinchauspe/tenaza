@@ -32,8 +32,8 @@ effect = "flag"
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("a human rule denies and opens an Inbox item", () => {
-    const result = decideAction(home, "sess-1", {
+  test("a human rule denies and opens an Inbox item", async () => {
+    const result = await decideAction(home, "sess-1", {
       kind: "shell",
       command: "gh pr merge 58",
       tool: "Bash",
@@ -49,8 +49,8 @@ effect = "flag"
     expect(deriveInbox(home)).toHaveLength(1);
   });
 
-  test("a flag rule allows and still records action.decided", () => {
-    const result = decideAction(home, "sess-1", {
+  test("a flag rule allows and still records action.decided", async () => {
+    const result = await decideAction(home, "sess-1", {
       kind: "shell",
       command: "railway run -- psql",
       tool: "Bash",
@@ -66,8 +66,8 @@ effect = "flag"
     expect(deriveInbox(home)).toHaveLength(0);
   });
 
-  test("an Action matching no Rule is allowed and NOT logged", () => {
-    const result = decideAction(home, "sess-1", {
+  test("an Action matching no Rule is allowed and NOT logged", async () => {
+    const result = await decideAction(home, "sess-1", {
       kind: "shell",
       command: "ls -la",
       tool: "Bash",
@@ -78,9 +78,9 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("Inbox ids stay stable across successive denies in the same session", () => {
-    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
-    const second = decideAction(home, "sess-1", {
+  test("Inbox ids stay stable across successive denies in the same session", async () => {
+    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+    const second = await decideAction(home, "sess-1", {
       kind: "shell",
       command: "gh pr merge 2",
       tool: "Bash",
@@ -90,8 +90,8 @@ effect = "flag"
   });
 
   describe("Capability-gated denial (ADR 0001)", () => {
-    test("a human rule DENIES when the caller declares the block Capability", () => {
-      const result = decideAction(
+    test("a human rule DENIES when the caller declares the block Capability", async () => {
+      const result = await decideAction(
         home,
         "sess-1",
         { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
@@ -101,8 +101,8 @@ effect = "flag"
       expect(result.decision).toBe("deny");
     });
 
-    test("a human rule CANNOT deny without the block Capability — degrades to allow, same shape as a flag match", () => {
-      const result = decideAction(
+    test("a human rule CANNOT deny without the block Capability — degrades to allow, same shape as a flag match", async () => {
+      const result = await decideAction(
         home,
         "sess-1",
         { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
@@ -113,8 +113,8 @@ effect = "flag"
       expect(result.logged).toBe(true);
     });
 
-    test("without block, the Action is still RECORDED — never silently dropped", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+    test("without block, the Action is still RECORDED — never silently dropped", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
         "observe",
       ]);
 
@@ -129,8 +129,8 @@ effect = "flag"
       });
     });
 
-    test("without block, the Action is still SURFACED in the Inbox — not silently dropped", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+    test("without block, the Action is still SURFACED in the Inbox — not silently dropped", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
         "observe",
       ]);
 
@@ -139,8 +139,8 @@ effect = "flag"
       expect(inbox[0]).toMatchObject({ blocked: false, session: "sess-1" });
     });
 
-    test("with no Capabilities given at all, the Policy's own human Rule still enforces as before (back-compat default)", () => {
-      const result = decideAction(home, "sess-1", {
+    test("with no Capabilities given at all, the Policy's own human Rule still enforces as before (back-compat default)", async () => {
+      const result = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "gh pr merge 58",
         tool: "Bash",
@@ -151,8 +151,8 @@ effect = "flag"
   });
 
   describe("notifications (ticket 08: 🟡 fires at the single point an Inbox item opens)", () => {
-    test("a human rule deny also sends exactly one 🟡", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    test("a human rule deny also sends exactly one 🟡", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
       const notifications = readNotificationRecorder(home);
       expect(notifications).toHaveLength(1);
@@ -160,8 +160,8 @@ effect = "flag"
       expect(notifications[0]?.message).toContain("tenaza run 1");
     });
 
-    test("an unenforceable human match (no block Capability) ALSO sends one 🟡 — never silently dropped (ADR 0001)", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
+    test("an unenforceable human match (no block Capability) ALSO sends one 🟡 — never silently dropped (ADR 0001)", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, [
         "observe",
       ]);
 
@@ -171,21 +171,21 @@ effect = "flag"
       expect(notifications[0]?.message).not.toContain("tenaza run");
     });
 
-    test("a flag rule never sends a notification", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "railway run -- psql", tool: "Bash" });
+    test("a flag rule never sends a notification", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "railway run -- psql", tool: "Bash" });
 
       expect(readNotificationRecorder(home)).toEqual([]);
     });
 
-    test("an Action matching no Rule never sends a notification", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
+    test("an Action matching no Rule never sends a notification", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
 
       expect(readNotificationRecorder(home)).toEqual([]);
     });
 
-    test("two successive denies in the same Session send two 🟡, one per Inbox item", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 2", tool: "Bash" });
+    test("two successive denies in the same Session send two 🟡, one per Inbox item", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 2", tool: "Bash" });
 
       const notifications = readNotificationRecorder(home);
       expect(notifications).toHaveLength(2);
@@ -195,13 +195,13 @@ effect = "flag"
   });
 
   describe("ADR 0007 (ticket 01): the decision holds even when a side effect fails", () => {
-    test("a human rule still denies even when logging the decision fails — the id comes back undefined, never a stale one", () => {
+    test("a human rule still denies even when logging the decision fails — the id comes back undefined, never a stale one", async () => {
       // Force a real fs failure: a plain FILE sits where the Session log's
       // own directory needs to be, so `appendEvent`'s `mkdirSync` throws.
       mkdirSync(path.join(home, "state"), { recursive: true });
       writeFileSync(path.join(home, "state", "sessions"), "not a directory");
 
-      const result = decideAction(home, "sess-1", {
+      const result = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "gh pr merge 58",
         tool: "Bash",
@@ -211,11 +211,11 @@ effect = "flag"
       expect(result.decision === "deny" && result.inboxId).toBeUndefined();
     });
 
-    test("a flag rule still allows, and never throws, when logging fails", () => {
+    test("a flag rule still allows, and never throws, when logging fails", async () => {
       mkdirSync(path.join(home, "state"), { recursive: true });
       writeFileSync(path.join(home, "state", "sessions"), "not a directory");
 
-      const result = decideAction(home, "sess-1", {
+      const result = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "railway run -- psql",
         tool: "Bash",
@@ -227,14 +227,14 @@ effect = "flag"
   });
 
   describe("ADR 0007 (ticket 01): a torn line encountered while deriving the Inbox id is reported through decideAction's own result", () => {
-    test("skippedLines is set when deriving the id hits a torn line, and the decision still holds", () => {
-      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+    test("skippedLines is set when deriving the id hits a torn line, and the decision still holds", async () => {
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
       // A torn line in a DIFFERENT Session's log — read while deriving the
       // Inbox for the second deny below, never thrown on (readLog's own
       // tolerance), but still reported here rather than silently dropped.
       writeFileSync(sessionLogPath("sess-2", home), "{torn\n");
 
-      const second = decideAction(home, "sess-1", {
+      const second = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "gh pr merge 2",
         tool: "Bash",
@@ -245,8 +245,8 @@ effect = "flag"
       expect(second.decision === "deny" && second.inboxId).toBe(2); // still correctly derived despite the torn line
     });
 
-    test("skippedLines is undefined when nothing was skipped", () => {
-      const result = decideAction(home, "sess-1", {
+    test("skippedLines is undefined when nothing was skipped", async () => {
+      const result = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "gh pr merge 1",
         tool: "Bash",
@@ -255,15 +255,15 @@ effect = "flag"
       expect(result.decision === "deny" && result.skippedLines).toBeUndefined();
     });
 
-    test("skippedLines is never set for a flag match or a no-match — neither ever reads a Session log", () => {
-      const flag = decideAction(home, "sess-1", {
+    test("skippedLines is never set for a flag match or a no-match — neither ever reads a Session log", async () => {
+      const flag = await decideAction(home, "sess-1", {
         kind: "shell",
         command: "railway run -- psql",
         tool: "Bash",
       });
       expect(flag.logged && flag.skippedLines).toBeUndefined();
 
-      const noMatch = decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
+      const noMatch = await decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
       expect(noMatch.logged).toBe(false);
     });
   });

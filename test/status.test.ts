@@ -28,28 +28,28 @@ effect = "human"
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("an empty Inbox reads as empty, not absent", () => {
+  test("an empty Inbox reads as empty, not absent", async () => {
     expect(renderStatus(home)).toContain("Inbox");
   });
 
-  test("lists a denied Action as `#id  Bash: command`", () => {
-    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+  test("lists a denied Action as `#id  Bash: command`", async () => {
+    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
     const output = renderStatus(home);
     expect(output).toContain("#1  Bash: gh pr merge 58");
   });
 
-  test("a fresh home with no observed Session renders no tree — just the Inbox, as before", () => {
+  test("a fresh home with no observed Session renders no tree — just the Inbox, as before", async () => {
     const output = renderStatus(home);
     expect(output).toBe("Inbox: (empty)\n");
   });
 
-  test("the Session tree renders above the Inbox, both present together", () => {
+  test("the Session tree renders above the Inbox, both present together", async () => {
     appendEvent(
       home,
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe", "block"] }),
     );
-    decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
     const output = renderStatus(home);
 

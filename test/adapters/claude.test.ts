@@ -33,8 +33,8 @@ effect = "flag"
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("denies a human-ruled Bash command with the standard message", () => {
-    const response = handleClaudeHook(home, {
+  test("denies a human-ruled Bash command with the standard message", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -50,8 +50,8 @@ effect = "flag"
     expect(reason.toLowerCase()).toContain("continue");
   });
 
-  test("allows a flag-ruled Bash command and still logs action.decided", () => {
-    const response = handleClaudeHook(home, {
+  test("allows a flag-ruled Bash command and still logs action.decided", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -64,8 +64,8 @@ effect = "flag"
     expect(events[0]).toMatchObject({ data: { decision: "allow" } });
   });
 
-  test("a Bash command matching no Rule produces no response and no log entry", () => {
-    const response = handleClaudeHook(home, {
+  test("a Bash command matching no Rule produces no response and no log entry", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -76,8 +76,8 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("a non-Bash tool call is passed through untouched", () => {
-    const response = handleClaudeHook(home, {
+  test("a non-Bash tool call is passed through untouched", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Read",
@@ -88,8 +88,8 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("SessionStart writes session.started with no parent and the Adapter's declared Capabilities", () => {
-    const response = handleClaudeHook(home, {
+  test("SessionStart writes session.started with no parent and the Adapter's declared Capabilities", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SessionStart",
       cwd: "/repo",
@@ -106,8 +106,8 @@ effect = "flag"
     expect((events[0] as { data: { parent?: string } }).data.parent).toBeUndefined();
   });
 
-  test("SubagentStart writes session.started keyed by agent_id, parented to session_id", () => {
-    const response = handleClaudeHook(home, {
+  test("SubagentStart writes session.started keyed by agent_id, parented to session_id", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStart",
       agent_id: "agent-1",
@@ -125,8 +125,8 @@ effect = "flag"
     });
   });
 
-  test("SubagentStop writes session.ended for the agent_id Session, never the parent", () => {
-    const response = handleClaudeHook(home, {
+  test("SubagentStop writes session.ended for the agent_id Session, never the parent", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
       agent_id: "agent-1",
@@ -139,8 +139,8 @@ effect = "flag"
     expect(events[0]).toMatchObject({ session: "agent-1", type: "session.ended" });
   });
 
-  test("SessionEnd writes session.ended for session_id, carrying the runtime's reason", () => {
-    const response = handleClaudeHook(home, {
+  test("SessionEnd writes session.ended for session_id, carrying the runtime's reason", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SessionEnd",
       reason: "clear",
@@ -152,8 +152,8 @@ effect = "flag"
     expect(events[0]).toMatchObject({ session: "sess-1", type: "session.ended", data: { reason: "clear" } });
   });
 
-  test("SessionEnd with a transcript_path ALSO samples usage for session_id (q9)", () => {
-    const response = handleClaudeHook(home, {
+  test("SessionEnd with a transcript_path ALSO samples usage for session_id (q9)", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SessionEnd",
       reason: "clear",
@@ -169,8 +169,8 @@ effect = "flag"
     );
   });
 
-  test("SubagentStop with a transcript_path ALSO samples usage for agent_id, not session_id", () => {
-    const response = handleClaudeHook(home, {
+  test("SubagentStop with a transcript_path ALSO samples usage for agent_id, not session_id", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
       agent_id: "agent-1",
@@ -186,8 +186,8 @@ effect = "flag"
     );
   });
 
-  test("Stop samples usage for session_id, without ending the Session", () => {
-    const response = handleClaudeHook(home, {
+  test("Stop samples usage for session_id, without ending the Session", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
       transcript_path: fixture("above-threshold.jsonl"),
@@ -203,8 +203,8 @@ effect = "flag"
     });
   });
 
-  test("Stop with a transcript that yields no usage writes nothing — never a zero sample", () => {
-    const response = handleClaudeHook(home, {
+  test("Stop with a transcript that yields no usage writes nothing — never a zero sample", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
       transcript_path: fixture("no-usage.jsonl"),
@@ -214,8 +214,8 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("Stop with no transcript_path at all degrades silently — no crash, no sample", () => {
-    const response = handleClaudeHook(home, {
+  test("Stop with no transcript_path at all degrades silently — no crash, no sample", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
     });
@@ -224,9 +224,9 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("PostToolUse below the 25th call counts but writes nothing", () => {
+  test("PostToolUse below the 25th call counts but writes nothing", async () => {
     for (let i = 1; i < 25; i++) {
-      const response = handleClaudeHook(home, {
+      const response = await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "PostToolUse",
         transcript_path: fixture("below-threshold.jsonl"),
@@ -237,9 +237,9 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("PostToolUse on exactly the 25th call samples usage for session_id, and not before", () => {
+  test("PostToolUse on exactly the 25th call samples usage for session_id, and not before", async () => {
     for (let i = 1; i < 25; i++) {
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "PostToolUse",
         transcript_path: fixture("below-threshold.jsonl"),
@@ -247,7 +247,7 @@ effect = "flag"
     }
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
 
-    const response = handleClaudeHook(home, {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PostToolUse",
       transcript_path: fixture("below-threshold.jsonl"),
@@ -259,8 +259,8 @@ effect = "flag"
     expect(events[0]).toMatchObject({ type: "usage.sampled", data: { context_tokens: 75704 } });
   });
 
-  test("a `tenaza label` Bash command labels session_id's Session when there is no agent_id", () => {
-    const response = handleClaudeHook(home, {
+  test("a `tenaza label` Bash command labels session_id's Session when there is no agent_id", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -277,8 +277,8 @@ effect = "flag"
     });
   });
 
-  test("a `tenaza label` Bash command run inside a subagent labels agent_id's Session, never session_id's (AC1)", () => {
-    const response = handleClaudeHook(home, {
+  test("a `tenaza label` Bash command run inside a subagent labels agent_id's Session, never session_id's (AC1)", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -297,7 +297,7 @@ effect = "flag"
     });
   });
 
-  test("a `tenaza label` command never goes through the Policy — no action.decided, even with a matching Rule", () => {
+  test("a `tenaza label` command never goes through the Policy — no action.decided, even with a matching Rule", async () => {
     writeFileSync(
       path.join(home, "config", "policy.toml"),
       `
@@ -307,7 +307,7 @@ effect = "human"
 `,
     );
 
-    const response = handleClaudeHook(home, {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -320,8 +320,8 @@ effect = "human"
     expect(events[0]?.type).toBe("session.labeled");
   });
 
-  test("`tenaza label` with no key=value pairs writes nothing — degrades silently, never a crash", () => {
-    const response = handleClaudeHook(home, {
+  test("`tenaza label` with no key=value pairs writes nothing — degrades silently, never a crash", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -332,8 +332,8 @@ effect = "human"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("a bare `tenaza` or `tenaza status` command is not mistaken for a label announce", () => {
-    const response = handleClaudeHook(home, {
+  test("a bare `tenaza` or `tenaza status` command is not mistaken for a label announce", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
@@ -344,9 +344,9 @@ effect = "human"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("PostToolUse counts are scoped per Session, never shared across sessions", () => {
+  test("PostToolUse counts are scoped per Session, never shared across sessions", async () => {
     for (let i = 1; i < 25; i++) {
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "PostToolUse",
         transcript_path: fixture("below-threshold.jsonl"),
@@ -354,7 +354,7 @@ effect = "human"
     }
     // sess-2's own 25th call must trigger its own sample, unaffected by sess-1's count.
     for (let i = 1; i < 25; i++) {
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-2",
         hook_event_name: "PostToolUse",
         transcript_path: fixture("above-threshold.jsonl"),
@@ -362,7 +362,7 @@ effect = "human"
     }
     expect(readSessionEvents("sess-2", home)).toHaveLength(0);
 
-    handleClaudeHook(home, {
+    await handleClaudeHook(home, {
       session_id: "sess-2",
       hook_event_name: "PostToolUse",
       transcript_path: fixture("above-threshold.jsonl"),
@@ -371,8 +371,8 @@ effect = "human"
   });
 
   describe("notifications (ticket 08: 🔴 fires at the moment a sample crosses the threshold)", () => {
-    test("a Stop call with a transcript above the threshold fires exactly one 🔴", () => {
-      handleClaudeHook(home, {
+    test("a Stop call with a transcript above the threshold fires exactly one 🔴", async () => {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("above-threshold.jsonl"),
@@ -387,13 +387,13 @@ effect = "human"
       expect(notifications[0]?.message).toContain("242k");
     });
 
-    test("a second sample still above the threshold sends nothing more — once per Session", () => {
-      handleClaudeHook(home, {
+    test("a second sample still above the threshold sends nothing more — once per Session", async () => {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("above-threshold.jsonl"),
       });
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("above-threshold.jsonl"),
@@ -402,8 +402,8 @@ effect = "human"
       expect(readNotificationRecorder(home)).toHaveLength(1);
     });
 
-    test("a sample below the threshold sends nothing", () => {
-      handleClaudeHook(home, {
+    test("a sample below the threshold sends nothing", async () => {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("below-threshold.jsonl"),
@@ -412,8 +412,8 @@ effect = "human"
       expect(readNotificationRecorder(home)).toEqual([]);
     });
 
-    test("Session completion (SessionEnd) on its own, with no crossing sample, sends nothing", () => {
-      handleClaudeHook(home, {
+    test("Session completion (SessionEnd) on its own, with no crossing sample, sends nothing", async () => {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "SessionEnd",
         reason: "clear",
@@ -423,16 +423,16 @@ effect = "human"
       expect(readNotificationRecorder(home)).toEqual([]);
     });
 
-    test("a Session whose transcript reads lower on a later sample (e.g. after compaction) still never re-crosses", () => {
+    test("a Session whose transcript reads lower on a later sample (e.g. after compaction) still never re-crosses", async () => {
       // First sample crosses (above-threshold); the running max is what
       // `shouldNotifyThresholdCrossing` compares against, never the latest
       // alone, so a later LOWER sample must not look like "never crossed."
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("above-threshold.jsonl"),
       });
-      handleClaudeHook(home, {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "Stop",
         transcript_path: fixture("below-threshold.jsonl"),
@@ -441,8 +441,8 @@ effect = "human"
       expect(readNotificationRecorder(home)).toHaveLength(1);
     });
 
-    test("SubagentStop samples and notifies for agent_id, never the parent session_id", () => {
-      handleClaudeHook(home, {
+    test("SubagentStop samples and notifies for agent_id, never the parent session_id", async () => {
+      await handleClaudeHook(home, {
         session_id: "sess-1",
         hook_event_name: "SubagentStop",
         agent_id: "agent-1",

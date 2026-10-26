@@ -59,7 +59,7 @@ function enteredGraveState(home: string, degraded: { message: string; grave: boo
 async function runHookClaude(): Promise<number> {
   const home = tenazaHome();
   const raw = await readStdin();
-  const { output, degraded } = runClaudeHookSafely(home, raw);
+  const { output, degraded } = await runClaudeHookSafely(home, raw);
 
   if (degraded) {
     const shouldNotify = enteredGraveState(home, degraded);
@@ -86,7 +86,7 @@ async function runHookClaude(): Promise<number> {
 async function runHookFake(): Promise<number> {
   const raw = await readStdin();
   const payload = JSON.parse(raw);
-  const response = handleFakeHook(tenazaHome(), payload);
+  const response = await handleFakeHook(tenazaHome(), payload);
   if (response) {
     process.stdout.write(`${JSON.stringify(response)}\n`);
   }

@@ -47,22 +47,23 @@ export type DecisionResult =
  * never throws on its own, but is still wrapped here with the rest of this
  * step's side effects, per ADR 0007.
  */
-export function decideAction(
+export async function decideAction(
   home: string,
   session: string,
   action: Action,
   capabilities: Capability[] = ["observe", "block"],
-): DecisionResult {
+): Promise<DecisionResult> {
   const policy = loadPolicy(home);
-  const rule = matchRule(action, policy);
-  if (!rule) return { decision: "allow", logged: false };
+  const outcome = await matchRule(action, policy);
+  if (!outcome) return { decision: "allow", logged: false };
+  const { rule, reason } = outcome;
 
   const canDeny = rule.effect === "human" && capabilities.includes("block");
   const decision = canDeny ? "deny" : "allow";
 
   let appended = false;
   try {
-    appendEvent(home, actionDecidedEvent(session, action, decision, rule));
+    appendEvent(home, actionDecidedEvent(session, action, decision, rule, reason));
     appended = true;
   } catch {
     // `decision` above already stands; failing to log it never changes

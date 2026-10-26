@@ -8,7 +8,7 @@ import {
 import { decideAction } from "../decide";
 import { appendEvent, readSessionEvents } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
-import { loadPolicy } from "../policy";
+import { loadPolicy, policyWarning } from "../policy";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
 
@@ -95,6 +95,14 @@ export type ClaudeHookInput =
   | ClaudePostToolUsePayload;
 
 export interface ClaudeHookResponse {
+  /**
+   * A warning shown to the human, independent of any permission decision
+   * (ADR 0007, ticket 01) — set only when `handlePreToolUse` below itself
+   * noticed a degraded read (a skipped log line) while reaching this
+   * decision. Purely additive: every pre-existing caller that never
+   * references it (every test included) is unaffected.
+   */
+  systemMessage?: string;
   hookSpecificOutput: {
     hookEventName: "PreToolUse";
     permissionDecision: "allow" | "deny";
@@ -173,6 +181,25 @@ function buildHookResponse(
   };
 }
 
+function describeSkippedLines(skipped: number): string {
+  return `${skipped} log line${skipped === 1 ? "" : "s"} could not be read and ${
+    skipped === 1 ? "was" : "were"
+  } skipped.`;
+}
+
+/**
+ * Attach a skip-count warning directly onto a response this call is
+ * ALREADY returning (ADR 0007, ticket 01) — never a reason to build one
+ * that otherwise wouldn't exist. `skippedLines` only ever comes from
+ * `decideAction`'s own result, itself derived from the ONE read that call
+ * needed anyway (`deriveInboxReport`) — never a second, independent
+ * rescan of every Session's log.
+ */
+function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: number | undefined): ClaudeHookResponse {
+  if (!skippedLines) return response;
+  return { ...response, systemMessage: describeSkippedLines(skippedLines) };
+}
+
 /**
  * Decide one Claude Code PreToolUse call against the Policy. Returns
  * `undefined` when there is nothing to tell the host — either the call
@@ -197,14 +224,15 @@ function handlePreToolUse(home: string, payload: ClaudeHookPayload): ClaudeHookR
   }
 
   const result = decideAction(home, payload.session_id, action, CLAUDE_CAPABILITIES);
+  const skippedLines = result.logged ? result.skippedLines : undefined;
 
   if (result.decision === "deny") {
-    return buildHookResponse("deny", denyMessage(result.inboxId));
+    return withSkippedLinesWarning(buildHookResponse("deny", denyMessage(result.inboxId)), skippedLines);
   }
   if (result.logged) {
-    return buildHookResponse(
-      "allow",
-      `Flagged by Policy rule "${result.rule.match}" and recorded.`,
+    return withSkippedLinesWarning(
+      buildHookResponse("allow", `Flagged by Policy rule "${result.rule.match}" and recorded.`),
+      skippedLines,
     );
   }
   return undefined;
@@ -328,5 +356,96 @@ export function handleClaudeHook(
       return undefined;
     default:
       return undefined;
+  }
+}
+
+/**
+ * What `tenaza hook claude` actually prints to stdout: `ClaudeHookResponse`
+ * widened so `hookSpecificOutput` becomes OPTIONAL (ADR 0007, ticket 01) —
+ * `runClaudeHookSafely` below needs to print a bare `{ systemMessage }`
+ * with NO permission decision at all, which `ClaudeHookResponse` itself
+ * cannot express. `handleClaudeHook` keeps returning the narrower,
+ * unchanged `ClaudeHookResponse`, so every existing caller's type checking
+ * against IT is unaffected; only this wider type is used for what
+ * actually reaches stdout.
+ */
+export interface ClaudeHookOutput {
+  systemMessage?: string;
+  hookSpecificOutput?: ClaudeHookResponse["hookSpecificOutput"];
+}
+
+export interface HookOutcome {
+  output: ClaudeHookOutput | undefined;
+  /** Set exactly when this call was degraded — what broke, and whether it's grave (H3's "no LKG ever" case) — for `tenaza hook claude` to record to `state/health.json`. */
+  degraded?: { message: string; grave: boolean };
+}
+
+function faultMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The answer to an UNANTICIPATED fault (ADR 0007 point 1, decision 08 —
+ * `docs/research/hook-allow-vs-classifier.md`): `systemMessage` ONLY, for
+ * EVERY event, never a `hookSpecificOutput`. An explicit hook `allow` runs
+ * BEFORE Claude Code's own auto-mode classifier and SKIPS it — so
+ * answering "allow" on a fault would be LESS safe than no Tenaza at all
+ * (H2's own mistake, repeated). Saying nothing about the permission
+ * decision is what actually reproduces "the call goes ahead exactly as if
+ * Tenaza were not installed": Claude Code's own classifier and permission
+ * checks run completely unaffected by this hook's answer.
+ */
+function faultResponse(message: string): ClaudeHookOutput {
+  return { systemMessage: message };
+}
+
+/**
+ * Re-check whether the Policy itself is degraded right now — cheap (one
+ * small file, re-read and re-parsed; `policyWarning` never scans a
+ * Session log) and safe to run on EVERY PreToolUse call regardless of
+ * whether a Rule matched, unlike a full rescan of every Session's log
+ * (that cost scaled with the number of Sessions and ran on every call —
+ * ticket 01's own review caught it; `handlePreToolUse`'s
+ * `withSkippedLinesWarning` above reports a skipped LOG line instead,
+ * sourced from `decideAction`'s own necessary read, never a second one).
+ * Combines with whatever `response` already carries (that skip warning,
+ * when `handlePreToolUse` set one) rather than overwriting it.
+ */
+function withPolicyDegradation(home: string, response: ClaudeHookResponse | undefined): HookOutcome {
+  const warning = policyWarning(home);
+  const existing = response?.systemMessage;
+  if (!warning && !existing) return { output: response };
+
+  const message = [existing, warning?.message].filter((part): part is string => Boolean(part)).join(" ");
+  return {
+    output: { ...(response ?? {}), systemMessage: message },
+    degraded: { message, grave: warning?.grave ?? false },
+  };
+}
+
+/**
+ * Run one `tenaza hook claude` call (ADR 0007, ticket 01): a top-level
+ * try/catch around the ENTIRE dispatch — payload parsing included — so ANY
+ * unanticipated fault degrades to "no block, the call goes ahead" instead
+ * of crashing the process with nothing printed (H1's own root cause: an
+ * uncaught throw here meant Claude Code saw no decision at all). Known
+ * fault paths (a malformed Policy, a torn log line) are already tolerated
+ * further down (`decideAction`, `loadPolicy`, `readLog`) and surface here
+ * as `degraded` rather than a throw; this catch is strictly the backstop
+ * for everything else — a malformed payload among them.
+ */
+export function runClaudeHookSafely(home: string, raw: string): HookOutcome {
+  try {
+    const payload = JSON.parse(raw);
+    const response = handleClaudeHook(home, payload);
+
+    if (payload?.hook_event_name !== "PreToolUse") {
+      return { output: response };
+    }
+
+    return withPolicyDegradation(home, response);
+  } catch (error) {
+    const message = `Tenaza guardrail degraded (${faultMessage(error)}) — Claude Code's own permission checks still apply.`;
+    return { output: faultResponse(message), degraded: { message, grave: false } };
   }
 }

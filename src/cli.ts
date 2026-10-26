@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { handleClaudeHook } from "./adapters/claude";
+import { runClaudeHookSafely } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
+import { recordDegraded, recordHealthy } from "./health";
 import { runInit } from "./init";
 import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import {
@@ -16,12 +17,27 @@ async function readStdin(): Promise<string> {
   return await new Response(Bun.stdin.stream()).text();
 }
 
+/**
+ * `hook claude` (ADR 0007, ticket 01): the whole dispatch runs through
+ * `runClaudeHookSafely`, which never throws — on any fault, known or not,
+ * it hands back a non-blocking answer plus a `systemMessage` naming it.
+ * This entry point's own job is just the surrounding bookkeeping: read
+ * stdin, print whatever comes back, and keep `state/health.json` in step
+ * (written on a degraded answer, cleared by the next healthy one).
+ */
 async function runHookClaude(): Promise<number> {
+  const home = tenazaHome();
   const raw = await readStdin();
-  const payload = JSON.parse(raw);
-  const response = handleClaudeHook(tenazaHome(), payload);
-  if (response) {
-    process.stdout.write(`${JSON.stringify(response)}\n`);
+  const { output, degraded } = runClaudeHookSafely(home, raw);
+
+  if (degraded) {
+    recordDegraded(home, degraded.message, degraded.grave);
+  } else {
+    recordHealthy(home);
+  }
+
+  if (output) {
+    process.stdout.write(`${JSON.stringify(output)}\n`);
   }
   return 0;
 }

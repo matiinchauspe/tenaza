@@ -6,6 +6,7 @@ import { decideAction } from "../src/decide";
 import { deriveInbox } from "../src/inbox";
 import { readSessionEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
+import { sessionLogPath } from "../src/paths";
 
 describe("decideAction", () => {
   let home: string;
@@ -190,6 +191,80 @@ effect = "flag"
       expect(notifications).toHaveLength(2);
       expect(notifications[0]?.tag).toBe("inbox-1");
       expect(notifications[1]?.tag).toBe("inbox-2");
+    });
+  });
+
+  describe("ADR 0007 (ticket 01): the decision holds even when a side effect fails", () => {
+    test("a human rule still denies even when logging the decision fails — the id comes back undefined, never a stale one", () => {
+      // Force a real fs failure: a plain FILE sits where the Session log's
+      // own directory needs to be, so `appendEvent`'s `mkdirSync` throws.
+      mkdirSync(path.join(home, "state"), { recursive: true });
+      writeFileSync(path.join(home, "state", "sessions"), "not a directory");
+
+      const result = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.inboxId).toBeUndefined();
+    });
+
+    test("a flag rule still allows, and never throws, when logging fails", () => {
+      mkdirSync(path.join(home, "state"), { recursive: true });
+      writeFileSync(path.join(home, "state", "sessions"), "not a directory");
+
+      const result = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "railway run -- psql",
+        tool: "Bash",
+      });
+
+      expect(result.decision).toBe("allow");
+      expect(result.logged).toBe(true);
+    });
+  });
+
+  describe("ADR 0007 (ticket 01): a torn line encountered while deriving the Inbox id is reported through decideAction's own result", () => {
+    test("skippedLines is set when deriving the id hits a torn line, and the decision still holds", () => {
+      decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+      // A torn line in a DIFFERENT Session's log — read while deriving the
+      // Inbox for the second deny below, never thrown on (readLog's own
+      // tolerance), but still reported here rather than silently dropped.
+      writeFileSync(sessionLogPath("sess-2", home), "{torn\n");
+
+      const second = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 2",
+        tool: "Bash",
+      });
+
+      expect(second.decision).toBe("deny");
+      expect(second.decision === "deny" && second.skippedLines).toBe(1);
+      expect(second.decision === "deny" && second.inboxId).toBe(2); // still correctly derived despite the torn line
+    });
+
+    test("skippedLines is undefined when nothing was skipped", () => {
+      const result = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 1",
+        tool: "Bash",
+      });
+
+      expect(result.decision === "deny" && result.skippedLines).toBeUndefined();
+    });
+
+    test("skippedLines is never set for a flag match or a no-match — neither ever reads a Session log", () => {
+      const flag = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "railway run -- psql",
+        tool: "Bash",
+      });
+      expect(flag.logged && flag.skippedLines).toBeUndefined();
+
+      const noMatch = decideAction(home, "sess-1", { kind: "shell", command: "ls -la", tool: "Bash" });
+      expect(noMatch.logged).toBe(false);
     });
   });
 });

@@ -150,11 +150,14 @@ export function parseLabelCommand(command: string): Record<string, string> | und
   return Object.keys(labels).length > 0 ? labels : undefined;
 }
 
-export function denyMessage(inboxId: number): string {
-  return (
-    `Reserved for the human, inbox #${inboxId}. ` +
-    "Do not retry or work around it. Tell the user, and continue."
-  );
+/**
+ * `inboxId` is `undefined` exactly when `decideAction` could not derive it
+ * (ADR 0007, ticket 01) — the deny still holds either way; the agent is
+ * pointed at `tenaza status` instead of a dead-end id.
+ */
+export function denyMessage(inboxId: number | undefined): string {
+  const location = inboxId !== undefined ? `inbox #${inboxId}` : "the Inbox — run `tenaza status` to find it";
+  return `Reserved for the human, ${location}. Do not retry or work around it. Tell the user, and continue.`;
 }
 
 function buildHookResponse(

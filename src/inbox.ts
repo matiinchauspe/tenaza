@@ -1,5 +1,5 @@
 import type { Action, ActionDecidedEvent } from "./contract/event";
-import { readAllSessionEvents, readHumanEvents } from "./log";
+import { readAllSessionEventsTolerant, readHumanEventsTolerant } from "./log";
 import { tenazaHome } from "./paths";
 
 /**
@@ -51,29 +51,43 @@ export function dedupOutstanding(rows: InboxRow[], resolvedRefs: ReadonlySet<str
  * ever writes `decision: "allow"` for a `human` Rule when it could not
  * actually be denied, so `rule.effect === "human"` already means exactly
  * "the human needs to see this," regardless of decision.
+ *
+ * Plus how many log lines could not be read while deriving this (ADR 0007,
+ * ticket 01) — carried alongside the rows rather than silently dropped, so
+ * a caller that needs it (`deriveInboxReport` below) gets it from the SAME
+ * read, never a second, independent rescan of every Session's log.
  */
-function allHumanMatchRows(home: string): InboxRow[] {
-  const matches = readAllSessionEvents(home)
+function allHumanMatchRowsReport(home: string): { rows: InboxRow[]; skipped: number } {
+  const { events, skipped } = readAllSessionEventsTolerant(home);
+  const matches = events
     .filter((event) => event.type === "action.decided")
     .filter((event) => event.data.rule.effect === "human")
     // Primary key `ts`; `session` breaks a tie DETERMINISTICALLY. Two matches
     // across different Sessions can share a millisecond-resolution `ts` (the
     // known race from ticket 01) — without a deterministic tiebreaker, the
     // resulting order (and so the ids built below) would depend on
-    // `readAllSessionEvents`'s directory-enumeration order, which the
+    // `readAllSessionEventsTolerant`'s directory-enumeration order, which the
     // filesystem does not guarantee is stable across reads. Resolving an id
     // only works if the id means the same row every time it's derived.
     .sort((a, b) => a.ts.localeCompare(b.ts) || a.session.localeCompare(b.session));
 
-  return buildInboxRows(matches);
+  return { rows: buildInboxRows(matches), skipped };
+}
+
+function allHumanMatchRows(home: string): InboxRow[] {
+  return allHumanMatchRowsReport(home).rows;
+}
+
+function resolvedRefsReport(home: string): { refs: Set<string>; skipped: number } {
+  const { events, skipped } = readHumanEventsTolerant(home);
+  const refs = new Set(
+    events.filter((event) => event.type === "approval.resolved").map((event) => event.data.ref),
+  );
+  return { refs, skipped };
 }
 
 function resolvedRefs(home: string): Set<string> {
-  return new Set(
-    readHumanEvents(home)
-      .filter((event) => event.type === "approval.resolved")
-      .map((event) => event.data.ref),
-  );
+  return resolvedRefsReport(home).refs;
 }
 
 /**
@@ -87,6 +101,21 @@ function resolvedRefs(home: string): Set<string> {
  */
 export function deriveInbox(home: string = tenazaHome()): InboxItem[] {
   return dedupOutstanding(allHumanMatchRows(home), resolvedRefs(home));
+}
+
+/**
+ * Same derivation as `deriveInbox`, plus how many log lines (across every
+ * Session's log and the human log) could not be read while doing it (ADR
+ * 0007, ticket 01). Used ONLY by `decideAction`, which needs this number to
+ * report a degraded answer on the SAME call that hit it — never as a
+ * separate, independent full rescan of every log on every hook call
+ * (that cost, unbounded in the number of Sessions, was exactly the thing
+ * ticket 01's own review caught and this function exists to avoid).
+ */
+export function deriveInboxReport(home: string = tenazaHome()): { items: InboxItem[]; skipped: number } {
+  const rows = allHumanMatchRowsReport(home);
+  const refs = resolvedRefsReport(home);
+  return { items: dedupOutstanding(rows.rows, refs.refs), skipped: rows.skipped + refs.skipped };
 }
 
 /** Find one Inbox row across the FULL history — resolved or not — by id. */

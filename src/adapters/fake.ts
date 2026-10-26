@@ -60,7 +60,7 @@ function handleFakeAction(home: string, payload: FakeActionPayload): FakeHookRes
     // Unreachable while FAKE_CAPABILITIES excludes "block" — decideAction
     // itself refuses to deny without it. Kept so this branch stays honest
     // if this Adapter's declared Capabilities ever change.
-    return { decision: "deny", message: `Reserved for the human, inbox #${result.inboxId}.` };
+    return { decision: "deny", message: `Reserved for the human, inbox #${result.inboxId ?? "?"}.` };
   }
   if (result.logged) {
     const enforceable = result.rule.effect !== "human";

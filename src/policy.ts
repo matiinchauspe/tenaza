@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import { type Action, EffectSchema } from "./contract/event";
-import { policyPath, tenazaHome } from "./paths";
+import { policyLkgPath, policyPath, tenazaHome } from "./paths";
 
 /**
  * One entry of the Policy: a text pattern matched against a normalized
@@ -31,20 +32,140 @@ const PolicyFileSchema = z.object({
 });
 
 /**
+ * The last-known-good Policy's own on-disk shape (ADR 0007, H3): the
+ * already-parsed, validated result — never the raw TOML — plus when it was
+ * saved.
+ */
+const LkgFileSchema = z.object({
+  rules: z.array(RuleSchema),
+  thresholdTokens: z.number(),
+  savedAt: z.string(),
+});
+
+function describeParseError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type PolicyFileReadResult = { ok: true; policy: Policy } | { ok: false; error: unknown };
+
+/**
+ * Parse and validate `policy.toml` as it stands right now — the ONE place
+ * that attempt happens, so `loadPolicy` and `policyWarning` below always
+ * agree on whether it just succeeded.
+ */
+function readPolicyFile(home: string): PolicyFileReadResult {
+  try {
+    const raw = parseToml(readFileSync(policyPath(home), "utf8"));
+    const parsed = PolicyFileSchema.parse(raw);
+    return {
+      ok: true,
+      policy: {
+        rules: parsed.rule ?? [],
+        thresholdTokens: parsed.flag?.threshold_tokens ?? DEFAULT_CONTEXT_THRESHOLD,
+      },
+    };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/**
+ * Cache the last successfully parsed Policy to `state/policy.lkg.json`
+ * (ADR 0007, H3) — the fallback a malformed `policy.toml` degrades to,
+ * instead of silently dropping every Rule. A failure to WRITE this cache
+ * must never fail the load that triggered it — it's a convenience, not the
+ * source of truth.
+ */
+function writeLkg(home: string, policy: Policy): void {
+  try {
+    const file = policyLkgPath(home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        rules: policy.rules,
+        thresholdTokens: policy.thresholdTokens,
+        savedAt: new Date().toISOString(),
+      }),
+    );
+  } catch {
+    // See the doc comment above.
+  }
+}
+
+function readLkg(home: string): { policy: Policy; savedAt: string } | undefined {
+  const file = policyLkgPath(home);
+  if (!existsSync(file)) return undefined;
+  try {
+    const parsed = LkgFileSchema.parse(JSON.parse(readFileSync(file, "utf8")));
+    return {
+      policy: { rules: parsed.rules, thresholdTokens: parsed.thresholdTokens },
+      savedAt: parsed.savedAt,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Load the user's Policy from `<home>/config/policy.toml`. A repo ships only
  * `policy.example.toml` and defaults — the user's own file is never
  * required, so an absent file degrades to no rules and the default
  * threshold, rather than an error.
+ *
+ * Never throws (ADR 0007, ticket 01): a malformed file degrades to the
+ * last successfully parsed Policy (H3's own last-known-good), or — when
+ * none was ever parsed — to no Rules at all, the same shape an absent file
+ * already returns. `policyWarning` below reports whether THIS call
+ * actually hit that fallback; `loadPolicy` itself only ever hands back
+ * something usable.
  */
 export function loadPolicy(home: string = tenazaHome()): Policy {
   const file = policyPath(home);
   if (!existsSync(file)) return { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD };
 
-  const raw = parseToml(readFileSync(file, "utf8"));
-  const parsed = PolicyFileSchema.parse(raw);
+  const result = readPolicyFile(home);
+  if (result.ok) {
+    writeLkg(home, result.policy);
+    return result.policy;
+  }
+
+  const lkg = readLkg(home);
+  return lkg ? lkg.policy : { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD };
+}
+
+export interface PolicyWarning {
+  message: string;
+  /** True only when NO last-known-good Policy ever existed — Rules are off entirely, not just stale (H3's "grave" case). */
+  grave: boolean;
+}
+
+/**
+ * Re-derive whether `loadPolicy` just took its fallback path, as a REPORT
+ * rather than a value (ADR 0007, ticket 01) — `undefined` when
+ * `policy.toml` parsed cleanly, or is absent (a normal "nothing configured
+ * yet" state, never a fault). Kept separate from `loadPolicy` itself so
+ * every ordinary caller (sampling, the statusline, `decideAction`) keeps
+ * asking only for a `Policy`; only the hook's own health report asks this
+ * question too.
+ */
+export function policyWarning(home: string = tenazaHome()): PolicyWarning | undefined {
+  if (!existsSync(policyPath(home))) return undefined;
+
+  const result = readPolicyFile(home);
+  if (result.ok) return undefined;
+
+  const cause = describeParseError(result.error);
+  const lkg = readLkg(home);
+  if (lkg) {
+    return {
+      message: `policy.toml is invalid (${cause}); using the last valid policy from ${lkg.savedAt}.`,
+      grave: false,
+    };
+  }
   return {
-    rules: parsed.rule ?? [],
-    thresholdTokens: parsed.flag?.threshold_tokens ?? DEFAULT_CONTEXT_THRESHOLD,
+    message: `policy.toml is invalid (${cause}) and no last-known-good policy exists yet — no Rules are active.`,
+    grave: true,
   };
 }
 

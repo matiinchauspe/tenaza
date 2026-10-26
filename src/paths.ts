@@ -75,3 +75,13 @@ export function notifyRecorderPath(home: string = tenazaHome()): string {
 export function notifySoundStatePath(home: string = tenazaHome()): string {
   return path.join(home, "state", "notify-sound-at");
 }
+
+/**
+ * Tenaza's last successfully parsed Policy (ADR 0007, H3, ticket 01) — the
+ * fallback a malformed `policy.toml` degrades to instead of silently
+ * dropping every Rule. Written on every healthy `loadPolicy`, read back
+ * only when the user's own file fails to parse.
+ */
+export function policyLkgPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "policy.lkg.json");
+}

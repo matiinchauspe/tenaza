@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { actionDecidedEvent, approvalResolvedEvent, EventSchema } from "../src/contract/event";
-import { appendEvent, appendHumanEvent, readAllSessionEvents, readHumanEvents } from "../src/log";
+import {
+  appendEvent,
+  appendHumanEvent,
+  readAllSessionEvents,
+  readAllSessionEventsTolerant,
+  readHumanEvents,
+  readHumanEventsTolerant,
+  readSessionEvents,
+} from "../src/log";
 import { humanLogPath, sessionLogPath } from "../src/paths";
 
 describe("Session log", () => {
@@ -128,5 +136,105 @@ describe("Human log", () => {
       "1",
       "2",
     ]);
+  });
+});
+
+describe("ADR 0007 (ticket 01): a torn log line is skipped and counted, never thrown", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-log-tolerant-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("readSessionEvents skips a torn (unparseable) line instead of throwing", () => {
+    const file = sessionLogPath("sess-1", home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, '{"v":1,"ts":"2026-01-01T00:00:00.000Z","session":"sess-1","type":"session.ended","data":{"reason":"x"}}\n{"torn\n');
+
+    expect(() => readSessionEvents("sess-1", home)).not.toThrow();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "session.ended" });
+  });
+
+  test("readSessionEvents skips a line naming an unknown Event type", () => {
+    const file = sessionLogPath("sess-1", home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      `${JSON.stringify({ v: 1, ts: "2026-01-01T00:00:00.000Z", session: "sess-1", type: "future.event", data: {} })}\n`,
+    );
+
+    expect(readSessionEvents("sess-1", home)).toEqual([]);
+  });
+
+  test("readAllSessionEvents tolerates a torn line in one Session without losing another Session's Events", () => {
+    const goodFile = sessionLogPath("sess-2", home);
+    mkdirSync(path.dirname(goodFile), { recursive: true });
+    writeFileSync(
+      goodFile,
+      `${JSON.stringify(EventSchema.parse(approvalResolvedEvent("sess-2", "1", "done")))}\n`,
+    );
+    writeFileSync(sessionLogPath("sess-1", home), "{not even json\n");
+
+    const events = readAllSessionEvents(home);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.session).toBe("sess-2");
+  });
+
+  test("readAllSessionEventsTolerant reports 0 skipped for a clean home", () => {
+    appendEvent(home, approvalResolvedEvent("sess-1", "1", "done"));
+    expect(readAllSessionEventsTolerant(home).skipped).toBe(0);
+  });
+
+  test("readAllSessionEventsTolerant reports exactly how many lines across every Session's log could not be read, alongside the Events that WERE readable", () => {
+    mkdirSync(path.dirname(sessionLogPath("sess-1", home)), { recursive: true });
+    writeFileSync(sessionLogPath("sess-1", home), "{broken-1\n{broken-2\n");
+    appendEvent(home, approvalResolvedEvent("sess-2", "1", "done"));
+
+    const result = readAllSessionEventsTolerant(home);
+    expect(result.skipped).toBe(2);
+    expect(result.events).toHaveLength(1);
+  });
+
+  test("readHumanEventsTolerant reports how many human-log lines could not be read, alongside the Events that WERE readable", () => {
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", "1", "done"));
+    appendFileSync(humanLogPath(home), "{broken-human\n");
+
+    const result = readHumanEventsTolerant(home);
+    expect(result.skipped).toBe(1);
+    expect(result.events).toHaveLength(1);
+  });
+
+  test("appendEvent starts a new line when the file's last line has no trailing newline, instead of gluing onto it", () => {
+    const file = sessionLogPath("sess-1", home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    // No trailing newline — exactly the torn tail a crashed process leaves (H1's own side finding).
+    writeFileSync(file, '{"v":1,"ts":"2026-01-01T00:00:00.000Z","session":"sess-1"');
+
+    const evt = approvalResolvedEvent("sess-1", "1", "done");
+    appendEvent(home, evt);
+
+    const raw = readFileSync(file, "utf8");
+    const lines = raw.split("\n").filter((line) => line.length > 0);
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[1]!)).toEqual(EventSchema.parse(evt));
+
+    // the torn first line is skipped, not glued onto — only the new, valid Event comes back
+    expect(readSessionEvents("sess-1", home)).toEqual([EventSchema.parse(evt)]);
+  });
+
+  test("appendEvent needs no extra newline when the file already ends in one", () => {
+    const file = sessionLogPath("sess-1", home);
+    appendEvent(home, approvalResolvedEvent("sess-1", "1", "done"));
+    appendEvent(home, approvalResolvedEvent("sess-1", "2", "dismissed"));
+
+    const raw = readFileSync(file, "utf8");
+    expect(raw).not.toContain("\n\n");
+    expect(readSessionEvents("sess-1", home)).toHaveLength(2);
   });
 });

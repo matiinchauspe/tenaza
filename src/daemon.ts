@@ -481,8 +481,33 @@ function authResponse(ctx: DaemonContext, url: URL): Response {
   return new Response(null, { status: 302, headers });
 }
 
-/** `GET /events` — an open read: the SSE stream, no token required. Pushes the current derived state immediately on connect, then whatever `startStateWatcher` enqueues later. */
-function eventsResponse(ctx: DaemonContext): Response {
+/**
+ * `GET /events` — an open read: the SSE stream, no token required. Pushes
+ * the current derived state immediately on connect, then whatever
+ * `startStateWatcher` enqueues later.
+ *
+ * `server.timeout(req, 0)` (ticket 13, criterion 2): disables `Bun.serve`'s
+ * own idle timeout for THIS request's connection — "reset the idle timeout
+ * … `0` means no timeout," confirmed against the installed Bun version
+ * (1.4.3) both in its own type declarations (`serve.d.ts`) and empirically.
+ * The measured cause was that idle timeout (its documented default is 10 s;
+ * a quiet `/events` connection — nothing written between board changes —
+ * dropped at ~10–12 s every time this was probed). An SSE comment keepalive
+ * was tried FIRST and discarded: on THIS Daemon's exact `Bun.serve` shape —
+ * `routes` claiming `/` alongside `fetch` handling everything else — a
+ * periodic write to the stream controller did NOT reset the per-connection
+ * idle clock the way it does on a `fetch`-only server (confirmed
+ * empirically: a comment every 150 ms still dropped at the SAME ~4 s a
+ * silent stream did, with `idleTimeout` shortened for the probe). The
+ * per-request override is the mechanism that actually works for this
+ * server's shape, so it is the only one shipped — see the ticket's own
+ * report for the full probe. `clients.delete` on `cancel()`/a failed
+ * `enqueue()` is unaffected: a connection that genuinely closes (the
+ * browser tab, a network drop the OS eventually notices) is still cleaned
+ * up the same way; only the SERVER-INITIATED idle drop is gone.
+ */
+function eventsResponse(ctx: DaemonContext, req: Request, server: ReturnType<typeof Bun.serve>): Response {
+  server.timeout(req, 0);
   let thisController: SseController | undefined;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -710,13 +735,20 @@ function sessionActionResponse(ctx: DaemonContext, pathname: string): Response |
  * `sessionActionResponse` are called only AFTER that gate, never wrapped
  * around any route individually, so there is no path to "write" here that
  * could ever be written without it.
+ *
+ * Takes `server` as the handler's own second parameter (`Bun.serve`'s own
+ * shape — `fetch(req, server)`) ONLY so `/events` can call
+ * `server.timeout(req, 0)` (ticket 13, criterion 2) — no other route needs
+ * it.
  */
-export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response | Promise<Response> {
-  return async (req: Request): Promise<Response> => {
+export function createFetchHandler(
+  ctx: DaemonContext,
+): (req: Request, server: ReturnType<typeof Bun.serve>) => Response | Promise<Response> {
+  return async (req: Request, server: ReturnType<typeof Bun.serve>): Promise<Response> => {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") return healthResponse();
-    if (req.method === "GET" && url.pathname === "/events") return eventsResponse(ctx);
+    if (req.method === "GET" && url.pathname === "/events") return eventsResponse(ctx, req, server);
     if (req.method === "GET" && url.pathname === "/auth") return authResponse(ctx, url);
 
     if (!isAuthorizedRequest(req, ctx.token)) {
@@ -860,8 +892,18 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
     // Geist woff2 files — and serves them, embedded straight into the
     // `--compile` binary, with no further wiring here. `fetch` stays the
     // fallback for everything `routes` doesn't claim (health, events, and
-    // every write route tickets 09-11 add).
-    server = Bun.serve({ port, hostname: "127.0.0.1", routes: { "/": index }, fetch: createFetchHandler(ctx) });
+    // every write route tickets 09-11 add). `Bun.serve`'s own `idleTimeout`
+    // (default 10s) is left untouched here — ticket 13, criterion 2's fix
+    // is `eventsResponse`'s own per-request `server.timeout(req, 0)`,
+    // never a server-wide setting, since every OTHER route on this server
+    // is a plain request/response that finishes instantly and has no
+    // reason to opt out of the default.
+    server = Bun.serve({
+      port,
+      hostname: "127.0.0.1",
+      routes: { "/": index },
+      fetch: createFetchHandler(ctx),
+    });
   } catch (error) {
     printErr(
       `tenaza: could not start the Daemon on port ${port} (${describeBindError(error)}) — try \`tenaza ui --port <n>\``,

@@ -1359,3 +1359,66 @@ describe("write route — archive (ticket 11)", () => {
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });
+
+/**
+ * Ticket 13, criterion 2: `Bun.serve`'s own idle timeout (documented default
+ * 10 s; measured drop at ~10–12 s against the installed Bun version, 1.4.3)
+ * dropped a QUIET `/events` connection — the measured cause of the board
+ * "flapping all day." The fix is `eventsResponse`'s own
+ * `server.timeout(req, 0)`, a PER-REQUEST override — not a server-wide
+ * setting and not an SSE comment keepalive (tried first; see that
+ * function's own doc comment for why it does NOT work on this Daemon's
+ * exact `Bun.serve` shape). Nothing here is shortened by env, because
+ * there is no interval left to shorten — this proves the fix against
+ * Bun's REAL default idle timeout, which is why the test itself carries an
+ * explicit, longer-than-default `bun:test` timeout (real seconds, never
+ * real minutes, per the ticket's own bound).
+ */
+describe("tenaza ui — the /events idle-timeout override (ticket 13, criterion 2)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-idle-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a quiet /events stream (no state change at all) survives past Bun's own default idle timeout", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/events`);
+      expect(res.status).toBe(200);
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sawDataFrame = false;
+
+      // 13s: past the measured ~10-12s drop, comfortably inside this
+      // test's own 20s timeout below.
+      const WINDOW_MS = 13000;
+      const start = Date.now();
+      while (Date.now() - start < WINDOW_MS) {
+        const remaining = WINDOW_MS - (Date.now() - start);
+        const result = await Promise.race([
+          reader.read().then((r) => ({ kind: "read" as const, ...r })),
+          new Promise<{ kind: "timedOut" }>((resolve) => setTimeout(() => resolve({ kind: "timedOut" }), remaining)),
+        ]);
+        if (result.kind === "timedOut") break;
+        if (result.done) {
+          throw new Error("the /events stream closed before surviving past the idle timeout");
+        }
+        buffer += decoder.decode(result.value, { stream: true });
+        if (buffer.includes("data: ")) sawDataFrame = true;
+      }
+
+      expect(sawDataFrame).toBe(true); // the initial connect-time push arrived and nothing dropped the connection since
+
+      await reader.cancel();
+    } finally {
+      await daemon.stop();
+    }
+  }, 20000);
+});

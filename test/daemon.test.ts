@@ -1,10 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { actionDecidedEvent, sessionStartedEvent } from "../src/contract/event";
 import { isHeartbeatFresh, readDaemonToken, readOpenRecorder, DEFAULT_HEARTBEAT_STALE_MS } from "../src/daemon";
+import { inboxIdentityHash } from "../src/identity";
+import { deriveInbox } from "../src/inbox";
+import { appendEvent, readHumanEvents } from "../src/log";
 import { daemonAlivePath, daemonTokenPath } from "../src/paths";
 import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES } from "../src/policy";
+import { RUN_FAILURE_MARKER } from "../src/runoutput";
 import { TENAZA_VERSION } from "../src/version";
 
 /** Ticket 08: `/events` now also carries the Live surface's own contract envelope and Policy numbers — every "freshly started, nothing observed yet" assertion below includes this. */
@@ -504,5 +518,268 @@ describe("isHeartbeatFresh (ticket 07 exposes the freshness rule; no hook is wir
     const now = new Date("2026-01-01T00:01:00.000Z");
     const aliveAt = new Date(now.getTime() - DEFAULT_HEARTBEAT_STALE_MS - 1000);
     expect(isHeartbeatFresh(aliveAt, now)).toBe(false);
+  });
+});
+
+/**
+ * Write routes — `run`/`done`/`dismiss` (ticket 09). Drives the SAME
+ * black-box seam ticket 07/08 already established: a REAL `tenaza ui`
+ * process over real HTTP, against a temp `TENAZA_HOME` both the test and
+ * the Daemon share on disk. Inbox items are opened directly with
+ * `appendEvent`/`actionDecidedEvent` (the SAME helper shape
+ * `test/resolve.test.ts` already uses) rather than through a real hook
+ * call — this suite's own job is the HTTP surface and the gate around it,
+ * not re-proving Rule matching. `TENAZA_RUN_SHELL=/bin/sh` is passed into
+ * the DAEMON's own process env (never the test's) so its `run` spawns
+ * through a fast, profile-free shell (`resolve.ts`'s own test seam).
+ */
+describe("write routes — run/done/dismiss (ticket 09)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-items-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** A blocked (enforced-deny) Inbox item for `session`, with a fresh `session.started` so `cwd` resolves to `home` itself — line 1 is the start, line 2 is the match, so the item's id hashes against line 2. */
+  function openBlockedItem(session: string, command: string, cwd: string = home): string {
+    appendEvent(home, sessionStartedEvent(session, { runtime: "fake", cwd, capabilities: ["observe", "block"] }));
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "deny", {
+        match: command,
+        effect: "human",
+      }),
+    );
+    return inboxIdentityHash(session, 2);
+  }
+
+  /** ADR 0001's unblocked ("YA CORRIÓ") shape — `decision: "allow"` on a `human`-effect match, `blocked: false`. No `session.started` needed; `run` refuses this before ever consulting `cwd`. */
+  function openUnblockedItem(session: string, command: string): string {
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "allow", {
+        match: command,
+        effect: "human",
+      }),
+    );
+    return inboxIdentityHash(session, 1);
+  }
+
+  function openMcpItem(session: string, tool: string): string {
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "mcp", tool, args: {} }, "deny", { tool: "mcp__*", effect: "human" }),
+    );
+    return inboxIdentityHash(session, 1);
+  }
+
+  function spawnItemsDaemon(envOverrides: Record<string, string> = {}) {
+    return spawnDaemon(["--port", "0"], { home, env: { TENAZA_RUN_SHELL: "/bin/sh", ...envOverrides } });
+  }
+
+  test("POST /items/<id>/run with a stored `true` streams to completion and closes the item as done", async () => {
+    const id = openBlockedItem("sess-1", "true");
+    const daemon = await spawnItemsDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+
+      expect(deriveInbox(home)).toEqual([]);
+      expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: id, outcome: "done" } });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("POST /items/<id>/run with a stored `false` streams to completion, leaves the item open, and ends with the failure trailer — review fix, 'stays open WITH THE ERROR'", async () => {
+    const id = openBlockedItem("sess-1", "false");
+    const daemon = await spawnItemsDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.text();
+
+      expect(deriveInbox(home)).toHaveLength(1);
+      expect(readHumanEvents(home)).toEqual([]);
+      expect(body).toContain(`${RUN_FAILURE_MARKER}1`);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a spawn failure (the configured shell does not exist) answers 500 with a clear message — never an unexplained crash", async () => {
+    const id = openBlockedItem("sess-1", "true");
+    const daemon = await spawnItemsDaemon({ TENAZA_RUN_SHELL: path.join(tmpdir(), "tenaza-no-such-shell-xyz") });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("spawn-failed");
+      expect(typeof body.message).toBe("string");
+      expect(body.message.length).toBeGreaterThan(0);
+
+      expect(deriveInbox(home)).toHaveLength(1); // untouched — nothing ran
+      expect(readHumanEvents(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("POST /items/<id>/run with a stored `pwd` streams the REQUESTING Session's own cwd, never the Daemon's", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-run-cwd-"));
+    try {
+      const id = openBlockedItem("sess-1", "pwd", cwd);
+      const daemon = await spawnItemsDaemon();
+      try {
+        const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+          method: "POST",
+          headers: { cookie: `tenaza_token=${daemon.token}` },
+        });
+        const output = await res.text();
+        expect(realpathSync(output.trim())).toBe(realpathSync(cwd));
+      } finally {
+        await daemon.stop();
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("POST /items/<id>/run without the token 403s and spawns nothing", async () => {
+    const marker = path.join(home, "should-not-exist");
+    const id = openBlockedItem("sess-1", `touch ${marker}`);
+    const daemon = await spawnItemsDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, { method: "POST" });
+      expect(res.status).toBe(403);
+      await res.text();
+
+      expect(existsSync(marker)).toBe(false);
+      expect(deriveInbox(home)).toHaveLength(1); // untouched
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an already-resolved item refuses run with 409, reporting its own kind", async () => {
+    const id = openBlockedItem("sess-1", "true");
+    const daemon = await spawnItemsDaemon();
+    try {
+      await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/done`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "already-resolved" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a YA CORRIÓ (unblocked) item offers no run — 409, never a second execution", async () => {
+    const marker = path.join(home, "should-not-exist");
+    const id = openUnblockedItem("sess-1", `touch ${marker}`);
+    const daemon = await spawnItemsDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "unblockable" });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an mcp item offers no run — 409 not-runnable, it has no stored shell command", async () => {
+    const id = openMcpItem("sess-1", "mcp__neon__run_sql");
+    const daemon = await spawnItemsDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/run`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "not-runnable" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an unknown id 404s on run, done and dismiss alike", async () => {
+    const daemon = await spawnItemsDaemon();
+    try {
+      for (const action of ["run", "done", "dismiss"]) {
+        const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${"0".repeat(40)}/${action}`, {
+          method: "POST",
+          headers: { cookie: `tenaza_token=${daemon.token}` },
+        });
+        expect(res.status).toBe(404);
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("POST /items/<id>/done closes the item, 200 with its outcome, token required", async () => {
+    const id = openBlockedItem("sess-1", "gh pr merge 58");
+    const daemon = await spawnItemsDaemon();
+    try {
+      const bare = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/done`, { method: "POST" });
+      expect(bare.status).toBe(403);
+      expect(deriveInbox(home)).toHaveLength(1); // untouched
+
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/done`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ outcome: "done", alreadyResolved: false });
+      expect(deriveInbox(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("POST /items/<id>/dismiss closes the item as dismissed, idempotently", async () => {
+    const id = openBlockedItem("sess-1", "gh pr merge 58");
+    const daemon = await spawnItemsDaemon();
+    try {
+      const first = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/dismiss`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ outcome: "dismissed", alreadyResolved: false });
+
+      const second = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/dismiss`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(await second.json()).toEqual({ outcome: "dismissed", alreadyResolved: true });
+    } finally {
+      await daemon.stop();
+    }
   });
 });

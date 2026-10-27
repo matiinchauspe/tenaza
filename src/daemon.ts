@@ -16,6 +16,13 @@ import {
 } from "./paths";
 import { loadPolicy } from "./policy";
 import {
+  resolveInboxItem,
+  startInboxItemRunStream,
+  UnknownInboxItemError,
+  type ResolutionOutcome,
+  type RunRefusal,
+} from "./resolve";
+import {
   UNKNOWN_PROJECT,
   buildSessionIndex,
   deriveProject,
@@ -496,30 +503,95 @@ function eventsResponse(ctx: DaemonContext): Response {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Write routes (ticket 09): resolve a pending Inbox item from the view
+// ---------------------------------------------------------------------------
+
+/** `POST /items/<id>/run|done|dismiss` — the only shapes this ticket defines; tickets 10/11 add their own paths alongside this one, never by widening this pattern. `id` is the item's FULL identity hash (ADR 0005) — the board's own contract (`contract/live.ts`) never carries anything shorter, so the view has no prefix to resolve. */
+const ITEM_ACTION_PATTERN = /^\/items\/([0-9a-f]{4,64})\/(run|done|dismiss)$/;
+
+/** A refusal `startInboxItemRunStream` reported WITHOUT ever spawning anything — translated to a client error the view can show inline, never a 200 with no content. `already-resolved`/`unblockable`/`not-runnable` are all "this item's own state forbids it" (409); `no-cwd`/`cwd-missing` are "Tenaza cannot resolve where to run it" (422) — distinct enough from a plain conflict to point the human at a different fix (the stored command itself, printed back, same as the CLI's own refusal messages). */
+function runRefusalResponse(refusal: RunRefusal): Response {
+  if (refusal.kind === "no-cwd" || refusal.kind === "cwd-missing") {
+    return Response.json({ error: refusal.kind, ...refusal }, { status: 422 });
+  }
+  return Response.json({ error: refusal.kind }, { status: 409 });
+}
+
+/** Review fix: spawning the shell itself threw (`startInboxItemRunStream`'s own try/catch) — 500, with the raw message, rather than an uncaught exception reaching `Bun.serve`'s own generic (message-less) error response. */
+function spawnFailedResponse(message: string): Response {
+  return Response.json({ error: "spawn-failed", message }, { status: 500 });
+}
+
+/**
+ * `POST /items/<id>/run` (decisions 05, 06, ticket 09): start the item's
+ * stored command through the view's own streaming run
+ * (`startInboxItemRunStream`, `resolve.ts`) and hand its `ReadableStream`
+ * straight back as the response body — chunked, so the card can render
+ * output as it arrives rather than waiting for the whole run to finish.
+ * `content-type: text/plain` deliberately: this is raw combined
+ * stdout+stderr, never a structured envelope — the run's own outcome
+ * (closed as `done`, or left open) is never carried IN this response at
+ * all; it is derived from the Inbox exactly like every other resolution
+ * (ADR 0002), which is what lets the board's OWN `/events` SSE be the one
+ * place a client ever needs to check for it, the instant the stream here
+ * ends.
+ */
+function runItemResponse(ctx: DaemonContext, id: string): Response {
+  try {
+    const result = startInboxItemRunStream(ctx.home, id);
+    if (result.kind === "stream") {
+      return new Response(result.stream, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    if (result.kind === "spawn-failed") return spawnFailedResponse(result.message);
+    return runRefusalResponse(result);
+  } catch (error) {
+    if (error instanceof UnknownInboxItemError) return new Response("not found\n", { status: 404 });
+    throw error;
+  }
+}
+
+/** `POST /items/<id>/done|dismiss`: close the item by hand, exactly as the CLI's own `done`/`dismiss` do (`resolveInboxItem`, unchanged from ticket 06) — never executes anything. */
+function resolveItemResponse(ctx: DaemonContext, id: string, outcome: ResolutionOutcome): Response {
+  try {
+    const result = resolveInboxItem(ctx.home, id, outcome);
+    return Response.json({ outcome, alreadyResolved: result.alreadyResolved });
+  } catch (error) {
+    if (error instanceof UnknownInboxItemError) return new Response("not found\n", { status: 404 });
+    throw error;
+  }
+}
+
+/** Dispatch one `/items/<id>/<action>` write — `undefined` when `pathname` doesn't even match the shape, so the caller falls through to the SAME bare 404 any other unrecognized path already gets. */
+function itemActionResponse(ctx: DaemonContext, pathname: string): Response | undefined {
+  const match = ITEM_ACTION_PATTERN.exec(pathname);
+  if (!match) return undefined;
+  const [, id, action] = match as unknown as [string, string, "run" | "done" | "dismiss"];
+
+  if (action === "run") return runItemResponse(ctx, id);
+  return resolveItemResponse(ctx, id, action === "done" ? "done" : "dismissed");
+}
+
 /**
  * The Daemon's routing table for everything `routes` (below) doesn't claim
- * (ticket 07, narrowed by ticket 08). `GET /` moved OFF this fetch handler
- * and onto `Bun.serve`'s own `routes` table — the bundled React page is a
- * static HTML-import route now, which is what gives it (and every asset it
- * references) Bun's automatic bundling AND, per decision 05, the SAME "open
- * read, no token" treatment every other static route gets for free: there
- * is no per-request logic a static route could skip, unlike the old
- * `indexResponse` it replaces. `GET /health`, `GET /events` and `GET /auth`
- * are the only OPEN reads still answered HERE — `/auth` validates the
- * token itself, so it cannot sit behind the token gate below. Everything
- * else — any other path, any non-GET method, including every write route
- * tickets 09-11 will add (`run`, `done`, `dismiss`, answer, focus) — is
- * DENIED BY DEFAULT unless it carries the token: no route is individually
- * wrapped in a check it might one day be written without, because there is
- * no path to "write" here that skips this `else` branch at all. Ticket 07
- * itself defines no concrete write route yet (the resolve/answer/focus
- * routes are tickets 09-11's own job) — proven instead by hitting this
- * same default against an arbitrary path: 403 without the token, falling
- * through to a plain 404 with it, which is exactly what a real write route
- * will see too once one exists.
+ * (ticket 07, narrowed by ticket 08, extended by ticket 09). `GET /` moved
+ * OFF this fetch handler and onto `Bun.serve`'s own `routes` table — the
+ * bundled React page is a static HTML-import route now, which is what
+ * gives it (and every asset it references) Bun's automatic bundling AND,
+ * per decision 05, the SAME "open read, no token" treatment every other
+ * static route gets for free: there is no per-request logic a static route
+ * could skip, unlike the old `indexResponse` it replaces. `GET /health`,
+ * `GET /events` and `GET /auth` are the only OPEN reads still answered
+ * HERE — `/auth` validates the token itself, so it cannot sit behind the
+ * token gate below. Everything else — any other path, any non-GET method,
+ * including every write route this ticket and tickets 10-11 add (`run`,
+ * `done`, `dismiss`, answer, focus) — is DENIED BY DEFAULT unless it
+ * carries the token: `itemActionResponse` is called only AFTER that gate,
+ * never wrapped around any route individually, so there is no path to
+ * "write" here that could ever be written without it.
  */
-export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response {
-  return (req: Request): Response => {
+export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response | Promise<Response> {
+  return (req: Request): Response | Promise<Response> => {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") return healthResponse();
@@ -529,6 +601,12 @@ export function createFetchHandler(ctx: DaemonContext): (req: Request) => Respon
     if (!isAuthorizedRequest(req, ctx.token)) {
       return new Response("forbidden\n", { status: 403 });
     }
+
+    if (req.method === "POST") {
+      const handled = itemActionResponse(ctx, url.pathname);
+      if (handled) return handled;
+    }
+
     return new Response("not found\n", { status: 404 });
   };
 }

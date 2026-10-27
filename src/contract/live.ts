@@ -1,0 +1,117 @@
+import { z } from "zod";
+
+/**
+ * The Live surface's own contract (ticket 08, decision 04): the ONE shape
+ * `GET /events` pushes and the board's client reads — reusing `event.ts`'s
+ * own style (a validated zod schema, the inferred type derived from it,
+ * never hand-written in parallel). Zero node-builtin imports, same as
+ * `event.ts` itself: zod is isomorphic, so this module bundles straight
+ * into the browser client exactly as written, with no server-only code to
+ * shim around.
+ *
+ * What is deliberately NOT here: any column, "stalled" or age computation.
+ * Those depend on wall-clock `now`, which only the client's ticking clock
+ * ever holds (the board's own `useNow` hook) — baking a column into this
+ * payload would freeze it the instant a Session goes quiet (no further
+ * Event, so no further push). The payload only ever carries facts that are
+ * true independent of when they're read: raw timestamps, and the Policy
+ * numbers (`stallMinutes`, `contextThresholdTokens`) the client's pure
+ * functions (`src/board.ts`) need to turn those facts into a column —
+ * sourced from the ONE place the Policy is read (`policy.ts`), never
+ * hardcoded again on the client.
+ */
+
+export const LivePolicySchema = z.object({
+  stallMinutes: z.number(),
+  contextThresholdTokens: z.number(),
+});
+export type LivePolicy = z.infer<typeof LivePolicySchema>;
+
+/**
+ * A Session's own STRUCTURAL role — never the `ticket` Label (that travels
+ * separately, below): "sesión" for a top-level Session, "subagente" for
+ * one with a parent. The spec lists "project, ticket, role, ↳ parent" as
+ * four distinct card fields (comma-separated — contrast the Inbox row's
+ * own "project / ticket", which the spec slashes together as ONE field),
+ * so this contract keeps `ticket` and `role` apart rather than folding the
+ * Label into the structural fallback the way `sessions.ts`'s `roleOf`
+ * does for the CLI tree's single compact line.
+ */
+export const SessionRoleSchema = z.enum(["sesión", "subagente"]);
+export type SessionRole = z.infer<typeof SessionRoleSchema>;
+
+/**
+ * A plain summary of one Action — what the Inbox row's "tool + command"
+ * field and a Session's "last signal" field both are, structurally. Kept
+ * as one shared shape so a renderer only needs ONE "tool: command, or just
+ * tool" formatter (`viewModel.ts`'s `toolLabelFor`) for both.
+ */
+export const ActionSummarySchema = z.object({
+  kind: z.enum(["shell", "mcp"]),
+  /** The runtime's own tool name (e.g. "Bash", or an MCP tool's fully-qualified name). */
+  tool: z.string(),
+  /** Set only for a `shell` Action — an `mcp` Action has no stored command (ticket 09's own "offers no run"). */
+  command: z.string().optional(),
+});
+export type ActionSummary = z.infer<typeof ActionSummarySchema>;
+
+/**
+ * One Session's row on the board — already resolved to a project
+ * (`deriveProject`, `sessions.ts`) server-side, since that shells out to
+ * `git` and is never shippable to a browser bundle. Everything else here
+ * is a plain fact the client's pure functions classify against a ticking
+ * clock: `sessionColumn`, `isSessionStalled` and `formatAge` (`board.ts`).
+ */
+export const BoardSessionSchema = z.object({
+  id: z.string(),
+  /** The Session that launched this one, when it has one — a card shows "↳ parent" (spec). */
+  parentId: z.string().optional(),
+  project: z.string(),
+  /** The `ticket` Label verbatim, exactly as announced — never validated or parsed (its own definition in the glossary). `undefined` when never labeled. */
+  ticket: z.string().optional(),
+  role: SessionRoleSchema,
+  startedAt: z.string().optional(),
+  endedAt: z.string().optional(),
+  lastEventTs: z.string().optional(),
+  /** Gates the context track exactly like `formatContextColumn` already does — never inferred from whether a sample happens to exist (ADR 0001). */
+  hasMeasureCapability: z.boolean(),
+  contextTokens: z.number().optional(),
+  /** "Last signal" (spec's own field, distinct from `age`): the latest Action this Session attempted, allowed or not — `sessions.ts`'s `lastAction`. `undefined` when it has never attempted one. */
+  lastSignal: ActionSummarySchema.optional(),
+});
+export type BoardSession = z.infer<typeof BoardSessionSchema>;
+
+/** One pending Inbox item's row — ticket 08 shows it read-only; 09 adds the run/listo/descartar actions over this SAME row shape. */
+export const BoardInboxItemSchema = z.object({
+  id: z.string(),
+  /** The Session whose Action this is — shown on the card as its own field, distinct from "project / ticket" (spec: "project / ticket, Session, age"). */
+  sessionId: z.string(),
+  project: z.string(),
+  ticket: z.string().optional(),
+  ts: z.string(),
+  action: ActionSummarySchema,
+  /** An enforced deny (awaiting `run`) vs. YA CORRIÓ (ticket 06, ADR 0001) — carried for 09 to act on; ticket 08 renders it the same either way. */
+  blocked: z.boolean(),
+});
+export type BoardInboxItem = z.infer<typeof BoardInboxItemSchema>;
+
+export const BoardPayloadSchema = z.object({
+  v: z.literal(1),
+  policy: LivePolicySchema,
+  sessions: z.array(BoardSessionSchema),
+  inbox: z.array(BoardInboxItemSchema),
+});
+export type BoardPayload = z.infer<typeof BoardPayloadSchema>;
+
+/**
+ * Validate at the boundary (ticket 08's own instruction): the client's
+ * `useEventSource` hook calls this on every SSE frame instead of trusting
+ * `JSON.parse`'s output outright. `undefined` on anything that isn't a
+ * valid `BoardPayload` — a torn frame, a future server's incompatible
+ * shape — so the caller can keep its last good state instead of crashing
+ * the board (never throws).
+ */
+export function parseBoardPayload(raw: unknown): BoardPayload | undefined {
+  const result = BoardPayloadSchema.safeParse(raw);
+  return result.success ? result.data : undefined;
+}

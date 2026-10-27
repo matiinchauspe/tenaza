@@ -1,0 +1,649 @@
+/**
+ * The Live surface's one CSS file (ticket 08, decision 04): custom-property
+ * tokens for color, spacing, type scale and borders — every component
+ * below reads these, never a literal color or a one-off pixel value, so
+ * the HumanLayer look (dark, square edges, dense, uppercase badges) stays
+ * in exactly one place to change. No CSS framework.
+ *
+ * Human fix round: this file is now a literal port of the approved
+ * prototype's own `<style>` block
+ * (`.yun/prototypes/tenaza-live-surface/PROTOTYPE-live-surface-BC.ts`) —
+ * same token NAMES and VALUES, same layout, same per-card look. Only the
+ * SELECTORS differ: the prototype's own one-letter classes (`.sc`, `.ac`,
+ * `.l1`, …) are kept apart from this project's already-reviewed BEM naming
+ * (`session-card__l1`, `inbox-card__cmd`, …), carried over from the first
+ * build of this ticket. Every rule below still reads the SAME colors,
+ * sizes and positions the prototype does — the human's own approved look,
+ * not an approximation of it.
+ */
+
+/**
+ * Geist + Geist Mono (SIL Open Font License), vendored as woff2 under
+ * ../assets/fonts — never a CDN or a Google Fonts URL (the prototype's own
+ * `<link>` to fonts.googleapis.com is NOT ported — decision 04/ticket 08's
+ * own "no CDN, the page works offline" rule), so the page works fully
+ * offline from the compiled binary. Source: the `geist` npm package,
+ * v1.8.2 (https://www.npmjs.com/package/geist,
+ * https://github.com/vercel/geist-font) — license text copied alongside
+ * the files at ../assets/fonts/GEIST-OFL-LICENSE.txt. Only the weights the
+ * board actually uses are vendored (Regular/Medium/SemiBold for Geist,
+ * Regular/Medium/SemiBold for Geist Mono — SemiBold added in this fix
+ * round: the prototype's logo, column headers and badges all set Geist
+ * Mono at weight 600, which the first build of this ticket never vendored)
+ * — the other ~15 weights the full family ships have no use in a dense
+ * HumanLayer-style board, and every unused weight is ~45-50kb baked into
+ * the compiled binary for nothing.
+ */
+@font-face {
+  font-family: "Geist";
+  src: url("../assets/fonts/Geist-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist";
+  src: url("../assets/fonts/Geist-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist";
+  src: url("../assets/fonts/Geist-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../assets/fonts/GeistMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../assets/fonts/GeistMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../assets/fonts/GeistMono-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* Color — dark only; the Live surface has no light mode (decision 04). The approved prototype's own exact palette — not an approximation of it. */
+  --bg: #0a0c0f;
+  --s1: #101318;
+  --s2: #151920;
+  --s3: #1b2029;
+  --line: #222832;
+  --line2: #2c3440;
+  --fg: #e8eaed;
+  --mut: #8b93a0;
+  --dim: #5b6370;
+
+  --teal: #2dd4bf;
+  --green: #34d399;
+  --amber: #f5a524;
+  --orange: #fb923c;
+  --red: #f87171;
+
+  /* The context track's own neutral fill (prototype's `.track .fill`) — its own token rather than a literal, per this file's "never a one-off literal" rule. */
+  --track-fill: #6b7584;
+
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+
+  /* Borders — square edges, no radius anywhere */
+  --radius: 0px;
+  --border-width: 1px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* A visible focus ring everywhere — accessibility bar (ticket 08). The prototype has none (a throwaway); kept here regardless — the real app's own bar, never relaxed to match a prototype's gap. */
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+}
+
+kbd {
+  font: 500 10px var(--font-mono);
+  color: var(--mut);
+  border: var(--border-width) solid var(--line2);
+  border-bottom-width: 2px;
+  padding: 0 4px;
+  background: var(--bg);
+}
+
+/* Respect the OS-level reduced-motion preference — no pulsing dot, no transitions. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/* App shell + header (prototype's <header>)                            */
+/* -------------------------------------------------------------------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app__header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  border-bottom: var(--border-width) solid var(--line);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-shrink: 0;
+}
+
+.app__logo {
+  font: 600 13px var(--font-mono);
+  letter-spacing: 2px;
+}
+
+.app__logo-accent {
+  color: var(--teal);
+}
+
+.app__stats {
+  display: flex;
+  gap: 6px;
+}
+
+.app__stat {
+  font: 500 11px var(--font-mono);
+  letter-spacing: 0.6px;
+  padding: 3px 8px;
+  border: var(--border-width) solid var(--line);
+  background: var(--s1);
+  color: var(--mut);
+}
+
+.app__stat b {
+  color: var(--fg);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.app__stat--hot {
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  color: var(--amber);
+}
+
+.app__stat--hot b {
+  color: var(--amber);
+}
+
+.app__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.app__loading {
+  color: var(--mut);
+  padding: 16px 20px;
+  font-family: var(--font-mono);
+}
+
+/* -------------------------------------------------------------------- */
+/* Board + columns (prototype's <main class="board"> / .col / .colh)    */
+/* -------------------------------------------------------------------- */
+
+.board {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(380px, 1.55fr) repeat(3, minmax(210px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.column {
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.column__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  font: 600 11px var(--font-mono);
+  letter-spacing: 1.2px;
+  color: var(--mut);
+}
+
+.column__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.column__dot--te-necesita {
+  background: var(--amber);
+}
+.column__dot--corriendo {
+  background: var(--green);
+}
+.column__dot--trabada {
+  background: var(--orange);
+}
+.column__dot--termino {
+  background: var(--dim);
+}
+
+.column__title {
+  margin: 0;
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+.column__title--te-necesita {
+  color: var(--amber);
+}
+.column__title--corriendo {
+  color: var(--green);
+}
+.column__title--trabada {
+  color: var(--orange);
+}
+.column__title--termino {
+  color: var(--dim);
+}
+
+.column__count {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.column__list {
+  padding: 2px 10px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  min-height: 0;
+}
+
+.column__list--empty {
+  flex: 1;
+}
+
+.column__empty {
+  border: 1px dashed var(--line);
+  color: var(--dim);
+  font: 12px var(--font-mono);
+  padding: 18px;
+  text-align: center;
+  margin: 0;
+}
+
+/* -------------------------------------------------------------------- */
+/* Cards — shared essentials; each card kind owns its own look below    */
+/* -------------------------------------------------------------------- */
+
+.card {
+  cursor: pointer;
+}
+
+/* -------------------------------------------------------------------- */
+/* Session card (prototype's .sc)                                       */
+/* -------------------------------------------------------------------- */
+
+.session-card {
+  background: var(--s1);
+  border: var(--border-width) solid var(--line);
+  padding: 10px 11px;
+  transition: border-color 0.2s;
+}
+
+.session-card:hover {
+  border-color: var(--line2);
+}
+
+.session-card.card--selected {
+  border-color: var(--teal);
+}
+
+.session-card--termino {
+  opacity: 0.55;
+}
+
+.session-card__l1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 500 12px var(--font-mono);
+}
+
+.session-card__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.session-card__dot--corriendo {
+  background: var(--green);
+}
+.session-card__dot--trabada {
+  background: var(--orange);
+}
+.session-card__dot--termino {
+  background: var(--dim);
+}
+
+.session-card__project {
+  color: var(--fg);
+}
+
+.session-card__ticket {
+  color: var(--teal);
+}
+
+.session-card__age {
+  margin-left: auto;
+  color: var(--dim);
+  font-weight: 400;
+}
+
+.session-card__l2 {
+  color: var(--mut);
+  font: 11px var(--font-mono);
+  margin-top: 3px;
+}
+
+/* "Last signal" (spec's own field) — the prototype's variants never show it; added in the SAME dim mono voice as l2, one line down, since the spec still requires it. */
+.session-card__signal {
+  color: var(--dim);
+  font: 11px var(--font-mono);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -------------------------------------------------------------------- */
+/* Context track (prototype's .ctx/.track/.fill/.over/.mark/.ctxn)      */
+/* -------------------------------------------------------------------- */
+
+.context-track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.context-track--unavailable {
+  color: var(--dim);
+}
+
+.context-track__bar {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  background: var(--s3);
+}
+
+.context-track__fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--track-fill);
+}
+
+.context-track__over {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--red);
+}
+
+.context-track__mark {
+  position: absolute;
+  top: -3px;
+  width: 1px;
+  height: 9px;
+  background: var(--amber);
+  opacity: 0.8;
+}
+
+.context-track__label {
+  font-weight: 500;
+  color: var(--mut);
+  min-width: 44px;
+  text-align: right;
+}
+
+.context-track__label--over {
+  color: var(--red);
+}
+
+/* -------------------------------------------------------------------- */
+/* Inbox / action card (prototype's .ac.inbox — the read-only slice)    */
+/* -------------------------------------------------------------------- */
+
+.inbox-card {
+  background: var(--s1);
+  border: var(--border-width) solid var(--line);
+  border-left: 2px solid var(--line2);
+  padding: 12px 13px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.inbox-card:hover {
+  border-color: var(--line2);
+}
+
+.inbox-card.card--selected {
+  border-color: var(--teal);
+  border-left-color: var(--teal);
+  background: var(--s2);
+}
+
+.inbox-card__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 11px var(--font-mono);
+  color: var(--mut);
+}
+
+.inbox-card__ticket {
+  color: var(--teal);
+}
+
+.inbox-card__when {
+  margin-left: auto;
+  color: var(--dim);
+}
+
+.inbox-card__cmd {
+  margin: 10px 0 0;
+  background: var(--bg);
+  border: var(--border-width) solid var(--line);
+  padding: 9px 11px;
+  font: 500 13px var(--font-mono);
+  color: var(--fg);
+  word-break: break-word;
+}
+
+/* Content defect #1 (human fix round): a 40-line heredoc command used to fill the whole card. Clamp to 3 lines with an ellipsis; the full text is always one hover away (the box's own `title`), and a SELECTED card lifts the clamp below so the whole thing reads inline, scroll-capped so one truly enormous command can never blow out the card's height. The clamp lives on this inner span, not the padded box: clamped on the box, `overflow: hidden` clips at the padding edge and a cut 4th line shows through the bottom padding. */
+.inbox-card__cmd-text {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.inbox-card.card--selected .inbox-card__cmd-text {
+  -webkit-line-clamp: unset;
+  display: block;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.inbox-card__tool {
+  color: var(--dim);
+  margin-right: 8px;
+}
+
+.inbox-card__prompt {
+  color: var(--amber);
+  margin-right: 8px;
+}
+
+/* -------------------------------------------------------------------- */
+/* Status badge — the Inbox card's own two states (ticket 08's slice)    */
+/* -------------------------------------------------------------------- */
+
+.status-badge {
+  font: 600 10px var(--font-mono);
+  letter-spacing: 0.8px;
+  padding: 2px 6px;
+  border: var(--border-width) solid;
+  text-transform: uppercase;
+}
+
+.status-badge--inbox {
+  color: var(--mut);
+  border-color: var(--line2);
+}
+
+.status-badge--ran {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+}
+
+/* -------------------------------------------------------------------- */
+/* Live dot (prototype's .live/.live i)                                  */
+/* -------------------------------------------------------------------- */
+
+.live-dot {
+  font: 500 11px var(--font-mono);
+  color: var(--mut);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.6px;
+}
+
+/* The prototype's label text is literally uppercase ("EN VIVO"); this app's own copy stays natural-case in the DOM (es-AR, same convention `StatusBadge` already follows) and CSS does the transform — same visual result, accessible text unaffected. */
+.live-dot__label {
+  text-transform: uppercase;
+}
+
+.live-dot__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.live-dot--open .live-dot__dot {
+  background: var(--green);
+  box-shadow: 0 0 0 0 var(--green);
+  animation: live-dot-pulse 2s infinite;
+}
+
+.live-dot--connecting .live-dot__dot {
+  background: var(--amber);
+}
+
+@keyframes live-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/* Footer keybar (prototype's <footer>) — only the keys ticket 08 wires */
+/* -------------------------------------------------------------------- */
+
+.app__footer {
+  height: 34px;
+  border-top: var(--border-width) solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 20px;
+  font: 11px var(--font-mono);
+  color: var(--dim);
+  flex-shrink: 0;
+}
+
+.app__key {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

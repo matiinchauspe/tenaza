@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, approvalResolvedEvent, EventSchema } from "../src/contract/event";
+import { actionDecidedEvent, approvalResolvedEvent, EventSchema, sessionStartedEvent } from "../src/contract/event";
 import {
   appendEvent,
   appendHumanEvent,
@@ -11,6 +11,7 @@ import {
   readHumanEvents,
   readHumanEventsTolerant,
   readSessionEvents,
+  sessionHasStarted,
 } from "../src/log";
 import { humanLogPath, sessionLogPath } from "../src/paths";
 
@@ -236,5 +237,76 @@ describe("ADR 0007 (ticket 01): a torn log line is skipped and counted, never th
     const raw = readFileSync(file, "utf8");
     expect(raw).not.toContain("\n\n");
     expect(readSessionEvents("sess-1", home)).toHaveLength(2);
+  });
+});
+
+describe("sessionHasStarted (ticket 05, M6's own backfill guard)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-log-started-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("false when the Session's log doesn't exist at all", () => {
+    expect(sessionHasStarted("sess-1", home)).toBe(false);
+  });
+
+  test("true when session.started is the first (and only) line", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }));
+    expect(sessionHasStarted("sess-1", home)).toBe(true);
+  });
+
+  test("false when the log exists but holds no session.started at all — the exact backfill-guard case", () => {
+    appendEvent(
+      home,
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        "deny",
+        { match: "gh pr merge", effect: "human" },
+      ),
+    );
+    expect(sessionHasStarted("sess-1", home)).toBe(false);
+  });
+
+  test("still true for a Session with many later Events — reads only the first line, never the whole growing log", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }));
+    for (let i = 0; i < 500; i++) {
+      appendEvent(home, approvalResolvedEvent("sess-1", String(i), "done"));
+    }
+    expect(sessionHasStarted("sess-1", home)).toBe(true);
+  });
+
+  test("true when session.started is NOT line 1 but DOES appear later — the slow-path fallback (ticket 05 fix for the infinite-backfill bug)", () => {
+    // Exactly the shape a previous backfill call leaves behind: the
+    // Session's log opens with an EARLIER Event (predates a proper start),
+    // and the backfilled session.started landed after it, since an append
+    // only ever lands at the end. The fast (first-line) path alone would
+    // say "false" FOREVER here.
+    appendEvent(
+      home,
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        "deny",
+        { match: "gh pr merge", effect: "human" },
+      ),
+    );
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }));
+
+    expect(sessionHasStarted("sess-1", home)).toBe(true);
+  });
+
+  test("degrades to false, never throws, on a torn first line", () => {
+    const file = sessionLogPath("sess-1", home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, '{"v":1,"ts":"2026-01-01T00:00:00.000Z","session":"sess-1"');
+
+    expect(() => sessionHasStarted("sess-1", home)).not.toThrow();
+    expect(sessionHasStarted("sess-1", home)).toBe(false);
   });
 });

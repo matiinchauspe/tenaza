@@ -7,7 +7,7 @@ import {
 } from "../contract/event";
 import { decideAction } from "../decide";
 import { runSelfCheck } from "../health";
-import { appendEvent, readSessionEvents } from "../log";
+import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { loadPolicy, policyWarning } from "../policy";
 import { measureContextTokens } from "../transcript";
@@ -27,6 +27,8 @@ export interface ClaudeHookPayload {
   tool_name: string;
   tool_input: Record<string, unknown>;
   agent_id?: string;
+  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  cwd?: string;
 }
 
 /** A new top-level Session. Never carries a parent — only SubagentStart does. */
@@ -49,15 +51,29 @@ export interface ClaudeSubagentStartPayload {
 
 /**
  * A subagent Session ending — `agent_id` names it, not the parent
- * `session_id`. `transcript_path` is optional: a payload that omits it (or
- * names a transcript with no readable usage) still ends the Session, just
- * without a usage sample — degrades silently, never a crash (q9).
+ * `session_id`. `agent_transcript_path` (ticket 05, M3) is the SUBAGENT'S
+ * OWN transcript — a distinct common field from `transcript_path`, which on
+ * `SubagentStop` names the PARENT session's transcript and must never be
+ * read for this Session's usage (verified against
+ * code.claude.com/docs/en/hooks.md's own `SubagentStop` input example,
+ * which carries both side by side). Both optional: a payload that omits
+ * `agent_transcript_path` (or names a transcript with no readable usage)
+ * still ends the Session, just without a usage sample — degrades silently,
+ * never a crash (q9).
  */
 export interface ClaudeSubagentStopPayload {
   session_id: string;
   hook_event_name: "SubagentStop";
   agent_id: string;
   transcript_path?: string;
+  agent_transcript_path?: string;
+  /**
+   * A common input field the real payload carries — but deliberately
+   * NEVER read here (ticket 05 fix): see `handleSubagentStop`'s own doc
+   * comment for why backfilling `session.started` from it would defeat
+   * `isNoiseSession`.
+   */
+  cwd?: string;
 }
 
 /** The top-level Session ending, carrying the runtime's own reason. `transcript_path` is optional — see `ClaudeSubagentStopPayload`. */
@@ -66,6 +82,8 @@ export interface ClaudeSessionEndPayload {
   hook_event_name: "SessionEnd";
   reason: string;
   transcript_path?: string;
+  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  cwd?: string;
 }
 
 /** The main agent finishing one turn — samples usage, but never ends the Session (that's SessionEnd's job). */
@@ -73,17 +91,27 @@ export interface ClaudeStopPayload {
   session_id: string;
   hook_event_name: "Stop";
   transcript_path?: string;
+  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  cwd?: string;
 }
 
 /**
  * One tool call completing. Counted toward the "every 25 tool calls" sample
  * (q9) — never logged itself, since an ordinary tool call matches no Policy
  * Rule and the Event contract only records what the Policy decided on.
+ * `agent_id` (ticket 05, M2) names a subagent's OWN Session, exactly as on
+ * `PreToolUse` — absent for a call in the main Session.
  */
 export interface ClaudePostToolUsePayload {
   session_id: string;
   hook_event_name: "PostToolUse";
+  /** The PARENT session's transcript when `agent_id` is present (ticket 05, M3's own recurrence here) — never read for a subagent's own sample; see `handlePostToolUse`. */
   transcript_path?: string;
+  agent_id?: string;
+  /** The SUBAGENT's own transcript — the only one `handlePostToolUse` ever samples from when `agent_id` is present. */
+  agent_transcript_path?: string;
+  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  cwd?: string;
 }
 
 export type ClaudeHookInput =
@@ -210,6 +238,46 @@ function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: num
 }
 
 /**
+ * Backfill `session.started` from THIS call's own `cwd` when the Session
+ * has never had one (ticket 05, M6 — #1423's own fix, confirmed against
+ * the real `tenaza status` dogfood, #1436): a Session whose start hook
+ * never fired — it predates Tenaza's install — still lands under a real
+ * project on the next call that happens to carry a `cwd`, instead of
+ * reading "(sin proyecto) sin datos" forever. A no-op when `cwd` is absent,
+ * or once the Session already has a `session.started` — this only ever
+ * FILLS a gap, never overwrites or duplicates one. A side effect, same
+ * guarantee as `handleSessionStart`'s own catch: failing to backfill must
+ * never crash the call that triggered it (ADR 0007).
+ *
+ * Deliberately NEVER called from `handleSubagentStop` (ticket 05 fix):
+ * `SubagentStop` DOES carry `cwd` as a common field, so backfilling there
+ * would give Claude Code's own internal side-agents a `session.started`
+ * too — exactly undoing `isNoiseSession` (`sessions.ts`), which hides a
+ * Session whose only Events are its end plus a Usage sample precisely
+ * because that is the side-agent signature. A subagent that did any REAL
+ * work already got backfilled by its own `PreToolUse`/`PostToolUse` before
+ * it ever reached `SubagentStop`; one that didn't is exactly what
+ * `isNoiseSession` is for.
+ */
+function backfillSessionStartedIfMissing(
+  home: string,
+  session: string,
+  cwd: string | undefined,
+  parent: string | undefined,
+): void {
+  if (!cwd) return;
+  try {
+    if (sessionHasStarted(session, home)) return;
+    appendEvent(
+      home,
+      sessionStartedEvent(session, { parent, runtime: "claude", cwd, capabilities: CLAUDE_CAPABILITIES }),
+    );
+  } catch {
+    // See the doc comment above.
+  }
+}
+
+/**
  * Decide one Claude Code PreToolUse call against the Policy. Returns
  * `undefined` when there is nothing to tell the host — either the call
  * didn't normalize to an Action, it was a `tenaza label` announce (handled
@@ -220,22 +288,27 @@ async function handlePreToolUse(
   home: string,
   payload: ClaudeHookPayload,
 ): Promise<ClaudeHookOutput | undefined> {
+  // `agent_id` names a subagent's OWN Session, never its parent's
+  // `session_id` (ticket 05, M2 — #1423's own fix: v0.1 logged every
+  // subagent decision under the PARENT's log instead of the subagent's
+  // own). Resolved once, used everywhere below.
+  const session = payload.agent_id ?? payload.session_id;
+  backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
+
   const action = normalizeClaudeAction(payload);
   if (!action) return undefined;
 
   if (action.kind === "shell") {
     const labels = parseLabelCommand(action.command);
     if (labels) {
-      // The agent doesn't know its own Session id; this hook does (ADR
-      // 0003) — `agent_id` names a subagent's OWN Session, never its
-      // parent's `session_id`. Never routed through the Policy: an
-      // announce isn't a Rule match, so it's never logged as one.
-      appendEvent(home, sessionLabeledEvent(payload.agent_id ?? payload.session_id, labels));
+      // Never routed through the Policy: an announce isn't a Rule match,
+      // so it's never logged as one (ADR 0003).
+      appendEvent(home, sessionLabeledEvent(session, labels));
       return undefined;
     }
   }
 
-  const result = await decideAction(home, payload.session_id, action, CLAUDE_CAPABILITIES);
+  const result = await decideAction(home, session, action, CLAUDE_CAPABILITIES);
   const skippedLines = result.logged ? result.skippedLines : undefined;
 
   if (result.decision === "deny") {
@@ -320,33 +393,51 @@ export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPa
  * SubagentStop: the subagent Session (`agent_id`) ended. Claude Code's own
  * SubagentStop payload carries no free-text reason, so this constant is
  * Tenaza's own word for it — distinct from SessionEnd's runtime-supplied
- * one. Also samples usage for `agent_id` (q9) — a subagent's context is its
- * own, never folded into its parent's.
+ * one. Also samples usage for `agent_id` from `agent_transcript_path` —
+ * NEVER `transcript_path`, which here names the PARENT's transcript
+ * (ticket 05, M3) — a subagent's context is its own, never folded into its
+ * parent's.
+ *
+ * Deliberately does NOT call `backfillSessionStartedIfMissing` (ticket 05
+ * fix — see that function's own doc comment): this is the ONE lifecycle
+ * event where backfilling would defeat `isNoiseSession`'s hide.
  */
 export function handleSubagentStop(home: string, payload: ClaudeSubagentStopPayload): void {
   appendEvent(home, sessionEndedEvent(payload.agent_id, "subagent_stop"));
-  sampleUsage(home, payload.agent_id, payload.transcript_path);
+  sampleUsage(home, payload.agent_id, payload.agent_transcript_path);
 }
 
 /** SessionEnd: the top-level Session (`session_id`) ended, with the runtime's own reason. Also samples usage (q9). */
 export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload): void {
+  backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
   appendEvent(home, sessionEndedEvent(payload.session_id, payload.reason));
   sampleUsage(home, payload.session_id, payload.transcript_path);
 }
 
 /** Stop: the main agent finished a turn — sample usage for `session_id`. Never ends the Session. */
 export function handleStop(home: string, payload: ClaudeStopPayload): void {
+  backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
   sampleUsage(home, payload.session_id, payload.transcript_path);
 }
 
 /**
- * PostToolUse: count one tool call for `session_id`, sampling usage on
- * exactly the 25th (and every 25th after) — AC2's own boundary.
+ * PostToolUse: count one tool call for the resolved Session, sampling
+ * usage on exactly the 25th (and every 25th after) — AC2's own boundary.
+ * Keyed by `agent_id ?? session_id` (ticket 05, M2), exactly like
+ * `PreToolUse` — a subagent's own tool calls must land in ITS log, never
+ * its parent's.
  */
 export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): void {
-  const count = countToolCall(home, payload.session_id);
+  const session = payload.agent_id ?? payload.session_id;
+  backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
+  const count = countToolCall(home, session);
   if (!shouldSampleOnToolCall(count)) return;
-  sampleUsage(home, payload.session_id, payload.transcript_path);
+  // Inside a subagent, `transcript_path` names the PARENT's transcript —
+  // the exact M3 bug, recurring here (ticket 05 fix). Never fall back to
+  // it: no `agent_transcript_path` means no sample at all for this call,
+  // never someone else's tokens recorded under this Session.
+  const transcriptPath = payload.agent_id ? payload.agent_transcript_path : payload.transcript_path;
+  sampleUsage(home, session, transcriptPath);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import path from "node:path";
 import { type Event, EventSchema } from "./contract/event";
 import { humanLogPath, sessionLogPath, sessionsDir, tenazaHome } from "./paths";
@@ -68,6 +68,54 @@ export function appendEvent(home: string, event: Event): void {
 /** Parse one Session's log into validated Events, in file order. */
 export function readSessionEvents(session: string, home: string = tenazaHome()): Event[] {
   return readLog(sessionLogPath(session, home));
+}
+
+/**
+ * Existence check (ticket 05, M6's own backfill guard in
+ * `adapters/claude.ts`): does this Session's log already have a
+ * `session.started` ANYWHERE in it? Two tiers, cheapest first:
+ *
+ *   1. FAST — `session.started` really is line 1, true for every Session
+ *      whose start hook fired before anything else (the overwhelming
+ *      majority). Reads only the first few KB, never the whole file. This
+ *      matters here specifically: unlike every other reader in this
+ *      module, this is asked on EVERY PreToolUse / PostToolUse call — the
+ *      hottest path in the system.
+ *   2. SLOW — line 1 is something else (a Session that predates a proper
+ *      start, or one of ticket 01/02's own lifecycle-less fixtures): a
+ *      full scan of the file. REQUIRED, not optional — line 1 for such a
+ *      Session never changes (a backfilled `session.started` only ever
+ *      APPENDS at the end), so trusting the fast path alone here would
+ *      make the caller think "never started" FOREVER and re-append a
+ *      fresh backfill on every single later call, growing the log
+ *      unbounded and drifting `startedAt` to whichever call ran last
+ *      (`buildSessionIndex` is last-write-wins). The slow path only runs
+ *      once the fast one has already ruled itself out, so it costs
+ *      nothing on the common case this function exists to be cheap for.
+ */
+export function sessionHasStarted(session: string, home: string = tenazaHome()): boolean {
+  const file = sessionLogPath(session, home);
+  if (!existsSync(file)) return false;
+  if (firstLineIsSessionStarted(file)) return true;
+  return readLog(file).some((event) => event.type === "session.started");
+}
+
+function firstLineIsSessionStarted(file: string): boolean {
+  const fd = openSync(file, "r");
+  try {
+    const buffer = Buffer.alloc(8192);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n", 1)[0] ?? "";
+    if (!firstLine) return false;
+    return JSON.parse(firstLine)?.type === "session.started";
+  } catch {
+    // A torn or truncated first line doesn't mean the Session never
+    // started — just that line 1 isn't readable as one. Fall through to
+    // the slow path rather than report `false` outright.
+    return false;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

@@ -3,8 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
+import { decideAction } from "../../src/decide";
 import { readSessionEvents } from "../../src/log";
 import { readNotificationRecorder } from "../../src/notify";
+import { renderSessionTree } from "../../src/sessions";
 
 const fixture = (name: string) =>
   path.join(import.meta.dir, "..", "fixtures", "transcripts", name);
@@ -48,6 +50,25 @@ effect = "flag"
     expect(reason.toLowerCase()).toContain("do not retry");
     expect(reason.toLowerCase()).toContain("tell the user");
     expect(reason.toLowerCase()).toContain("continue");
+  });
+
+  test("a human-ruled Bash command INSIDE a subagent is decided and logged under agent_id, never session_id (ticket 05, M2)", async () => {
+    // The real bug (#1423): v0.1 keyed PreToolUse's decision by
+    // `session_id` always, so a subagent's own denied command landed in
+    // the PARENT's log instead of its own.
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+      agent_id: "agent-1",
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ session: "agent-1", type: "action.decided", data: { decision: "deny" } });
   });
 
   test("a flag-ruled Bash command still logs action.decided, but returns NO hook output at all (decision 07, H2)", async () => {
@@ -188,12 +209,12 @@ effect = "flag"
     );
   });
 
-  test("SubagentStop with a transcript_path ALSO samples usage for agent_id, not session_id", async () => {
+  test("SubagentStop with an agent_transcript_path ALSO samples usage for agent_id, not session_id", async () => {
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
       agent_id: "agent-1",
-      transcript_path: fixture("above-threshold.jsonl"),
+      agent_transcript_path: fixture("above-threshold.jsonl"),
     });
 
     expect(response).toBeUndefined();
@@ -203,6 +224,41 @@ effect = "flag"
     expect(events).toContainEqual(
       expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 242170 } }),
     );
+  });
+
+  test("SubagentStop reads agent_transcript_path, NEVER the sibling transcript_path — which names the PARENT's transcript (ticket 05, M3)", async () => {
+    // The real bug (#1423/#1436): v0.1 measured the parent's transcript for
+    // every subagent, so dozens of internal side-agents all showed the
+    // SAME huge token count as their parent. Give the two fields
+    // DIFFERENT fixtures and assert the subagent's own (smaller) number
+    // wins — proof `transcript_path` here is read by nobody.
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      transcript_path: fixture("above-threshold.jsonl"),
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 75704 } }),
+    );
+  });
+
+  test("SubagentStop with only a (parent) transcript_path and no agent_transcript_path samples nothing — never falls back to the wrong transcript", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("session.ended");
   });
 
   test("Stop samples usage for session_id, without ending the Session", async () => {
@@ -389,6 +445,60 @@ effect = "human"
     expect(readSessionEvents("sess-2", home)).toHaveLength(1);
   });
 
+  test("PostToolUse INSIDE a subagent counts under agent_id, never session_id (ticket 05, M2)", async () => {
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        agent_id: "agent-1",
+        agent_transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+    expect(readSessionEvents("agent-1", home)).toHaveLength(0);
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      agent_id: "agent-1",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    // the 25th call for the SUBAGENT samples under its own Session —
+    // the parent's log never sees any of this.
+    expect(readSessionEvents("agent-1", home)).toHaveLength(1);
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("PostToolUse INSIDE a subagent samples agent_transcript_path, NEVER the sibling transcript_path which names the PARENT's transcript (ticket 05, M3 recurring in PostToolUse)", async () => {
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        agent_id: "agent-1",
+        transcript_path: fixture("above-threshold.jsonl"),
+        agent_transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 75704 } }),
+    );
+  });
+
+  test("PostToolUse INSIDE a subagent with only a (parent) transcript_path and no agent_transcript_path samples NOTHING on the 25th call — never falls back to the wrong transcript", async () => {
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        agent_id: "agent-1",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    expect(readSessionEvents("agent-1", home)).toHaveLength(0);
+  });
+
   describe("notifications (ticket 08: 🔴 fires at the moment a sample crosses the threshold)", () => {
     test("a Stop call with a transcript above the threshold fires exactly one 🔴", async () => {
       await handleClaudeHook(home, {
@@ -465,13 +575,136 @@ effect = "human"
         session_id: "sess-1",
         hook_event_name: "SubagentStop",
         agent_id: "agent-1",
-        transcript_path: fixture("above-threshold.jsonl"),
+        agent_transcript_path: fixture("above-threshold.jsonl"),
       });
 
       const notifications = readNotificationRecorder(home);
       expect(notifications).toHaveLength(1);
       expect(notifications[0]?.tag).toBe("threshold-agent-1");
     });
+  });
+});
+
+describe("session.started backfill from a later event's own cwd (ticket 05, M6 — #1423's own fix)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-backfill-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a PostToolUse call for a Session that never got SessionStart backfills session.started from its own cwd", async () => {
+    // A Session running before Tenaza was installed (or whose SessionStart
+    // hook simply never fired) still gets grouped under a real project
+    // on the next event that happens to carry a `cwd` — instead of
+    // "(sin proyecto) sin datos" forever.
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      cwd: "/repos/predates-install",
+    });
+
+    const events = readSessionEvents("sess-1", home);
+    expect(events[0]).toMatchObject({
+      type: "session.started",
+      data: { runtime: "claude", cwd: "/repos/predates-install" },
+    });
+    expect((events[0] as { data: { parent?: string } }).data.parent).toBeUndefined();
+  });
+
+  test("a PreToolUse call INSIDE a subagent that never got SubagentStart backfills session.started PARENTED to session_id", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Read",
+      tool_input: {},
+      agent_id: "agent-1",
+      cwd: "/repos/predates-install",
+    });
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events[0]).toMatchObject({
+      type: "session.started",
+      data: { parent: "sess-1", runtime: "claude", cwd: "/repos/predates-install" },
+    });
+  });
+
+  test("a call with NO cwd at all backfills nothing — the Session simply stays lifecycle-less", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+    });
+
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("backfill never fires once the Session already has a session.started — never overwrites or duplicates one", async () => {
+    await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "SessionStart", cwd: "/repo/real" });
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      cwd: "/some/other/cwd",
+    });
+
+    const events = readSessionEvents("sess-1", home);
+    expect(events.filter((e) => e.type === "session.started")).toHaveLength(1);
+    expect(events[0]).toMatchObject({ data: { cwd: "/repo/real" } });
+  });
+
+  test("backfill never repeats when the log's FIRST line is NOT session.started — e.g. a Session that predates install (ticket 05 fix: sessionHasStarted's own infinite-append bug)", async () => {
+    // The Session's log opens with an action.decided (ticket 01/02's own
+    // lifecycle-less shape) — line 1 is NEVER session.started, real or
+    // backfilled, since a backfill only ever appends at the END. Two
+    // PostToolUse calls, each carrying a cwd, must still produce exactly
+    // ONE session.started — not one per call.
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), '\n[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      cwd: "/repo/predates-install",
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      cwd: "/repo/predates-install",
+    });
+
+    const events = readSessionEvents("sess-1", home);
+    expect(events.filter((e) => e.type === "session.started")).toHaveLength(1);
+  });
+});
+
+describe("SubagentStop deliberately never backfills (ticket 05 fix — would defeat isNoiseSession)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-subagentstop-nobackfill-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("SubagentStop with cwd + agent_transcript_path and NOTHING else stays hidden from status — exactly the side-agent signature isNoiseSession hides", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      cwd: "/repos/some-project",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events.map((e) => e.type).sort()).toEqual(["session.ended", "usage.sampled"]);
+    expect(events.some((e) => e.type === "session.started")).toBe(false);
+    expect(renderSessionTree(home)).not.toContain("agent-1");
   });
 });
 

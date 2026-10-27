@@ -1,11 +1,13 @@
+import { existsSync } from "node:fs";
 import { approvalResolvedEvent } from "./contract/event";
 import { findInboxRow, isResolved } from "./inbox";
 import { appendHumanEvent } from "./log";
+import { cwdForSession } from "./sessions";
 
 /** Thrown by every resolution path when the id names no Inbox row at all. */
 export class UnknownInboxItemError extends Error {
-  constructor(public readonly id: number) {
-    super(`unknown inbox item #${id}`);
+  constructor(public readonly id: string) {
+    super(`unknown inbox item ${id}`);
   }
 }
 
@@ -20,11 +22,13 @@ export interface ResolveResult {
  * Close an Inbox item by hand — `done` (the human ran it themselves) or
  * `dismissed` (it no longer applies). Idempotent: resolving an
  * already-closed item neither errors nor appends a second Event — the
- * resolution already on file is left exactly as it is.
+ * resolution already on file is left exactly as it is. `id` is the item's
+ * FULL identity hash (decision 03, ADR 0005) — `cli.ts` resolves whatever
+ * prefix the human typed down to this before ever calling here.
  */
 export function resolveInboxItem(
   home: string,
-  id: number,
+  id: string,
   outcome: ResolutionOutcome,
 ): ResolveResult {
   const row = findInboxRow(home, id);
@@ -32,7 +36,7 @@ export function resolveInboxItem(
 
   if (isResolved(home, id)) return { alreadyResolved: true };
 
-  appendHumanEvent(home, approvalResolvedEvent(row.session, String(id), outcome));
+  appendHumanEvent(home, approvalResolvedEvent(row.session, id, outcome));
   return { alreadyResolved: false };
 }
 
@@ -41,7 +45,9 @@ export type RunOutcome =
   | { kind: "stays-open"; exitCode: number }
   | { kind: "already-resolved" }
   | { kind: "unblockable" }
-  | { kind: "not-runnable" };
+  | { kind: "not-runnable" }
+  | { kind: "no-cwd"; command: string }
+  | { kind: "cwd-missing"; cwd: string; command: string };
 
 /**
  * `tenaza run <id>`: execute the Inbox item's stored command AT THE HUMAN'S
@@ -60,11 +66,20 @@ export type RunOutcome =
  * An `mcp` item (ticket 04, decision 07) carries no stored shell command at
  * all — it is answered live, or closed by hand (`done`/`dismiss`), never
  * executed from here. `run` refuses it the SAME way: a clean outcome the
- * CLI reports, never a thrown error — this is an ordinary, expected
- * outcome of asking `run` for the wrong kind of item, not a programming
- * fault.
+ * CLI reports, never a thrown error.
+ *
+ * Runs in the REQUESTING Session's OWN `cwd` (ticket 06), read from that
+ * Session's own `session.started` — fixing v0.1's `Bun.spawn` with no
+ * `cwd` at all, which ran in whatever directory the human happened to be
+ * in when they typed `tenaza run`. Two ways that can fail to resolve, and
+ * EITHER refuses outright rather than silently running somewhere else
+ * (the ticket's own warning): the Session never started at all
+ * (`"no-cwd"`), or its directory no longer exists on disk — a worktree
+ * already removed, say (`"cwd-missing"`). Both leave the item open and
+ * write no Event, exactly like `"stays-open"`, so the human can still
+ * close it by hand or run the command themselves.
  */
-export async function runInboxItem(home: string, id: number): Promise<RunOutcome> {
+export async function runInboxItem(home: string, id: string): Promise<RunOutcome> {
   const row = findInboxRow(home, id);
   if (!row) throw new UnknownInboxItemError(id);
 
@@ -73,8 +88,14 @@ export async function runInboxItem(home: string, id: number): Promise<RunOutcome
   if (!row.blocked) return { kind: "unblockable" };
 
   if (row.action.kind !== "shell") return { kind: "not-runnable" };
+  const command = row.action.command;
 
-  const proc = Bun.spawn(["sh", "-c", row.action.command], {
+  const cwd = cwdForSession(row.session, home);
+  if (cwd === undefined) return { kind: "no-cwd", command };
+  if (!existsSync(cwd)) return { kind: "cwd-missing", cwd, command };
+
+  const proc = Bun.spawn(["sh", "-c", command], {
+    cwd,
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -82,6 +103,6 @@ export async function runInboxItem(home: string, id: number): Promise<RunOutcome
 
   if (exitCode !== 0) return { kind: "stays-open", exitCode };
 
-  appendHumanEvent(home, approvalResolvedEvent(row.session, String(id), "done"));
+  appendHumanEvent(home, approvalResolvedEvent(row.session, id, "done"));
   return { kind: "closed" };
 }

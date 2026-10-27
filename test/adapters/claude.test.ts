@@ -45,7 +45,7 @@ effect = "flag"
 
     expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
     const reason = response?.hookSpecificOutput?.permissionDecisionReason ?? "";
-    expect(reason).toContain("inbox #1");
+    expect(reason).toMatch(/inbox [0-9a-f]{4,40}\./);
     expect(reason.toLowerCase()).toContain("reserved for the human");
     expect(reason.toLowerCase()).toContain("do not retry");
     expect(reason.toLowerCase()).toContain("tell the user");

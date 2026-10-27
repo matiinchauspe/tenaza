@@ -1,6 +1,6 @@
 import { RED, RESET } from "./contextbar";
 import { readHealth } from "./health";
-import { type InboxItem, deriveInbox } from "./inbox";
+import { type InboxItem, deriveInbox, shortIdIndex } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
@@ -103,9 +103,9 @@ function formatInboxSummary(action: InboxItem["action"]): string {
   return action.kind === "shell" ? firstWords(action.command) : describeAction(action);
 }
 
-function formatInbox(count: number, top: InboxItem | undefined): string {
-  if (count === 0 || top === undefined) return "✉ 0";
-  return `✉ ${count} → #${top.id} ${formatInboxSummary(top.action)}`;
+function formatInbox(count: number, top: InboxItem | undefined, shortId: string | undefined): string {
+  if (count === 0 || top === undefined || shortId === undefined) return "✉ 0";
+  return `✉ ${count} → ${shortId} ${formatInboxSummary(top.action)}`;
 }
 
 /**
@@ -134,6 +134,7 @@ export function formatStatusline(home: string = tenazaHome()): string {
   const counts = deriveStatuslineCounts(home);
   const thresholdTokens = loadPolicy(home).thresholdTokens;
   const top = mostUrgentInboxItem(home);
+  const shortId = top ? shortIdIndex(home).get(top.id) : undefined;
   const healthMark = formatHealthMark(home);
 
   return [
@@ -141,6 +142,6 @@ export function formatStatusline(home: string = tenazaHome()): string {
     ...(healthMark ? [healthMark] : []),
     `● ${counts.live} vivas ·`,
     `${formatFlagged(counts.flagged, thresholdTokens)} ·`,
-    formatInbox(counts.inbox, top),
+    formatInbox(counts.inbox, top, shortId),
   ].join(" ");
 }

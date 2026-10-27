@@ -3,10 +3,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
+import { inboxIdentityHash } from "../src/identity";
 import { appendEvent } from "../src/log";
 import { renderStatus } from "../src/status";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+
+/** A single Inbox item's own display id is always the minimum 4-char prefix of its hash (decision 03, ADR 0005, ticket 06) — there's nothing else in these tests for it to collide with. */
+function shortId(session: string, line: number): string {
+  return inboxIdentityHash(session, line).slice(0, 4);
+}
 
 describe("renderStatus", () => {
   let home: string;
@@ -32,11 +38,11 @@ effect = "human"
     expect(renderStatus(home)).toContain("Inbox");
   });
 
-  test("lists a denied Action as `#id  Bash: command`", async () => {
+  test("lists a denied Action as `<id>  Bash: command`", async () => {
     await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
 
     const output = renderStatus(home);
-    expect(output).toContain("#1  Bash: gh pr merge 58");
+    expect(output).toContain(`${shortId("sess-1", 1)}  Bash: gh pr merge 58`);
   });
 
   test("a fresh home with no observed Session renders no tree — just the Inbox, as before", async () => {
@@ -44,7 +50,7 @@ effect = "human"
     expect(output).toBe("Inbox: (empty)\n");
   });
 
-  test("lists a denied mcp Action as `#id  tool  args-summary`, never crashing (ticket 04)", async () => {
+  test("lists a denied mcp Action as `<id>  tool  args-summary`, never crashing (ticket 04)", async () => {
     writeFileSync(
       path.join(home, "config", "policy.toml"),
       `
@@ -62,7 +68,7 @@ effect = "human"
     });
 
     const output = renderStatus(home);
-    expect(output).toContain("#1  mcp__neon__run_sql  branch_id=br-prod");
+    expect(output).toContain(`${shortId("sess-1", 1)}  mcp__neon__run_sql  branch_id=br-prod`);
   });
 
   test("the Session tree renders above the Inbox, both present together", async () => {
@@ -78,7 +84,9 @@ effect = "human"
     const inboxIndex = output.indexOf("Inbox:");
     expect(treeIndex).toBeGreaterThanOrEqual(0);
     expect(inboxIndex).toBeGreaterThan(treeIndex);
-    expect(output).toContain("#1  Bash: gh pr merge 58");
+    // The `session.started` appended above lands on line 1 of sess-1's own
+    // log, so the deny's `action.decided` lands on line 2.
+    expect(output).toContain(`${shortId("sess-1", 2)}  Bash: gh pr merge 58`);
   });
 
   test("an ENDED Session reads ended in the tree; its open Inbox item still shows in the Inbox on its own (ticket 05, #1436's stale 'te espera' fix)", async () => {
@@ -101,6 +109,7 @@ effect = "human"
     expect(treeLine).not.toContain("te espera");
     expect(treeLine).not.toContain("⏸");
     expect(output).toContain("Inbox:");
-    expect(output).toContain("#1  Bash: gh pr merge 58");
+    // Same shift: `session.started` is line 1, the deny is line 2.
+    expect(output).toContain(`${shortId("55e06de1", 2)}  Bash: gh pr merge 58`);
   });
 });

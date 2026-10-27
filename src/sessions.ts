@@ -1,7 +1,7 @@
 import type { Capability, Event } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
-import { readAllSessionEvents } from "./log";
+import { readAllSessionEvents, readSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 
@@ -83,6 +83,20 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
   }
 
   return index;
+}
+
+/**
+ * The `cwd` a Session's OWN `session.started` carried (ticket 06, "`run`
+ * from the Session's directory") — `undefined` when this Session has no
+ * `session.started` at all (its start hook never fired, or the Session id
+ * is unknown outright). Deliberately NOT a fallback to the caller's own
+ * current directory: a caller that treats `undefined` as "run here
+ * instead" would silently run a denied command somewhere the human never
+ * asked for it to run (the ticket's own warning) — `resolve.ts`'s
+ * `runInboxItem` refuses outright instead.
+ */
+export function cwdForSession(session: string, home: string = tenazaHome()): string | undefined {
+  return buildSessionIndex(readSessionEvents(session, home)).get(session)?.cwd;
 }
 
 /**

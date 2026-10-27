@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent } from "../src/contract/event";
+import { actionDecidedEvent, sessionStartedEvent } from "../src/contract/event";
+import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
 import { appendEvent, readHumanEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
@@ -11,6 +12,12 @@ import {
   runInboxItem,
   UnknownInboxItemError,
 } from "../src/resolve";
+
+/** When `openItem` is the ONLY Event written for "sess-1", its `action.decided` lands on line 1. */
+const ID = inboxIdentityHash("sess-1", 1);
+/** When a `session.started` (`startSession`) precedes it, `openItem`'s own Event lands on line 2 instead. */
+const ID_AFTER_START = inboxIdentityHash("sess-1", 2);
+const UNKNOWN_ID = "0".repeat(40);
 
 function openItem(home: string, session: string, command: string): void {
   appendEvent(
@@ -48,6 +55,11 @@ function openMcpItem(home: string, session: string, tool: string, args: Record<s
   );
 }
 
+/** A Session's `session.started` (ticket 06: `run` needs this for its `cwd`) — defaults to `home` itself, which always exists, so a test that doesn't care about `cwd` specifically doesn't need its own directory. */
+function startSession(home: string, session: string, cwd: string = home): void {
+  appendEvent(home, sessionStartedEvent(session, { runtime: "fake", cwd, capabilities: ["observe", "block"] }));
+}
+
 describe("resolveInboxItem (done / dismiss)", () => {
   let home: string;
 
@@ -62,7 +74,7 @@ describe("resolveInboxItem (done / dismiss)", () => {
   test("done closes an open item, writing one approval.resolved Event", () => {
     openItem(home, "sess-1", "gh pr merge 58");
 
-    const result = resolveInboxItem(home, 1, "done");
+    const result = resolveInboxItem(home, ID, "done");
 
     expect(result).toEqual({ alreadyResolved: false });
     expect(deriveInbox(home)).toEqual([]);
@@ -72,14 +84,14 @@ describe("resolveInboxItem (done / dismiss)", () => {
     expect(events[0]).toMatchObject({
       type: "approval.resolved",
       session: "sess-1",
-      data: { ref: "1", outcome: "done" },
+      data: { ref: ID, outcome: "done" },
     });
   });
 
   test("dismiss closes an open item as dismissed", () => {
     openItem(home, "sess-1", "gh pr merge 58");
 
-    const result = resolveInboxItem(home, 1, "dismissed");
+    const result = resolveInboxItem(home, ID, "dismissed");
 
     expect(result).toEqual({ alreadyResolved: false });
     expect(deriveInbox(home)).toEqual([]);
@@ -88,9 +100,9 @@ describe("resolveInboxItem (done / dismiss)", () => {
 
   test("resolving an already-closed item is a no-op: no error, no second Event", () => {
     openItem(home, "sess-1", "gh pr merge 58");
-    resolveInboxItem(home, 1, "done");
+    resolveInboxItem(home, ID, "done");
 
-    const second = resolveInboxItem(home, 1, "dismissed");
+    const second = resolveInboxItem(home, ID, "dismissed");
 
     expect(second).toEqual({ alreadyResolved: true });
     expect(readHumanEvents(home)).toHaveLength(1); // still just the first Event
@@ -100,14 +112,14 @@ describe("resolveInboxItem (done / dismiss)", () => {
   test("an unknown id throws UnknownInboxItemError, not a generic error", () => {
     openItem(home, "sess-1", "gh pr merge 58");
 
-    expect(() => resolveInboxItem(home, 99, "done")).toThrow(UnknownInboxItemError);
+    expect(() => resolveInboxItem(home, UNKNOWN_ID, "done")).toThrow(UnknownInboxItemError);
   });
 
   test("done never executes the stored command", async () => {
     const marker = path.join(home, "marker");
     openItem(home, "sess-1", `touch ${marker}`);
 
-    resolveInboxItem(home, 1, "done");
+    resolveInboxItem(home, ID, "done");
 
     expect(existsSync(marker)).toBe(false);
   });
@@ -117,7 +129,7 @@ describe("resolveInboxItem (done / dismiss)", () => {
     // `decideAction`, which is the only place 🟡 fires) — isolating this
     // test to `resolveInboxItem`'s OWN behavior: resolving must add nothing.
     openItem(home, "sess-1", "gh pr merge 58");
-    resolveInboxItem(home, 1, "done");
+    resolveInboxItem(home, ID, "done");
 
     expect(readNotificationRecorder(home)).toEqual([]);
   });
@@ -135,27 +147,30 @@ describe("runInboxItem", () => {
   });
 
   test("a stored `true` closes the item as done", async () => {
+    startSession(home, "sess-1");
     openItem(home, "sess-1", "true");
 
-    const outcome = await runInboxItem(home, 1);
+    const outcome = await runInboxItem(home, ID_AFTER_START);
 
     expect(outcome).toEqual({ kind: "closed" });
     expect(deriveInbox(home)).toEqual([]);
-    expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: "1", outcome: "done" } });
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: ID_AFTER_START, outcome: "done" } });
   });
 
   test("closing the item via `run` (ticket 08: 'resolutions send nothing') sends no notification either", async () => {
+    startSession(home, "sess-1");
     openItem(home, "sess-1", "true");
 
-    await runInboxItem(home, 1);
+    await runInboxItem(home, ID_AFTER_START);
 
     expect(readNotificationRecorder(home)).toEqual([]);
   });
 
   test("a stored `false` leaves the item open, reporting the exit code", async () => {
+    startSession(home, "sess-1");
     openItem(home, "sess-1", "false");
 
-    const outcome = await runInboxItem(home, 1);
+    const outcome = await runInboxItem(home, ID_AFTER_START);
 
     expect(outcome).toEqual({ kind: "stays-open", exitCode: 1 });
     expect(deriveInbox(home)).toHaveLength(1); // still open
@@ -163,28 +178,83 @@ describe("runInboxItem", () => {
   });
 
   test("running an already-resolved item is a no-op and never re-executes the command", async () => {
+    startSession(home, "sess-1");
     const marker = path.join(home, "marker");
     openItem(home, "sess-1", `touch ${marker}`);
-    resolveInboxItem(home, 1, "dismissed");
+    resolveInboxItem(home, ID_AFTER_START, "dismissed");
 
-    const outcome = await runInboxItem(home, 1);
+    const outcome = await runInboxItem(home, ID_AFTER_START);
 
     expect(outcome).toEqual({ kind: "already-resolved" });
     expect(existsSync(marker)).toBe(false);
   });
 
   test("an unknown id throws UnknownInboxItemError", async () => {
+    startSession(home, "sess-1");
     openItem(home, "sess-1", "true");
 
-    await expect(runInboxItem(home, 99)).rejects.toThrow(UnknownInboxItemError);
+    await expect(runInboxItem(home, UNKNOWN_ID)).rejects.toThrow(UnknownInboxItemError);
+  });
+
+  describe("runs in the REQUESTING Session's OWN cwd (ticket 06 — fixes v0.1's Bun.spawn with no cwd at all)", () => {
+    let cwd: string;
+
+    beforeEach(() => {
+      cwd = mkdtempSync(path.join(tmpdir(), "tenaza-run-cwd-"));
+    });
+
+    afterEach(() => {
+      rmSync(cwd, { recursive: true, force: true });
+    });
+
+    test("the stored command actually executes with that cwd, never the caller's own current directory", async () => {
+      startSession(home, "sess-1", cwd);
+      const marker = path.join(home, "pwd-marker");
+      openItem(home, "sess-1", `pwd > "${marker}"`);
+
+      const outcome = await runInboxItem(home, ID_AFTER_START);
+
+      expect(outcome).toEqual({ kind: "closed" });
+      const reported = readFileSync(marker, "utf8").trim();
+      expect(realpathSync(reported)).toBe(realpathSync(cwd));
+    });
+
+    test("no `session.started` at all for the Session → refuses outright as 'no-cwd', never runs anywhere", async () => {
+      // Deliberately no `startSession` call.
+      const marker = path.join(home, "marker");
+      openItem(home, "sess-1", `touch ${marker}`);
+
+      const outcome = await runInboxItem(home, ID);
+
+      expect(outcome).toMatchObject({ kind: "no-cwd", command: `touch ${marker}` });
+      expect(existsSync(marker)).toBe(false);
+      // still open — refusing to run is not a resolution
+      expect(deriveInbox(home)).toHaveLength(1);
+    });
+
+    test("a cwd that no longer exists on disk → refuses outright as 'cwd-missing', never runs elsewhere", async () => {
+      const removed = mkdtempSync(path.join(tmpdir(), "tenaza-run-removed-"));
+      rmSync(removed, { recursive: true, force: true });
+      startSession(home, "sess-1", removed);
+      const marker = path.join(home, "marker");
+      openItem(home, "sess-1", `touch ${marker}`);
+
+      const outcome = await runInboxItem(home, ID_AFTER_START);
+
+      expect(outcome).toMatchObject({ kind: "cwd-missing", cwd: removed, command: `touch ${marker}` });
+      expect(existsSync(marker)).toBe(false);
+      expect(deriveInbox(home)).toHaveLength(1);
+    });
   });
 
   describe("an unblocked item (ADR 0001, ticket 06: the command already ran once)", () => {
     test("run REFUSES — never executes, never writes an Event, reports 'unblockable'", async () => {
+      // No `startSession` needed: this refusal happens before the cwd is
+      // ever consulted.
       const marker = path.join(home, "marker");
       openUnblockedItem(home, "sess-1", `touch ${marker}`);
 
-      const outcome = await runInboxItem(home, 1);
+      const outcome = await runInboxItem(home, ID);
 
       expect(outcome).toEqual({ kind: "unblockable" });
       expect(existsSync(marker)).toBe(false);
@@ -196,7 +266,7 @@ describe("runInboxItem", () => {
     test("done still closes it, exactly as for a blocked item", () => {
       openUnblockedItem(home, "sess-1", "gh pr merge 58");
 
-      const result = resolveInboxItem(home, 1, "done");
+      const result = resolveInboxItem(home, ID, "done");
 
       expect(result).toEqual({ alreadyResolved: false });
       expect(deriveInbox(home)).toEqual([]);
@@ -205,7 +275,7 @@ describe("runInboxItem", () => {
     test("dismiss still closes it, exactly as for a blocked item", () => {
       openUnblockedItem(home, "sess-1", "gh pr merge 58");
 
-      const result = resolveInboxItem(home, 1, "dismissed");
+      const result = resolveInboxItem(home, ID, "dismissed");
 
       expect(result).toEqual({ alreadyResolved: false });
       expect(deriveInbox(home)).toEqual([]);
@@ -214,9 +284,11 @@ describe("runInboxItem", () => {
 
   describe("an mcp item (ticket 04, decision 07: no stored shell command at all)", () => {
     test("run refuses CLEANLY — reports 'not-runnable', never throws", async () => {
+      // No `startSession` needed: this refusal happens before the cwd is
+      // ever consulted.
       openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
 
-      const outcome = await runInboxItem(home, 1);
+      const outcome = await runInboxItem(home, ID);
 
       expect(outcome).toEqual({ kind: "not-runnable" });
       expect(readHumanEvents(home)).toEqual([]);
@@ -227,7 +299,7 @@ describe("runInboxItem", () => {
     test("done closes it, exactly as for a shell item", () => {
       openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
 
-      const result = resolveInboxItem(home, 1, "done");
+      const result = resolveInboxItem(home, ID, "done");
 
       expect(result).toEqual({ alreadyResolved: false });
       expect(deriveInbox(home)).toEqual([]);
@@ -236,7 +308,7 @@ describe("runInboxItem", () => {
     test("dismiss closes it, exactly as for a shell item", () => {
       openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
 
-      const result = resolveInboxItem(home, 1, "dismissed");
+      const result = resolveInboxItem(home, ID, "dismissed");
 
       expect(result).toEqual({ alreadyResolved: false });
       expect(deriveInbox(home)).toEqual([]);

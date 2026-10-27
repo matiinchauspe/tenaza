@@ -8,6 +8,9 @@ import { readSessionEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import { sessionLogPath } from "../src/paths";
 
+/** A fresh decideAction result's `inboxId` is always its own short hash (decision 03, ADR 0005, ticket 06) — at least 4 hex characters, never a bare position. */
+const HASH_ID = /^[0-9a-f]{4,40}$/;
+
 describe("decideAction", () => {
   let home: string;
 
@@ -40,7 +43,7 @@ effect = "flag"
     });
 
     expect(result.decision).toBe("deny");
-    expect(result.decision === "deny" && result.inboxId).toBe(1);
+    expect(result.decision === "deny" && result.inboxId).toMatch(HASH_ID);
 
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
@@ -78,15 +81,19 @@ effect = "flag"
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
   });
 
-  test("Inbox ids stay stable across successive denies in the same session", async () => {
-    await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
+  test("successive denies in the same session each get their OWN id, and neither changes once assigned", async () => {
+    const first = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
     const second = await decideAction(home, "sess-1", {
       kind: "shell",
       command: "gh pr merge 2",
       tool: "Bash",
     });
 
-    expect(second.decision === "deny" && second.inboxId).toBe(2);
+    expect(first.decision === "deny" && first.inboxId).toMatch(HASH_ID);
+    expect(second.decision === "deny" && second.inboxId).toMatch(HASH_ID);
+    expect(first.decision === "deny" && second.decision === "deny" && first.inboxId).not.toBe(
+      second.decision === "deny" && second.inboxId,
+    );
   });
 
   describe("Capability-gated denial (ADR 0001)", () => {
@@ -151,13 +158,14 @@ effect = "flag"
   });
 
   describe("notifications (ticket 08: 🟡 fires at the single point an Inbox item opens)", () => {
-    test("a human rule deny also sends exactly one 🟡", async () => {
-      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    test("a human rule deny also sends exactly one 🟡, naming the SAME short hash the decision returned", async () => {
+      const result = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+      const shortId = result.decision === "deny" ? result.inboxId : undefined;
 
       const notifications = readNotificationRecorder(home);
       expect(notifications).toHaveLength(1);
-      expect(notifications[0]?.title).toContain("inbox #1");
-      expect(notifications[0]?.message).toContain("tenaza run 1");
+      expect(notifications[0]?.title).toContain(`inbox ${shortId}`);
+      expect(notifications[0]?.message).toContain(`tenaza run ${shortId}`);
     });
 
     test("an unenforceable human match (no block Capability) ALSO sends one 🟡 — never silently dropped (ADR 0001)", async () => {
@@ -183,14 +191,15 @@ effect = "flag"
       expect(readNotificationRecorder(home)).toEqual([]);
     });
 
-    test("two successive denies in the same Session send two 🟡, one per Inbox item", async () => {
+    test("two successive denies in the same Session send two 🟡, one per Inbox item, with DIFFERENT tags", async () => {
       await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 1", tool: "Bash" });
       await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 2", tool: "Bash" });
 
       const notifications = readNotificationRecorder(home);
       expect(notifications).toHaveLength(2);
-      expect(notifications[0]?.tag).toBe("inbox-1");
-      expect(notifications[1]?.tag).toBe("inbox-2");
+      expect(notifications[0]?.tag).toMatch(/^inbox-[0-9a-f]{40}$/);
+      expect(notifications[1]?.tag).toMatch(/^inbox-[0-9a-f]{40}$/);
+      expect(notifications[0]?.tag).not.toBe(notifications[1]?.tag);
     });
   });
 
@@ -242,7 +251,7 @@ effect = "flag"
 
       expect(second.decision).toBe("deny");
       expect(second.decision === "deny" && second.skippedLines).toBe(1);
-      expect(second.decision === "deny" && second.inboxId).toBe(2); // still correctly derived despite the torn line
+      expect(second.decision === "deny" && second.inboxId).toMatch(HASH_ID); // still correctly derived despite the torn line
     });
 
     test("skippedLines is undefined when nothing was skipped", async () => {
@@ -293,7 +302,7 @@ effect = "flag"
       });
 
       expect(result.decision).toBe("deny");
-      expect(result.decision === "deny" && result.inboxId).toBe(1);
+      expect(result.decision === "deny" && result.inboxId).toMatch(HASH_ID);
 
       const events = readSessionEvents("sess-1", home);
       expect(events).toHaveLength(1);

@@ -2,7 +2,9 @@
 import { runClaudeHookSafely } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
 import { readHealth, recordDegraded, recordHealthy } from "./health";
+import { MIN_SHORT_HASH_LENGTH, resolvePrefix } from "./identity";
 import { runInit } from "./init";
+import { allInboxIdentityHashes, shortIdIndex } from "./inbox";
 import { notifyGraveFault } from "./notify";
 import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import {
@@ -114,53 +116,115 @@ async function runStatusline(): Promise<number> {
   return 0;
 }
 
-/** Parse an inbox id argument: a positive integer, written exactly as digits. */
-function parseInboxId(raw: string | undefined): number | undefined {
-  if (raw === undefined || !/^\d+$/.test(raw)) return undefined;
-  const id = Number(raw);
-  return id > 0 ? id : undefined;
+/**
+ * Parse an inbox id argument: a hex string (the hash `status`/the
+ * notification showed, or any unique prefix of it), at least
+ * `MIN_SHORT_HASH_LENGTH` characters long (decision 03, ADR 0005, ticket
+ * 06) — never a bare position any more. Case-insensitive, normalized to
+ * lowercase so `resolvePrefix` (which stores and compares hashes in
+ * lowercase hex) matches regardless of how the human typed it.
+ */
+function parseInboxIdArg(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^[0-9a-f]+$/i.test(raw)) return undefined;
+  if (raw.length < MIN_SHORT_HASH_LENGTH) return undefined;
+  return raw.toLowerCase();
 }
 
 function reportBadId(raw: string | undefined): number {
-  process.stderr.write(`tenaza: "${raw ?? ""}" is not a valid inbox id\n`);
+  process.stderr.write(
+    `tenaza: "${raw ?? ""}" is not a valid inbox id — use the hash shown ` +
+      `(at least ${MIN_SHORT_HASH_LENGTH} hex characters)\n`,
+  );
   return 1;
 }
 
-function reportUnknown(id: number): number {
-  process.stderr.write(`tenaza: unknown inbox item #${id}\n`);
+function reportUnknown(prefix: string): number {
+  process.stderr.write(`tenaza: unknown inbox item ${prefix}\n`);
   return 1;
+}
+
+/** "refused with both candidates listed" (decision 03) — never guesses between them. */
+function reportAmbiguous(prefix: string, candidates: string[]): number {
+  process.stderr.write(
+    `tenaza: "${prefix}" matches more than one inbox item — be more specific:\n` +
+      candidates.map((candidate) => `  ${candidate}\n`).join(""),
+  );
+  return 1;
+}
+
+type ResolvedId = { id: string } | { error: number };
+
+/**
+ * Resolve whatever the human typed — the full hash, or any unique prefix
+ * of it, at least `MIN_SHORT_HASH_LENGTH` long — to exactly ONE full
+ * identity hash, against the FULL history (resolved or not): a human may
+ * still type an already-closed item's hash (e.g. running `done` twice),
+ * which must report "already closed," never "unknown" (decision 03).
+ * Never guesses: `run`/`done`/`dismiss` all funnel through this one
+ * resolver so the three commands can never disagree about what a prefix
+ * means.
+ */
+function resolveInboxIdArg(home: string, raw: string | undefined): ResolvedId {
+  const prefix = parseInboxIdArg(raw);
+  if (prefix === undefined) return { error: reportBadId(raw) };
+
+  const universe = allInboxIdentityHashes(home);
+  const match = resolvePrefix(prefix, universe);
+  if (match.kind === "not-found") return { error: reportUnknown(prefix) };
+  if (match.kind === "ambiguous") {
+    const candidates = match.indices.flatMap((index) => {
+      const hash = universe[index];
+      return hash !== undefined ? [hash] : [];
+    });
+    return { error: reportAmbiguous(prefix, candidates) };
+  }
+  const id = universe[match.index];
+  if (id === undefined) return { error: reportUnknown(prefix) };
+  return { id };
+}
+
+/** The short, human-facing form of a FULL identity hash we already resolved — falls back to the full hash itself if it's somehow absent from the index (should not happen; defensive only). */
+function displayId(home: string, id: string): string {
+  return shortIdIndex(home).get(id) ?? id;
 }
 
 function runResolve(idArg: string | undefined, outcome: ResolutionOutcome): number {
-  const id = parseInboxId(idArg);
-  if (id === undefined) return reportBadId(idArg);
+  const home = tenazaHome();
+  const resolved = resolveInboxIdArg(home, idArg);
+  if ("error" in resolved) return resolved.error;
+  const { id } = resolved;
+  const shown = displayId(home, id);
 
   try {
-    const result = resolveInboxItem(tenazaHome(), id, outcome);
+    const result = resolveInboxItem(home, id, outcome);
     process.stdout.write(
       result.alreadyResolved
-        ? `tenaza: inbox #${id} is already closed\n`
-        : `tenaza: inbox #${id} closed (${outcome})\n`,
+        ? `tenaza: inbox ${shown} is already closed\n`
+        : `tenaza: inbox ${shown} closed (${outcome})\n`,
     );
     return 0;
   } catch (error) {
-    if (error instanceof UnknownInboxItemError) return reportUnknown(id);
+    if (error instanceof UnknownInboxItemError) return reportUnknown(shown);
     throw error;
   }
 }
 
 async function runRun(idArg: string | undefined): Promise<number> {
-  const id = parseInboxId(idArg);
-  if (id === undefined) return reportBadId(idArg);
+  const home = tenazaHome();
+  const resolved = resolveInboxIdArg(home, idArg);
+  if ("error" in resolved) return resolved.error;
+  const { id } = resolved;
+  const shown = displayId(home, id);
 
   try {
-    const outcome = await runInboxItem(tenazaHome(), id);
+    const outcome = await runInboxItem(home, id);
     if (outcome.kind === "closed") {
-      process.stdout.write(`tenaza: inbox #${id} closed (done)\n`);
+      process.stdout.write(`tenaza: inbox ${shown} closed (done)\n`);
       return 0;
     }
     if (outcome.kind === "already-resolved") {
-      process.stdout.write(`tenaza: inbox #${id} is already closed\n`);
+      process.stdout.write(`tenaza: inbox ${shown} is already closed\n`);
       return 0;
     }
     if (outcome.kind === "unblockable") {
@@ -168,8 +232,8 @@ async function runRun(idArg: string | undefined): Promise<number> {
       // would execute it a SECOND time, so it refuses outright. Human-facing
       // CLI copy, es-AR, same as `status`'s own Inbox marker for this case.
       process.stderr.write(
-        `tenaza: inbox #${id} ya corrió y no se pudo bloquear — no se puede volver a correr. ` +
-          `Cerralo con \`tenaza done ${id}\` o \`tenaza dismiss ${id}\`.\n`,
+        `tenaza: inbox ${shown} ya corrió y no se pudo bloquear — no se puede volver a correr. ` +
+          `Cerralo con \`tenaza done ${shown}\` o \`tenaza dismiss ${shown}\`.\n`,
       );
       return 1;
     }
@@ -177,17 +241,36 @@ async function runRun(idArg: string | undefined): Promise<number> {
       // Decision 07, ticket 04: an `mcp` item has no stored shell command at
       // all. Human-facing CLI copy, es-AR, same tone as the unblockable case.
       process.stderr.write(
-        `tenaza: inbox #${id} es una llamada MCP y no tiene comando para correr. ` +
-          `Cerralo con \`tenaza done ${id}\` o \`tenaza dismiss ${id}\`.\n`,
+        `tenaza: inbox ${shown} es una llamada MCP y no tiene comando para correr. ` +
+          `Cerralo con \`tenaza done ${shown}\` o \`tenaza dismiss ${shown}\`.\n`,
+      );
+      return 1;
+    }
+    if (outcome.kind === "no-cwd") {
+      // Ticket 06: the Session never started (no cwd to run in at all) —
+      // refuse outright rather than silently run somewhere the human never
+      // asked for (`resolve.ts`'s own doc comment).
+      process.stderr.write(
+        `tenaza: inbox ${shown} no tiene cwd conocido para su Session — no se corrió nada. ` +
+          `Corré el comando a mano: ${outcome.command}\n`,
+      );
+      return 1;
+    }
+    if (outcome.kind === "cwd-missing") {
+      // Ticket 06: the Session's own directory no longer exists (e.g. a
+      // worktree already removed) — same refusal, different reason.
+      process.stderr.write(
+        `tenaza: inbox ${shown}: el directorio de su Session ya no existe (${outcome.cwd}) — ` +
+          `no se corrió nada. Corré el comando a mano: ${outcome.command}\n`,
       );
       return 1;
     }
     process.stderr.write(
-      `tenaza: inbox #${id} stays open — command exited ${outcome.exitCode}\n`,
+      `tenaza: inbox ${shown} stays open — command exited ${outcome.exitCode}\n`,
     );
     return 1;
   } catch (error) {
-    if (error instanceof UnknownInboxItemError) return reportUnknown(id);
+    if (error instanceof UnknownInboxItemError) return reportUnknown(shown);
     throw error;
   }
 }

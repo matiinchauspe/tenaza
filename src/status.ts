@@ -1,5 +1,5 @@
 import type { Action } from "./contract/event";
-import { deriveInbox, type InboxItem } from "./inbox";
+import { deriveInbox, type InboxItem, shortIdIndex } from "./inbox";
 import { tenazaHome } from "./paths";
 import { renderSessionTree } from "./sessions";
 
@@ -44,15 +44,18 @@ export function describeAction(action: Action): string {
 }
 
 /**
- * `#id  <described Action>` — the Inbox's per-item line, from the spec's
- * Visibility section. Kept BYTE-FOR-BYTE for a blocked `shell` item
- * (tickets 01/02/03's own choice) — only an unblocked one (ticket 06, ADR
- * 0001: a `human` match a Capability-lacking caller could not actually
- * deny) appends the es-AR marker, since that command already ran and
- * `tenaza run` would run it a SECOND time.
+ * `<id>  <described Action>` — the Inbox's per-item line, from the spec's
+ * Visibility section. `id` (decision 03, ADR 0005, ticket 06) is the
+ * item's git-style SHORT hash, the shortest prefix unique right now across
+ * the full history — never the raw positional number v0.1 showed. Kept
+ * byte-for-byte otherwise for a blocked `shell` item (tickets 01/02/03's
+ * own choice) — only an unblocked one (ticket 06, ADR 0001: a `human`
+ * match a Capability-lacking caller could not actually deny) appends the
+ * es-AR marker, since that command already ran and `tenaza run` would run
+ * it a SECOND time.
  */
-export function formatInboxLine(item: InboxItem): string {
-  const base = `#${item.id}  ${describeAction(item.action)}`;
+export function formatInboxLine(item: InboxItem, id: string): string {
+  const base = `${id}  ${describeAction(item.action)}`;
   return item.blocked ? base : `${base}  ${UNBLOCKED_MARKER}`;
 }
 
@@ -66,9 +69,13 @@ export function formatInboxLine(item: InboxItem): string {
 export function renderStatus(home: string = tenazaHome(), now: Date = new Date()): string {
   const tree = renderSessionTree(home, now);
   const inbox = deriveInbox(home);
+  const shortIds = shortIdIndex(home);
   const inboxBlock =
     inbox.length === 0
       ? "Inbox: (empty)\n"
-      : `${["Inbox:", ...inbox.map((item) => `  ${formatInboxLine(item)}`)].join("\n")}\n`;
+      : `${[
+          "Inbox:",
+          ...inbox.map((item) => `  ${formatInboxLine(item, shortIds.get(item.id) ?? item.id)}`),
+        ].join("\n")}\n`;
   return tree ? `${tree}\n${inboxBlock}` : inboxBlock;
 }

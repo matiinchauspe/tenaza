@@ -82,30 +82,40 @@ export function maxUsageSample(events: Event[]): number | undefined {
 }
 
 /**
- * 🟡 — a new Inbox item (ticket 08, q19's own worked example):
- * `🟡 Tenaza · te espera · inbox #14` / `reservee / RES-131 / sesión b71` /
- * `Bash: gh pr merge 58 --merge · tenaza run 14`. An `mcp` Action (ticket 04)
- * describes the same way `status`'s Inbox line does (`describeAction`): the
- * tool's own name plus a short argument summary, never blank. An UNBLOCKED
- * item (ticket 06, ADR 0001) still notifies — the human still needs to know
- * it happened — but the message never says `tenaza run <id>`, which would
- * be wrong: `run` REFUSES on an unblocked item (`resolve.ts`). It gets the
- * SAME es-AR marker `status`'s own Inbox line already uses for it instead,
- * so the one piece of copy a human reads twice (notification, then
- * `status`) never disagrees with itself.
+ * 🟡 — a new Inbox item (ticket 08, q19's own worked example — ids updated
+ * for ticket 06's short hashes):
+ * `🟡 Tenaza · te espera · inbox 3a7f` / `reservee / RES-131 / sesión b71` /
+ * `Bash: gh pr merge 58 --merge · tenaza run 3a7f`. An `mcp` Action (ticket
+ * 04) describes the same way `status`'s Inbox line does (`describeAction`):
+ * the tool's own name plus a short argument summary, never blank. An
+ * UNBLOCKED item (ticket 06, ADR 0001) still notifies — the human still
+ * needs to know it happened — but the message never says `tenaza run <id>`,
+ * which would be wrong: `run` REFUSES on an unblocked item (`resolve.ts`).
+ * It gets the SAME es-AR marker `status`'s own Inbox line already uses for
+ * it instead, so the one piece of copy a human reads twice (notification,
+ * then `status`) never disagrees with itself.
+ *
+ * `shortId` (decision 03, ADR 0005, ticket 06) is the item's DISPLAY hash —
+ * the shortest unique prefix of `row.id` at the moment this fired — shown
+ * in the title and the `tenaza run` hint, exactly what a human would type
+ * back. `tag` stays keyed on `row.id`, the item's FULL, permanent identity:
+ * a display hash is only ever the shortest prefix UNIQUE RIGHT NOW, so it
+ * could in principle lengthen as later items open — the full hash is what
+ * this notification's own bookkeeping key must never depend on shifting.
  */
 export function buildInboxOpenedNotification(
   row: InboxRow,
+  shortId: string,
   context: { project: string; role: string },
 ): Notification {
   const commandLine = describeAction(row.action);
   const message = row.blocked
-    ? `${commandLine} · tenaza run ${row.id}`
+    ? `${commandLine} · tenaza run ${shortId}`
     : `${commandLine}  ${UNBLOCKED_MARKER}`;
 
   return {
     tag: `inbox-${row.id}`,
-    title: `🟡 Tenaza · ${categoryWord("waits", false)} · inbox #${row.id}`,
+    title: `🟡 Tenaza · ${categoryWord("waits", false)} · inbox ${shortId}`,
     subtitle: `${context.project} / ${context.role} / sesión ${row.session}`,
     message,
   };
@@ -270,18 +280,20 @@ function sessionContext(home: string, session: string): { project: string; role:
 }
 
 /**
- * Fire 🟡 for the Inbox item `inboxId` names — the ONE call site for it
+ * Fire 🟡 for the Inbox item `fullId` names — the ONE call site for it
  * (`decide.ts`, at the moment it opens the item, for both the enforced deny
- * and the unblocked-but-still-surfaced case, ticket 06). Swallows its own
- * lookups failing too, not just `sendNotification`'s own guard — nothing
- * downstream of a human match may ever crash the hook.
+ * and the unblocked-but-still-surfaced case, ticket 06). `shortId` is the
+ * SAME display hash `decide.ts` is about to hand back to the agent/CLI, so
+ * the notification's text and the deny message never disagree. Swallows
+ * its own lookups failing too, not just `sendNotification`'s own guard —
+ * nothing downstream of a human match may ever crash the hook.
  */
-export function notifyNewInboxItem(home: string, inboxId: number, now: Date = new Date()): void {
+export function notifyNewInboxItem(home: string, fullId: string, shortId: string, now: Date = new Date()): void {
   try {
-    const row = findInboxRow(home, inboxId);
+    const row = findInboxRow(home, fullId);
     if (!row) return;
     const context = sessionContext(home, row.session);
-    sendNotification(home, buildInboxOpenedNotification(row, context), now);
+    sendNotification(home, buildInboxOpenedNotification(row, shortId, context), now);
   } catch {
     // See `sendNotification`'s own doc — the same guarantee, one level up.
   }

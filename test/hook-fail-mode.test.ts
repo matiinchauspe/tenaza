@@ -64,8 +64,8 @@ effect = "human"
 
     const status = await runCli(["status"], { home });
     expect(status.exitCode).toBe(0);
-    expect(status.stdout).toContain("#1"); // the earlier deny still holds
-    expect(status.stdout).toContain("#2"); // and the new one landed correctly despite the torn line
+    expect(status.stdout).toContain("gh pr merge 1"); // the earlier deny still holds
+    expect(status.stdout).toContain("gh pr merge 2"); // and the new one landed correctly despite the torn line
   });
 
   test("a malformed policy.toml with a last-known-good Policy: the existing Rule keeps enforcing, no block beyond it, and the warning names the fallback", async () => {
@@ -97,8 +97,8 @@ effect = "human"
     }
 
     const status = await runCli(["status"], { home });
-    expect(status.stdout).toContain("#1");
-    expect(status.stdout).toContain("#2");
+    expect(status.stdout).toContain("gh pr merge 1");
+    expect(status.stdout).toContain("gh pr merge 2");
   });
 
   test("a malformed policy.toml with no last-known-good Policy ever: nothing is newly blocked, and the warning is grave", async () => {
@@ -113,7 +113,7 @@ effect = "human"
 
     const status = await runCli(["status"], { home });
     expect(status.exitCode).toBe(0);
-    expect(status.stdout).not.toContain("#1");
+    expect(status.stdout).toContain("Inbox: (empty)");
   });
 
   test("an uncaught fault (malformed hook payload) never blocks, is reported, and an earlier deny still holds", async () => {
@@ -134,7 +134,7 @@ effect = "human"
     }
 
     const status = await runCli(["status"], { home });
-    expect(status.stdout).toContain("#1"); // the earlier deny still holds
+    expect(status.stdout).toContain("gh pr merge 1"); // the earlier deny still holds
   });
 
   test("a fault specifically on a PreToolUse call prints NO permissionDecision — just a systemMessage — and never says the call went through 'unguarded'", async () => {

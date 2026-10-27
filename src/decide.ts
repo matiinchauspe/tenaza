@@ -1,14 +1,15 @@
 import type { Capability } from "./contract/event";
 import { type Action, actionDecidedEvent } from "./contract/event";
+import { inboxIdentityHash, shortHashAt } from "./identity";
 import { deriveInboxReport } from "./inbox";
-import { appendEvent } from "./log";
+import { appendEventAtLine } from "./log";
 import { notifyNewInboxItem } from "./notify";
 import { loadPolicy, matchRule, type Rule } from "./policy";
 
 export type DecisionResult =
   | { decision: "allow"; logged: false }
-  | { decision: "allow"; logged: true; rule: Rule; inboxId?: number; skippedLines?: number }
-  | { decision: "deny"; logged: true; rule: Rule; inboxId?: number; skippedLines?: number };
+  | { decision: "allow"; logged: true; rule: Rule; inboxId?: string; skippedLines?: number }
+  | { decision: "deny"; logged: true; rule: Rule; inboxId?: string; skippedLines?: number };
 
 /**
  * Decide one Action against the Policy, logging it when (and only when) a
@@ -28,18 +29,20 @@ export type DecisionResult =
  * ADR 0007 (ticket 01): `decision` is fixed HERE, before any side effect
  * runs, and never changes afterward. Logging the decision, deriving the
  * Inbox id, and notifying each get their OWN catch below, so a failure in
- * any of them can never turn a deny already decided into an allow (H1's
- * own regression: a torn log line AFTER a deny must never undo it). The
- * Inbox id is only derived once THIS call's own event is confirmed logged
- * — deriving it from a log that never got that event would silently hand
- * back a STALE id (the previous item's), which is worse than none;
- * `adapters/claude.ts`'s `denyMessage` points the agent at `tenaza status`
- * when the id itself comes back unavailable. That same derivation also
- * reports `skippedLines` — how many log lines it could not read right
- * now — so `adapters/claude.ts` can warn about it on THIS call without a
- * second, independent rescan of every Session's log on every hook call
- * (unbounded in the number of Sessions, and most calls match no Rule at
- * all, so most never reach this branch).
+ * any of them can never turn a deny already decided into an allow.
+ *
+ * Inbox identity (decision 03, ADR 0005, ticket 06): the id is hashed
+ * DIRECTLY from the line `appendEventAtLine` reports THIS call's own Event
+ * landed on — never derived by re-deriving the whole Inbox and taking
+ * "whatever is last" (the v0.1-era approach the old code here used,
+ * through `deriveInbox`'s positional ordering). That mattered even after
+ * the original ticket 06 ordering fix, because TWO denying hooks for the
+ * SAME Session can run concurrently (two parallel tool calls in one turn):
+ * each must get back ITS OWN line's id, not whichever row a full rescan
+ * happens to see last. `deriveInboxReport` is still called once — but only
+ * to learn `skippedLines` (ADR 0007, ticket 01) and the current universe
+ * of ids to shorten this one against (ticket 06's display hash) — its
+ * `items` are never consulted for identity anymore.
  *
  * A `human` match — enforced or not — is also where 🟡 fires (ticket 08):
  * the ONE place every Adapter opens an Inbox item, so it is the one place
@@ -61,10 +64,10 @@ export async function decideAction(
   const canDeny = rule.effect === "human" && capabilities.includes("block");
   const decision = canDeny ? "deny" : "allow";
 
-  let appended = false;
+  let line: number | undefined;
   try {
-    appendEvent(home, actionDecidedEvent(session, action, decision, rule, reason));
-    appended = true;
+    const appended = appendEventAtLine(home, actionDecidedEvent(session, action, decision, rule, reason));
+    line = appended.line;
   } catch {
     // `decision` above already stands; failing to log it never changes
     // what this call returns (ADR 0007).
@@ -74,17 +77,21 @@ export async function decideAction(
     return { decision: "allow", logged: true, rule };
   }
 
-  let inboxId: number | undefined;
+  let inboxId: string | undefined;
   let skippedLines: number | undefined;
-  if (appended) {
+  if (line !== undefined) {
+    const fullId = inboxIdentityHash(session, line);
     try {
-      const { items, skipped } = deriveInboxReport(home);
-      inboxId = items[items.length - 1]?.id;
+      const { skipped, allIds } = deriveInboxReport(home);
       if (skipped > 0) skippedLines = skipped;
-      if (inboxId !== undefined) notifyNewInboxItem(home, inboxId);
+      const idx = allIds.indexOf(fullId);
+      inboxId = idx === -1 ? fullId : shortHashAt(allIds, idx);
+      notifyNewInboxItem(home, fullId, inboxId);
     } catch {
-      // Deriving the id (or notifying) failed; `decision` already stands
-      // (ADR 0007, H1).
+      // Deriving the display id (or notifying) failed; `decision` already
+      // stands (ADR 0007, H1). The agent is still pointed at `tenaza
+      // status` by `adapters/claude.ts`'s `denyMessage` when `inboxId`
+      // comes back undefined.
     }
   }
 

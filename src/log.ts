@@ -28,6 +28,78 @@ function appendToLog(file: string, event: Event): void {
   appendFileSync(file, `${prefix}${JSON.stringify(validated)}\n`, "utf8");
 }
 
+/** How many non-blank lines `content` holds — the line-numbering unit `appendEventAtLine` and `readLogWithLinesTolerant` both key off (ADR 0005, ticket 06). */
+function countNonBlankLines(content: string): number {
+  let count = 0;
+  for (const raw of content.split("\n")) {
+    if (raw.trim().length > 0) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Append one Event to its Session's own log and report the exact LINE it
+ * landed on (1-indexed, among non-blank lines) — the half of an Inbox
+ * item's identity (decision 03, ADR 0005) this module alone can answer,
+ * since only the write itself knows where it truly landed.
+ *
+ * "No lock" (the ticket's own constraint) rules out the obvious shortcut —
+ * read the current line count, then append, then report count+1 — because
+ * that is TWO separate operations with a gap between them: a SECOND
+ * `tenaza hook` process appending to the SAME Session's log in that gap
+ * (two parallel tool calls inside one turn each spawn their own hook
+ * process; ADR 0002's "one writer per Session" is a simplification this
+ * identity cannot lean on) would make the read stale, and both processes
+ * could compute the SAME line.
+ *
+ * What IS safe without a lock: a single `appendFileSync` call on a file
+ * opened for append (`appendToLog`, above) is one atomic write — the OS
+ * commits it as one indivisible, non-interleaved chunk relative to every
+ * other append-mode writer on the same file (that guarantee is the whole
+ * point of O_APPEND). So this reads the file's content BEFORE writing
+ * (`before`) — content nothing happening during or after this call can
+ * ever retroactively change — appends, then reads the file again and
+ * locates THIS call's own serialized line inside whatever grew past
+ * `before.length`. That window is guaranteed to contain our own chunk
+ * whole, plus zero or more OTHER complete chunks that happened to race in
+ * around it; `priorLineCount` (from the immutable `before`) plus our
+ * chunk's position within the window is the one true, final line number —
+ * stable forever once computed, since the file can only grow by appending
+ * AFTER whatever this read already captured, never by inserting earlier.
+ *
+ * Known, accepted edge case: two concurrent appends to the SAME Session's
+ * log with BYTE-IDENTICAL content (same millisecond `ts`, same Action,
+ * same Rule — i.e. the exact same command denied twice in the same
+ * instant) cannot be told apart by this search, and may both resolve to
+ * the same line. Both physical lines still name the SAME Session and SAME
+ * command either way, so this never points a caller at ANOTHER agent's
+ * command — the safety property this exists for — it only means one of
+ * the two resulting Inbox rows may need a second, redundant resolution.
+ * Two DIFFERENT commands racing — the realistic case parallel tool calls
+ * produce — are never confused.
+ */
+export function appendEventAtLine(home: string, event: Event): { event: Event; line: number } {
+  const file = sessionLogPath(event.session, home);
+  const validated = EventSchema.parse(event);
+  const serialized = JSON.stringify(validated);
+
+  mkdirSync(path.dirname(file), { recursive: true });
+  const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const priorLineCount = countNonBlankLines(before);
+  const needsNewline = before.length > 0 && !before.endsWith("\n");
+  appendFileSync(file, `${needsNewline ? "\n" : ""}${serialized}\n`, "utf8");
+
+  const after = readFileSync(file, "utf8");
+  const windowLines = after
+    .slice(before.length)
+    .split("\n")
+    .filter((raw) => raw.trim().length > 0);
+  const idx = windowLines.indexOf(serialized);
+  const line = priorLineCount + (idx === -1 ? windowLines.length : idx + 1);
+
+  return { event: validated, line };
+}
+
 /**
  * Parse one log file into validated Events, in file order, plus how many
  * lines could NOT be read — a line torn by a crashed mid-write, or naming
@@ -51,6 +123,36 @@ function readLogTolerant(file: string): { events: Event[]; skipped: number } {
   return { events, skipped };
 }
 
+/** One Event plus the 1-indexed line (among non-blank lines) it occupies in its file — the read-side counterpart to `appendEventAtLine`'s own numbering. */
+export interface LoggedEvent {
+  event: Event;
+  line: number;
+}
+
+/**
+ * Parse one log file into validated Events, each tagged with its own LINE
+ * — a torn or unknown-type line is skipped and counted (same tolerance as
+ * `readLogTolerant`) but still consumes a line number, so numbering never
+ * drifts from the raw file's own layout regardless of what fails to parse.
+ */
+function readLogWithLinesTolerant(file: string): { rows: LoggedEvent[]; skipped: number } {
+  if (!existsSync(file)) return { rows: [], skipped: 0 };
+
+  const rows: LoggedEvent[] = [];
+  let skipped = 0;
+  let line = 0;
+  for (const raw of readFileSync(file, "utf8").split("\n")) {
+    if (raw.trim().length === 0) continue;
+    line += 1;
+    try {
+      rows.push({ event: EventSchema.parse(JSON.parse(raw)), line });
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { rows, skipped };
+}
+
 /** Parse one log file into validated Events, in file order; empty when absent. Tolerant — see `readLogTolerant`. */
 function readLog(file: string): Event[] {
   return readLogTolerant(file).events;
@@ -68,6 +170,11 @@ export function appendEvent(home: string, event: Event): void {
 /** Parse one Session's log into validated Events, in file order. */
 export function readSessionEvents(session: string, home: string = tenazaHome()): Event[] {
   return readLog(sessionLogPath(session, home));
+}
+
+/** One Session's log, each Event tagged with its own line (ADR 0005, ticket 06) — the read-time counterpart `inbox.ts` hashes identities from. */
+export function readSessionEventsWithLines(session: string, home: string = tenazaHome()): LoggedEvent[] {
+  return readLogWithLinesTolerant(sessionLogPath(session, home)).rows;
 }
 
 /**
@@ -152,6 +259,30 @@ export function readAllSessionEventsTolerant(home: string = tenazaHome()): { eve
     skipped += result.skipped;
   }
   return { events, skipped };
+}
+
+/**
+ * Every Event across every Session's log, each tagged with its OWN line
+ * within its own Session's file (ADR 0005, ticket 06) — the one pass
+ * `inbox.ts` reads to hash every human-Rule match's identity, mirroring
+ * `readAllSessionEventsTolerant`'s own shape plus that one extra fact per
+ * row.
+ */
+export function readAllSessionEventsWithLinesTolerant(
+  home: string = tenazaHome(),
+): { rows: LoggedEvent[]; skipped: number } {
+  const dir = sessionsDir(home);
+  if (!existsSync(dir)) return { rows: [], skipped: 0 };
+
+  const names = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+  let rows: LoggedEvent[] = [];
+  let skipped = 0;
+  for (const name of names) {
+    const result = readLogWithLinesTolerant(path.join(dir, name));
+    rows = rows.concat(result.rows);
+    skipped += result.skipped;
+  }
+  return { rows, skipped };
 }
 
 /**

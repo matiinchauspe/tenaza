@@ -10,6 +10,8 @@ import {
 } from "../src/contract/event";
 import { RED, RESET } from "../src/contextbar";
 import { recordDegraded, recordHealthy } from "../src/health";
+import { inboxIdentityHash } from "../src/identity";
+import { shortIdIndex } from "../src/inbox";
 import { appendEvent } from "../src/log";
 import { deriveStatuslineCounts, firstWords, formatStatusline } from "../src/statusline";
 
@@ -132,7 +134,8 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
     // each still gets a node that reads "alive" (ticket 03: a Session known
     // only through an action.decided has no endedAt, so it is never "ended"),
     // so both count toward vivas too.
-    expect(formatStatusline(home)).toBe("tenaza │ ● 2 vivas · ⚑ 0 · ✉ 2 → #2 gh pr merge");
+    const shortId = shortIdIndex(home).get(inboxIdentityHash("sess-2", 1));
+    expect(formatStatusline(home)).toBe(`tenaza │ ● 2 vivas · ⚑ 0 · ✉ 2 → ${shortId} gh pr merge`);
   });
 
   test("an unblocked Inbox item (ADR 0001, ticket 06) still counts toward ✉, and can be the most urgent one", () => {
@@ -146,7 +149,8 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
 
     const counts = deriveStatuslineCounts(home);
     expect(counts.inbox).toBe(1);
-    expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → #1 gh pr merge");
+    const shortId = inboxIdentityHash("sess-1", 1).slice(0, 4);
+    expect(formatStatusline(home)).toBe(`tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → ${shortId} gh pr merge`);
   });
 
   test("an mcp Inbox item (ticket 04) as the most urgent one never crashes — `action.command` doesn't exist on it", () => {
@@ -158,7 +162,10 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
       }),
     );
 
-    expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → #1 mcp__neon__run_sql  branch_id=br-prod");
+    const shortId = inboxIdentityHash("sess-1", 1).slice(0, 4);
+    expect(formatStatusline(home)).toBe(
+      `tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → ${shortId} mcp__neon__run_sql  branch_id=br-prod`,
+    );
   });
 
   test("a resolved Inbox item drops out of ✉, same as it drops out of tenaza status", () => {

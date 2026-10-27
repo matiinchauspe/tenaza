@@ -74,35 +74,37 @@ describe("maxUsageSample", () => {
 });
 
 describe("buildInboxOpenedNotification (🟡)", () => {
-  test("matches the spec's own worked example, field for field", () => {
+  test("matches the spec's own worked example, field for field (ids updated to ticket 06's short hashes)", () => {
     const notification = buildInboxOpenedNotification(
       {
-        id: 14,
+        id: "dce936648342af60c57be01d81e2fc98abd32a27",
         session: "b71",
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "shell", command: "gh pr merge 58 --merge", tool: "Bash" },
         blocked: true,
       },
+      "dce9",
       { project: "reservee", role: "RES-131" },
     );
 
     expect(notification).toEqual({
-      tag: "inbox-14",
-      title: "🟡 Tenaza · te espera · inbox #14",
+      tag: "inbox-dce936648342af60c57be01d81e2fc98abd32a27",
+      title: "🟡 Tenaza · te espera · inbox dce9",
       subtitle: "reservee / RES-131 / sesión b71",
-      message: "Bash: gh pr merge 58 --merge · tenaza run 14",
+      message: "Bash: gh pr merge 58 --merge · tenaza run dce9",
     });
   });
 
   test("an unblocked item (ADR 0001, ticket 06) never says `tenaza run` — it already ran once and run would refuse", () => {
     const notification = buildInboxOpenedNotification(
       {
-        id: 3,
+        id: "3333333333333333333333333333333333333a",
         session: "fake-1",
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "shell", command: "gh pr merge 58", tool: "fake" },
         blocked: false,
       },
+      "3333",
       { project: "(sin proyecto)", role: "sesión" },
     );
 
@@ -113,29 +115,30 @@ describe("buildInboxOpenedNotification (🟡)", () => {
   test("an mcp Action (ticket 04) describes as the tool name plus a short args summary, never blank", () => {
     const notification = buildInboxOpenedNotification(
       {
-        id: 9,
+        id: "9999999999999999999999999999999999999b",
         session: "sess-1",
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod" } },
         blocked: true,
       },
+      "9999",
       { project: "reservee", role: "RES-131" },
     );
 
-    expect(notification.message).toBe("mcp__neon__run_sql  branch_id=br-prod · tenaza run 9");
+    expect(notification.message).toBe("mcp__neon__run_sql  branch_id=br-prod · tenaza run 9999");
   });
 
-  test("the tag is a stable, deterministic function of the Inbox id — never random, never time-based", () => {
+  test("the tag is a stable, deterministic function of the Inbox item's FULL identity hash — never random, never time-based, and never shortened (unlike the display id)", () => {
     const row = {
-      id: 7,
+      id: "7777777777777777777777777777777777777c",
       session: "sess-1",
       ts: "2026-01-01T00:00:00.000Z",
       action: { kind: "shell" as const, command: "x", tool: "Bash" },
       blocked: true,
     };
-    const first = buildInboxOpenedNotification(row, { project: "p", role: "r" });
-    const second = buildInboxOpenedNotification(row, { project: "p", role: "r" });
-    expect(first.tag).toBe("inbox-7");
+    const first = buildInboxOpenedNotification(row, "7777", { project: "p", role: "r" });
+    const second = buildInboxOpenedNotification(row, "7777", { project: "p", role: "r" });
+    expect(first.tag).toBe(`inbox-${row.id}`);
     expect(first.tag).toBe(second.tag);
   });
 });

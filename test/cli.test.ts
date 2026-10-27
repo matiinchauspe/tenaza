@@ -258,9 +258,9 @@ effect = "human"
         .split("\n")
         .map((line) => EventSchema.parse(JSON.parse(line)));
       const decided = events.find((event) => event.type === "action.decided");
-      expect(decided?.type === "action.decided" ? decided.data.rule.reason : undefined).toBe(
-        "parse_error",
-      );
+      const reason =
+        decided?.type === "action.decided" && "reason" in decided.data.rule ? decided.data.rule.reason : undefined;
+      expect(reason).toBe("parse_error");
     });
 
     test("a parse failure with nothing matching by raw substring either is allowed, not a crash", async () => {
@@ -296,9 +296,9 @@ effect = "human"
         .split("\n")
         .map((line) => EventSchema.parse(JSON.parse(line)))
         .find((event) => event.type === "action.decided");
-      expect(decided?.type === "action.decided" ? decided.data.rule.reason : undefined).toBe(
-        "parse_error",
-      );
+      const reason =
+        decided?.type === "action.decided" && "reason" in decided.data.rule ? decided.data.rule.reason : undefined;
+      expect(reason).toBe("parse_error");
     });
 
     test("a 4-deep nested bash -c still denies — hitting the reparse depth cap falls back to the raw substring, never a false allow", async () => {
@@ -450,6 +450,164 @@ effect = "human"
     // ticket overridden to the latest value; project from the earlier
     // announce remains untouched by the later one.
     expect(index.get("sess-1")?.labels).toEqual({ ticket: "RES-200", project: "reservee" });
+  });
+
+  describe("mcp Rules (ticket 04, decision 07), at the hook claude black-box seam", () => {
+    beforeEach(() => {
+      writeFileSync(
+        path.join(home, "config", "policy.toml"),
+        `
+[[rule]]
+tool = "mcp__*neon*__run_sql*"
+unless = { branch_id = ["br-dev-123", "br-staging-456"] }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*vercel*"
+when = { target = "production" }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*__write*"
+unless = { tables = ["sandbox"] }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*postgres*__query*"
+unless = { "connection.branch_id" = ["br-dev-123"] }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*railway*"
+effect = "flag"
+`,
+      );
+    });
+
+    async function mcpCall(tool: string, args: Record<string, unknown>, session = "sess-1") {
+      return await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: session,
+          hook_event_name: "PreToolUse",
+          tool_name: tool,
+          tool_input: args,
+        }),
+      });
+    }
+
+    test("the tool-name glob: an unrelated tool is allowed and not logged", async () => {
+      const result = await mcpCall("mcp__railway__status", {});
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("");
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("unless: an ABSENT branch_id matches — the Neon default-branch-is-prod case", async () => {
+      const result = await mcpCall("mcp__neon__run_sql", { sql: "select 1" });
+
+      expect(result.exitCode).toBe(0);
+      const response = JSON.parse(result.stdout);
+      expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).toContain("#1  mcp__neon__run_sql");
+    });
+
+    test("unless: a SAFE branch_id exempts the call — no block, no log", async () => {
+      const result = await mcpCall("mcp__neon__run_sql", { branch_id: "br-dev-123" });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("");
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("unless: an UNSAFE branch_id still matches and denies", async () => {
+      const result = await mcpCall("mcp__neon__run_sql", { branch_id: "br-prod-999" });
+
+      const response = JSON.parse(result.stdout);
+      expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+
+    test("when: the Rule matches only when the argument equals the given value", async () => {
+      const prod = await mcpCall("mcp__vercel__promote_deployment", { target: "production" });
+      expect(JSON.parse(prod.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+
+      const preview = await mcpCall("mcp__vercel__promote_deployment", { target: "preview" });
+      expect(preview.stdout.trim()).toBe("");
+    });
+
+    test("dotted paths reach a nested argument", async () => {
+      const safe = await mcpCall("mcp__postgres__query", { connection: { branch_id: "br-dev-123" } });
+      expect(safe.stdout.trim()).toBe(""); // nested branch_id is safe — exempted
+
+      const unsafe = await mcpCall("mcp__postgres__query", { connection: { branch_id: "br-prod" } });
+      expect(JSON.parse(unsafe.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+
+    test("an array argument matches `unless` if ANY element is a safe value", async () => {
+      const result = await mcpCall("mcp__db__write", { tables: ["orders", "sandbox"] });
+
+      expect(result.stdout.trim()).toBe(""); // "sandbox" exempts the whole call
+    });
+
+    test("an array argument WITHOUT the safe value still matches", async () => {
+      const result = await mcpCall("mcp__db__write", { tables: ["orders", "users"] });
+
+      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+
+    test("a flag-ruled mcp call records the Action but returns NO hook output at all (H2)", async () => {
+      const result = await mcpCall("mcp__railway__run", { command: "deploy" });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("");
+
+      const { readSessionEvents } = await import("../src/log");
+      const events = readSessionEvents("sess-1", home);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ data: { decision: "allow" } });
+    });
+
+    test("status shows an mcp Inbox item as tool name + a short args summary, never crashing", async () => {
+      await mcpCall("mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const status = await runCli(["status"], { home });
+      expect(status.exitCode).toBe(0);
+      expect(status.stdout).toContain("#1  mcp__neon__run_sql  branch_id=br-prod");
+    });
+
+    test("tenaza run on an mcp Inbox item refuses cleanly — a CLI message, never a throw", async () => {
+      await mcpCall("mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const result = await runCli(["run", "1"], { home });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toLowerCase()).toContain("mcp");
+      expect(result.stderr.toLowerCase()).toContain("tenaza done");
+    });
+
+    test("tenaza done closes an mcp Inbox item", async () => {
+      await mcpCall("mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const result = await runCli(["done", "1"], { home });
+
+      expect(result.exitCode).toBe(0);
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
+
+    test("tenaza dismiss closes an mcp Inbox item", async () => {
+      await mcpCall("mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const result = await runCli(["dismiss", "1"], { home });
+
+      expect(result.exitCode).toBe(0);
+      const status = await runCli(["status"], { home });
+      expect(status.stdout).not.toContain("#1");
+    });
   });
 
   describe("statusline (ticket 07)", () => {

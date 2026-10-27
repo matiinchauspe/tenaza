@@ -17,9 +17,11 @@ export type Capability = z.infer<typeof CapabilitySchema>;
 
 /**
  * An agent's attempted operation, normalized by the Adapter into a
- * runtime-neutral shape Rules match on. v1 only normalizes shell commands;
- * `file.write` and `mcp` are named in the spec for later Adapters and are
- * added here when one needs them.
+ * runtime-neutral shape Rules match on. v1 normalizes shell commands; v0.2
+ * (ticket 04, decision 07) adds `mcp` — an MCP tool call, carried as the
+ * tool's own name plus its raw arguments, with NO per-provider shape.
+ * `file.write` stays named in the spec for a later Adapter and is added
+ * here when one needs it.
  */
 export const ActionSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -28,10 +30,27 @@ export const ActionSchema = z.discriminatedUnion("kind", [
     /** The runtime's own name for the tool that ran this, for display — e.g. "Bash". */
     tool: z.string(),
   }),
+  z.object({
+    kind: z.literal("mcp"),
+    /** The MCP tool's own fully-qualified name, e.g. "mcp__neon__run_sql". */
+    tool: z.string(),
+    /** The call's raw arguments, exactly as the runtime handed them — never interpreted here. */
+    args: z.record(z.string(), z.unknown()),
+  }),
 ]);
 export type Action = z.infer<typeof ActionSchema>;
+export type ShellAction = Extract<Action, { kind: "shell" }>;
+export type McpAction = Extract<Action, { kind: "mcp" }>;
 
-export const RuleRefSchema = z.object({
+/**
+ * A matched Rule's own fields, stored on the `action.decided` Event — a
+ * `shell` Rule ref (`match`, plus `reason` when the parse fell back to the
+ * v0.1 raw-substring check) or an `mcp` Rule ref (`tool`, plus whichever of
+ * `unless`/`when` it carried, ticket 04). Structurally the same shape
+ * `policy.ts`'s own `Rule` union already is — kept separate here so this
+ * contract module never imports from `policy.ts`.
+ */
+const ShellRuleRefSchema = z.object({
   match: z.string(),
   effect: EffectSchema,
   /**
@@ -43,6 +62,16 @@ export const RuleRefSchema = z.object({
    */
   reason: z.enum(["parse_error"]).optional(),
 });
+const McpRuleRefSchema = z.object({
+  tool: z.string(),
+  unless: z.record(z.string(), z.array(z.unknown())).optional(),
+  when: z.record(z.string(), z.unknown()).optional(),
+  effect: EffectSchema,
+});
+export const RuleRefSchema = z.union([ShellRuleRefSchema, McpRuleRefSchema]);
+type DecidedRule =
+  | { match: string; effect: Effect }
+  | { tool: string; unless?: Record<string, unknown[]>; when?: Record<string, unknown>; effect: Effect };
 
 const SessionStartedData = z.object({
   parent: z.string().optional(),
@@ -112,7 +141,7 @@ export function actionDecidedEvent(
   session: string,
   action: Action,
   decision: Decision,
-  rule: { match: string; effect: Effect },
+  rule: DecidedRule,
   reason?: "parse_error",
 ): ActionDecidedEvent {
   return EventSchema.parse({

@@ -51,6 +51,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # First, and nothing else before it: `actions/checkout` defaults to
+      # `clean: true` (a `git clean -ffdx` before checking out), which would
+      # otherwise erase the artifacts a later step downloads into this same
+      # workspace. Checking out here, before anything is downloaded, needs
+      # no `clean: false` override to stay safe.
+      - name: Checkout (for CHANGELOG.md and scripts/)
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -68,6 +76,13 @@ jobs:
           (cd release && sha256sum -- * > checksums.txt)
           cat release/checksums.txt
 
+      - name: Extract this tag's own release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          scripts/extract-changelog.sh "$version" > release/notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -75,4 +90,5 @@ jobs:
             release/tenaza-darwin-arm64
             release/tenaza-darwin-x64
             release/checksums.txt
+          body_path: release/notes.md
           generate_release_notes: true

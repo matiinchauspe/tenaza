@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { toolCallCounterPath } from "../src/paths";
 import { countToolCall, SAMPLE_EVERY_N_TOOL_CALLS, shouldSampleOnToolCall } from "../src/toolcalls";
+import { runCli } from "./support/cli";
 
 describe("countToolCall", () => {
   let home: string;
@@ -32,6 +34,22 @@ describe("countToolCall", () => {
     // A real `tenaza hook claude` call is a fresh process each time — nothing
     // in memory carries over, only what was written to disk.
     expect(countToolCall(home, "sess-1")).toBe(3);
+  });
+
+  test("50 REAL parallel `tenaza hook claude` PostToolUse calls for the SAME Session count exactly 50 (ticket 05, M5)", async () => {
+    // A sequential loop — even a `Promise.all` over 50 calls to the
+    // in-process `countToolCall` function — can never actually race:
+    // Node/Bun's synchronous fs calls never interleave within one process.
+    // The real bug (#1423: "50 parallel calls counted 44") only shows up
+    // across SEPARATE OS processes, which is what `runCli` spawns here —
+    // 50 of them, fired together via `Promise.all`, never awaited one at
+    // a time.
+    const payload = JSON.stringify({ session_id: "sess-parallel", hook_event_name: "PostToolUse" });
+    const calls = Array.from({ length: 50 }, () => runCli(["hook", "claude"], { home, stdin: payload }));
+    const results = await Promise.all(calls);
+
+    for (const result of results) expect(result.exitCode).toBe(0);
+    expect(statSync(toolCallCounterPath("sess-parallel", home)).size).toBe(50);
   });
 });
 

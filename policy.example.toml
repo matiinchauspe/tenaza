@@ -90,5 +90,13 @@ effect = "human"
 [flag]
 # The context size (tokens) past which a Session is Flagged in `status` and
 # `statusline` — shown, never enforced (q9). 200k is the shipped default;
-# uncomment and change it to override.
+# uncomment and change it to override. The Live surface (ticket 08) marks
+# the same threshold on its context track.
 # threshold_tokens = 200000
+
+[live]
+# Minutes a Session may go silent (no Event at all) before the Live surface
+# shows it as TRABADA instead of CORRIENDO (ticket 08, decision 04). 15 is
+# the shipped default; uncomment and change it to override. Only the Daemon
+# reads this — no hook depends on it (decision 05).
+# stall_minutes = 15

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DEFAULT_CONTEXT_THRESHOLD, loadPolicy, matchRule, policyWarning } from "../src/policy";
+import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES, loadPolicy, matchRule, policyWarning } from "../src/policy";
 import { policyLkgPath } from "../src/paths";
 
 describe("Policy", () => {
@@ -72,6 +72,36 @@ threshold_tokens = 150000
     );
 
     expect(loadPolicy(home).thresholdTokens).toBe(150_000);
+  });
+
+  test("an absent policy file yields the default stall minutes (ticket 08)", () => {
+    expect(loadPolicy(home).stallMinutes).toBe(DEFAULT_STALL_MINUTES);
+    expect(DEFAULT_STALL_MINUTES).toBe(15);
+  });
+
+  test("a policy.toml without a [live] section still yields the default stall minutes", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+`,
+    );
+
+    expect(loadPolicy(home).stallMinutes).toBe(DEFAULT_STALL_MINUTES);
+  });
+
+  test("a custom [live] stall_minutes overrides the default", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[live]
+stall_minutes = 30
+`,
+    );
+
+    expect(loadPolicy(home).stallMinutes).toBe(30);
   });
 
   test("matchRule finds a human rule as a contiguous run in the parsed command", async () => {
@@ -350,7 +380,26 @@ effect = "human"
     expect(existsSync(policyLkgPath(home))).toBe(true);
     const saved = JSON.parse(readFileSync(policyLkgPath(home), "utf8"));
     expect(saved.rules).toEqual([{ match: "gh pr merge", effect: "human" }]);
+    expect(saved.stallMinutes).toBe(DEFAULT_STALL_MINUTES);
     expect(typeof saved.savedAt).toBe("string");
+  });
+
+  test("ticket 08: an LKG written before stallMinutes existed still loads, defaulting it rather than failing the whole cache", () => {
+    mkdirSync(path.join(home, "state"), { recursive: true });
+    writeFileSync(
+      policyLkgPath(home),
+      JSON.stringify({
+        rules: [{ match: "gh pr merge", effect: "human" }],
+        thresholdTokens: 200_000,
+        savedAt: new Date().toISOString(),
+        // deliberately no `stallMinutes` — the pre-ticket-08 shape.
+      }),
+    );
+    writeFileSync(policyFile(), "[[rule\nmatch = broken"); // force the fallback to the LKG
+
+    const policy = loadPolicy(home);
+    expect(policy.rules).toEqual([{ match: "gh pr merge", effect: "human" }]);
+    expect(policy.stallMinutes).toBe(DEFAULT_STALL_MINUTES);
   });
 
   test("a malformed policy.toml falls back to the last-known-good Policy instead of dropping every Rule", () => {

@@ -58,14 +58,27 @@ export interface Policy {
   rules: Rule[];
   /** The context size past which a Session is Flagged (q9). Shown, never enforced — v1 never stops a Session. */
   thresholdTokens: number;
+  /**
+   * How many minutes a Session may stay silent before the Live surface
+   * reads it as TRABADA (ticket 08, decision 04) — `[live] stall_minutes`
+   * in `policy.toml`. This is THE one place the value is read: the Daemon
+   * carries it in the SSE payload and the board classifies on it, so the
+   * board and this file can never disagree on what "stalled" means. No
+   * hook reads this (decision 05: "hooks never talk to it").
+   */
+  stallMinutes: number;
 }
 
 /** The Flag's own default (spec: "The threshold comes from the Policy, default 200k"). */
 export const DEFAULT_CONTEXT_THRESHOLD = 200_000;
 
+/** The Live surface's own default (spec: "default 15") when `[live] stall_minutes` is absent. */
+export const DEFAULT_STALL_MINUTES = 15;
+
 const PolicyFileSchema = z.object({
   rule: z.array(RuleSchema).optional(),
   flag: z.object({ threshold_tokens: z.number().optional() }).optional(),
+  live: z.object({ stall_minutes: z.number().optional() }).optional(),
 });
 
 /**
@@ -76,6 +89,8 @@ const PolicyFileSchema = z.object({
 const LkgFileSchema = z.object({
   rules: z.array(RuleSchema),
   thresholdTokens: z.number(),
+  /** Optional only so an LKG written before this field existed still parses — it degrades to the default rather than losing the WHOLE cache (ADR 0007's own spirit: a missing piece never takes down what still reads fine). */
+  stallMinutes: z.number().optional(),
   savedAt: z.string(),
 });
 
@@ -99,6 +114,7 @@ function readPolicyFile(home: string): PolicyFileReadResult {
       policy: {
         rules: parsed.rule ?? [],
         thresholdTokens: parsed.flag?.threshold_tokens ?? DEFAULT_CONTEXT_THRESHOLD,
+        stallMinutes: parsed.live?.stall_minutes ?? DEFAULT_STALL_MINUTES,
       },
     };
   } catch (error) {
@@ -122,6 +138,7 @@ function writeLkg(home: string, policy: Policy): void {
       JSON.stringify({
         rules: policy.rules,
         thresholdTokens: policy.thresholdTokens,
+        stallMinutes: policy.stallMinutes,
         savedAt: new Date().toISOString(),
       }),
     );
@@ -136,7 +153,11 @@ function readLkg(home: string): { policy: Policy; savedAt: string } | undefined 
   try {
     const parsed = LkgFileSchema.parse(JSON.parse(readFileSync(file, "utf8")));
     return {
-      policy: { rules: parsed.rules, thresholdTokens: parsed.thresholdTokens },
+      policy: {
+        rules: parsed.rules,
+        thresholdTokens: parsed.thresholdTokens,
+        stallMinutes: parsed.stallMinutes ?? DEFAULT_STALL_MINUTES,
+      },
       savedAt: parsed.savedAt,
     };
   } catch {
@@ -159,7 +180,7 @@ function readLkg(home: string): { policy: Policy; savedAt: string } | undefined 
  */
 export function loadPolicy(home: string = tenazaHome()): Policy {
   const file = policyPath(home);
-  if (!existsSync(file)) return { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD };
+  if (!existsSync(file)) return { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD, stallMinutes: DEFAULT_STALL_MINUTES };
 
   const result = readPolicyFile(home);
   if (result.ok) {
@@ -168,7 +189,7 @@ export function loadPolicy(home: string = tenazaHome()): Policy {
   }
 
   const lkg = readLkg(home);
-  return lkg ? lkg.policy : { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD };
+  return lkg ? lkg.policy : { rules: [], thresholdTokens: DEFAULT_CONTEXT_THRESHOLD, stallMinutes: DEFAULT_STALL_MINUTES };
 }
 
 export interface PolicyWarning {

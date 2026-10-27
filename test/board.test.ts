@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   formatAge,
   isSessionStalled,
+  liveItemPhase,
+  liveWaitRemainingFraction,
   moveSelection,
   projectLabel,
   sessionColumn,
@@ -220,5 +222,58 @@ describe("moveSelection", () => {
     const reordered = ["c", "a", "b"];
     expect(moveSelection(reordered, "a", 1)).toBe("b");
     expect(moveSelection(reordered, "a", -1)).toBe("c");
+  });
+});
+
+describe("liveItemPhase (ticket 10: TIME IS STATE — expiry flips live → pending with no new Event)", () => {
+  const heldAt = "2026-10-27T10:00:00.000Z";
+  const waitSeconds = 180;
+
+  test("reads live right when it was born", () => {
+    expect(liveItemPhase(heldAt, new Date(heldAt), waitSeconds)).toBe("live");
+  });
+
+  test("still reads live one second before the window closes", () => {
+    const now = new Date(new Date(heldAt).getTime() + waitSeconds * 1000 - 1000);
+    expect(liveItemPhase(heldAt, now, waitSeconds)).toBe("live");
+  });
+
+  test("reads live AT the exact deadline (inclusive)", () => {
+    const now = new Date(new Date(heldAt).getTime() + waitSeconds * 1000);
+    expect(liveItemPhase(heldAt, now, waitSeconds)).toBe("live");
+  });
+
+  test("flips to pending the instant the window passes — purely from the clock, the SAME `action.decided` row never rewritten", () => {
+    const now = new Date(new Date(heldAt).getTime() + waitSeconds * 1000 + 1000);
+    expect(liveItemPhase(heldAt, now, waitSeconds)).toBe("pending");
+  });
+
+  test("a later re-evaluation of the SAME row, with nothing else changed, flips on its own as the clock advances", () => {
+    const justBefore = new Date(new Date(heldAt).getTime() + waitSeconds * 1000 - 1);
+    const justAfter = new Date(new Date(heldAt).getTime() + waitSeconds * 1000 + 1);
+    expect(liveItemPhase(heldAt, justBefore, waitSeconds)).toBe("live");
+    expect(liveItemPhase(heldAt, justAfter, waitSeconds)).toBe("pending");
+  });
+});
+
+describe("liveWaitRemainingFraction", () => {
+  const heldAt = "2026-10-27T10:00:00.000Z";
+
+  test("1 right when it was born", () => {
+    expect(liveWaitRemainingFraction(heldAt, new Date(heldAt), 180)).toBe(1);
+  });
+
+  test("0.5 at the halfway point", () => {
+    const now = new Date(new Date(heldAt).getTime() + 90_000);
+    expect(liveWaitRemainingFraction(heldAt, now, 180)).toBe(0.5);
+  });
+
+  test("clamped to 0 once the window has fully elapsed, never negative", () => {
+    const now = new Date(new Date(heldAt).getTime() + 300_000);
+    expect(liveWaitRemainingFraction(heldAt, now, 180)).toBe(0);
+  });
+
+  test("never divides by zero on a degenerate zero-second window", () => {
+    expect(liveWaitRemainingFraction(heldAt, new Date(heldAt), 0)).toBe(0);
   });
 });

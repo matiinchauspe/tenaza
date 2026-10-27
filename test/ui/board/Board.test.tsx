@@ -13,14 +13,17 @@ import { makeBoardPayload, makeInboxItem, makeSession } from "../../support/boar
  * the lighter, DOM-free renderer is the right tool, not a reach for the
  * heavier one "just in case".
  */
-/** Ticket 09's own write props, no-op here — this suite is about the board's RENDER from a payload, never the action wiring (covered by `InboxCard`'s own render and `useInboxActions`). Spread into every `<Board>` call below so a fixture test never has to restate them. */
+/** Ticket 09/10's own write props, no-op here — this suite is about the board's RENDER from a payload, never the action wiring (covered by `InboxCard`/`SessionCard`'s own render and `useInboxActions`). Spread into every `<Board>` call below so a fixture test never has to restate them. */
 const NOOP_ACTION_PROPS = {
+  highlightedSessionId: undefined,
   runningIds: new Set<string>(),
   outputs: {},
   errors: {},
   onRun: () => {},
   onDone: () => {},
   onDismiss: () => {},
+  onApprove: () => {},
+  onReject: () => {},
 };
 
 describe("Board — render from a fixture payload", () => {
@@ -84,7 +87,7 @@ describe("Board — render from a fixture payload", () => {
     expect(html).toContain('aria-selected="true"');
   });
 
-  test("an Inbox card's badge reads 'Inbox' (blocked) vs 'Ya corrió' (unenforced) — raw text mixed-case, CSS uppercases it", () => {
+  test("a request card's badge reads 'Pendiente' (blocked) vs 'Ya corrió' (unenforced) — raw text mixed-case, CSS uppercases it (ticket 10 rename)", () => {
     const blockedPayload = buildBoardViewModel(
       makeBoardPayload({ inbox: [makeInboxItem({ id: "blocked", blocked: true })] }),
       now,
@@ -97,7 +100,7 @@ describe("Board — render from a fixture payload", () => {
       <Board viewModel={blockedPayload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />,
     );
     const ranHtml = renderToStaticMarkup(<Board viewModel={ranPayload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
-    expect(blockedHtml).toContain("Inbox");
+    expect(blockedHtml).toContain("Pendiente");
     expect(ranHtml).toContain("Ya corrió");
   });
 
@@ -177,7 +180,7 @@ describe("Board — render from a fixture payload", () => {
     expect(html).toContain('aria-label="Terminó: tenaza"');
   });
 
-  test("the Inbox card's own badge still carries text, never color alone", () => {
-    expect(html).toContain("Inbox");
+  test("the request card's own badge still carries text, never color alone", () => {
+    expect(html).toContain("Pendiente");
   });
 });

@@ -3,6 +3,8 @@ import {
   EventSchema,
   actionDecidedEvent,
   approvalResolvedEvent,
+  liveAnsweredEvent,
+  runFailedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
@@ -169,6 +171,63 @@ describe("Event contract", () => {
     };
 
     expect(() => EventSchema.parse(line)).toThrow();
+  });
+
+  test("accepts a well-formed action.decided line carrying decision 'held' (ticket 10)", () => {
+    const line = {
+      v: 1,
+      ts: "2026-10-27T10:00:00.000Z",
+      session: "sess-1",
+      type: "action.decided",
+      data: {
+        action: { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        decision: "held",
+        rule: { match: "gh pr merge", effect: "human" },
+      },
+    } as const;
+
+    expect(EventSchema.parse(line)).toEqual(line);
+  });
+
+  test("approvalResolvedEvent omits `via` when not given — the plain by-hand case", () => {
+    const evt = approvalResolvedEvent("sess-1", "1", "done");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt).toMatchObject({ session: "sess-1", data: { ref: "1", outcome: "done" } });
+    expect((evt as { data: { via?: string } }).data.via).toBeUndefined();
+  });
+
+  test("approvalResolvedEvent carries `via` when given (ticket 10: run/live)", () => {
+    const ran = approvalResolvedEvent("sess-1", "1", "done", "run");
+    expect(ran).toMatchObject({ data: { ref: "1", outcome: "done", via: "run" } });
+
+    const approved = approvalResolvedEvent("sess-1", "1", "done", "live");
+    expect(approved).toMatchObject({ data: { ref: "1", outcome: "done", via: "live" } });
+  });
+
+  test("liveAnsweredEvent builds a schema-valid envelope, message omitted when absent", () => {
+    const evt = liveAnsweredEvent("sess-1", "abc123", "approve");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("live.answered");
+    expect(evt).toMatchObject({ session: "sess-1", data: { ref: "abc123", answer: "approve" } });
+    expect((evt as { data: { message?: string } }).data.message).toBeUndefined();
+  });
+
+  test("liveAnsweredEvent carries the human's message when given", () => {
+    const evt = liveAnsweredEvent("sess-1", "abc123", "reject", "primero corré los tests");
+
+    expect(evt).toMatchObject({
+      data: { ref: "abc123", answer: "reject", message: "primero corré los tests" },
+    });
+  });
+
+  test("runFailedEvent builds a schema-valid envelope", () => {
+    const evt = runFailedEvent("sess-1", "abc123", 1);
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("run.failed");
+    expect(evt).toMatchObject({ session: "sess-1", data: { ref: "abc123", exitCode: 1 } });
   });
 
   test("sessionLabeledEvent builds a schema-valid envelope carrying the given labels", () => {

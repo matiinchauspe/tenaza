@@ -1,12 +1,14 @@
 import { Column, type ColumnTone } from "./Column";
 import { InboxCard } from "./InboxCard";
 import { SessionCard } from "./SessionCard";
-import type { BoardViewModel } from "./viewModel";
+import { TE_NECESITA_TOOLTIP, type BoardViewModel } from "./viewModel";
 
 export interface BoardProps {
   viewModel: BoardViewModel;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
+  /** Ticket 10: the Session card, if any, that a SELECTED TE NECESITA card's own request belongs to — forwarded straight through to `SessionCard` as its own `highlighted` prop. */
+  highlightedSessionId: string | undefined;
   /** Ticket 09: forwarded straight through to every `InboxCard` — `Board` itself stays pure, it only threads these to the one place they apply. */
   runningIds: ReadonlySet<string>;
   outputs: Readonly<Record<string, string>>;
@@ -15,6 +17,9 @@ export interface BoardProps {
   onRun: (id: string) => void;
   onDone: (id: string) => void;
   onDismiss: (id: string) => void;
+  /** Ticket 10: forwarded straight through to every `SessionCard` — only the one with its own `liveRequest` set ever actually calls either. */
+  onApprove: (id: string, message: string | undefined) => void;
+  onReject: (id: string, message: string | undefined) => void;
 }
 
 const SESSION_COLUMNS = ["corriendo", "trabada", "termino"] as const;
@@ -39,12 +44,15 @@ export function Board({
   viewModel,
   selectedId,
   onSelect,
+  highlightedSessionId,
   runningIds,
   outputs,
   errors,
   onRun,
   onDone,
   onDismiss,
+  onApprove,
+  onReject,
 }: BoardProps) {
   return (
     <div className="board">
@@ -53,6 +61,7 @@ export function Board({
         count={viewModel.teNecesita.cards.length}
         tone="te-necesita"
         emptyMessage={TE_NECESITA_EMPTY}
+        tooltip={TE_NECESITA_TOOLTIP}
       >
         {viewModel.teNecesita.cards.map((card) => (
           <InboxCard
@@ -81,7 +90,10 @@ export function Board({
                 tone={meta.tone}
                 statusLabel={meta.label}
                 selected={card.id === selectedId}
+                highlighted={card.id === highlightedSessionId}
                 onSelect={onSelect}
+                onApprove={onApprove}
+                onReject={onReject}
               />
             ))}
           </Column>

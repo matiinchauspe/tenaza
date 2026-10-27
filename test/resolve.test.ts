@@ -159,6 +159,15 @@ describe("runInboxItem", () => {
     expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: ID_AFTER_START, outcome: "done" } });
   });
 
+  test("ticket 10: a successful run tags its Resolution `via: 'run'` — the trace tells it apart from a plain `done`", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "true");
+
+    await runInboxItem(home, ID_AFTER_START);
+
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { via: "run" } });
+  });
+
   test("closing the item via `run` (ticket 08: 'resolutions send nothing') sends no notification either", async () => {
     startSession(home, "sess-1");
     openItem(home, "sess-1", "true");
@@ -176,7 +185,14 @@ describe("runInboxItem", () => {
 
     expect(outcome).toEqual({ kind: "stays-open", exitCode: 1 });
     expect(deriveInbox(home)).toHaveLength(1); // still open
-    expect(readHumanEvents(home)).toEqual([]); // no Event written on failure
+    // Ticket 10: a `run.failed` Event IS written now — never a Resolution
+    // (the item stays open), purely so the resolution trace has something
+    // to read back for "falló (código N)".
+    expect(readHumanEvents(home)).toHaveLength(1);
+    expect(readHumanEvents(home)[0]).toMatchObject({
+      type: "run.failed",
+      data: { ref: ID_AFTER_START, exitCode: 1 },
+    });
   });
 
   test("running an already-resolved item is a no-op and never re-executes the command", async () => {
@@ -373,7 +389,10 @@ describe("startInboxItemRunStream (the view's own `run`, decisions 05/06, ticket
     const output = await readStreamText(result.stream);
 
     expect(deriveInbox(home)).toHaveLength(1); // still open
-    expect(readHumanEvents(home)).toEqual([]);
+    // Ticket 10: a `run.failed` Event IS written now (never a Resolution)
+    // — the resolution trace's own raw material for "falló (código N)".
+    expect(readHumanEvents(home)).toHaveLength(1);
+    expect(readHumanEvents(home)[0]).toMatchObject({ type: "run.failed", data: { ref: ID_AFTER_START, exitCode: 1 } });
     expect(output).toContain(`${RUN_FAILURE_MARKER}1`);
     const parsed = parseRunOutput(output);
     expect(parsed.body).toBe(""); // `false` itself printed nothing

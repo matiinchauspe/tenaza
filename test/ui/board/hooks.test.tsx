@@ -3,7 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { EventSourceConstructor, EventSourceLike } from "../../../src/ui/board/useEventSource";
 import { useEventSource } from "../../../src/ui/board/useEventSource";
-import { boardCardElementId, useBoardKeyboard } from "../../../src/ui/board/useBoardKeyboard";
+import { boardCardElementId, liveMessageInputElementId, useBoardKeyboard } from "../../../src/ui/board/useBoardKeyboard";
 
 /**
  * This whole file needs a real `window`/`document` for React's effects
@@ -177,6 +177,81 @@ describe("useBoardKeyboard", () => {
       expect(() => dispatchKey(window, "x")).not.toThrow();
     });
   });
+
+  describe("a/r — live answering (ticket 10)", () => {
+    test("a calls onApprove with the currently selected id and undefined when no message input is mounted", () => {
+      const approved: [string, string | undefined][] = [];
+      const { result } = renderHook(() =>
+        useBoardKeyboard(["a", "b"], { onApprove: (id, message) => approved.push([id, message]) }),
+      );
+      act(() => result.current.select("b"));
+
+      dispatchKey(window, "a");
+
+      expect(approved).toEqual([["b", undefined]]);
+    });
+
+    test("a reads the CURRENT value of the selected card's own live-message input", () => {
+      const input = document.createElement("input");
+      input.id = liveMessageInputElementId("b");
+      input.value = "dale, adelante";
+      document.body.appendChild(input);
+      try {
+        const approved: [string, string | undefined][] = [];
+        const { result } = renderHook(() =>
+          useBoardKeyboard(["a", "b"], { onApprove: (id, message) => approved.push([id, message]) }),
+        );
+        act(() => result.current.select("b"));
+
+        dispatchKey(window, "a");
+
+        expect(approved).toEqual([["b", "dale, adelante"]]);
+      } finally {
+        input.remove();
+      }
+    });
+
+    test("r focuses the selected card's own live-message input — no callback, no network effect", () => {
+      const input = document.createElement("input");
+      input.id = liveMessageInputElementId("a");
+      document.body.appendChild(input);
+      try {
+        const { result } = renderHook(() => useBoardKeyboard(["a", "b"]));
+        act(() => result.current.select("a"));
+
+        dispatchKey(window, "r");
+
+        expect(document.activeElement).toBe(input);
+      } finally {
+        input.remove();
+      }
+    });
+
+    test("r with no matching input mounted is a harmless no-op", () => {
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"]));
+      act(() => result.current.select("a"));
+
+      expect(() => dispatchKey(window, "r")).not.toThrow();
+    });
+
+    test("a/r are ignored when the event's target is a text input, same as j/k/d/x", () => {
+      const input = document.createElement("input");
+      document.body.appendChild(input);
+      try {
+        const approved: string[] = [];
+        const { result } = renderHook(() =>
+          useBoardKeyboard(["a", "b"], { onApprove: (id) => approved.push(id) }),
+        );
+        act(() => result.current.select("a"));
+
+        dispatchKey(input, "a");
+
+        expect(approved).toEqual([]);
+      } finally {
+        input.remove();
+      }
+    });
+  });
 });
 
 /** A fully scriptable `EventSource` stand-in (ticket 08's own "fake EventSource" requirement) — never a real network connection. */
@@ -216,7 +291,7 @@ const FakeEventSourceCtor = FakeEventSource as unknown as EventSourceConstructor
 
 const GOOD_PAYLOAD = JSON.stringify({
   v: 1,
-  policy: { stallMinutes: 15, contextThresholdTokens: 200_000 },
+  policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
   sessions: [],
   inbox: [],
 });
@@ -316,8 +391,8 @@ describe("useEventSource", () => {
     // board — the message handler was never detached across the drop.
     const payloadAfterReconnect = JSON.stringify({
       v: 1,
-      policy: { stallMinutes: 15, contextThresholdTokens: 200_000 },
-      sessions: [{ id: "s1", project: "tenaza", role: "sesión", hasMeasureCapability: false }],
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
+      sessions: [{ id: "s1", project: "tenaza", role: "sesión", hasMeasureCapability: false, resolutions: [] }],
       inbox: [],
     });
     act(() => source.emitMessage(payloadAfterReconnect));

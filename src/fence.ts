@@ -46,13 +46,14 @@ const DAEMON_TOKEN_PATH_MARKER = "state/daemon.token";
 
 /**
  * Every write-route ACTION segment under `/items/<id>/<action>` (ticket 09
- * ships `run`/`done`/`dismiss`) — tickets 10/11 append their own action
- * here (`/items/<id>/answer`) when they share this exact shape; a route
- * that does NOT nest under `/items/` (ticket 11's `/focus` may not) needs
- * its own pattern added alongside `WRITE_ROUTE_PATTERN` below, never a
- * widening of this one.
+ * shipped `run`/`done`/`dismiss`; ticket 10 adds `answer` — the live-answer
+ * POST a browser sends from a Session's own TE ESPERA card) — ticket 11
+ * appends its own action here ONLY if it shares this exact `/items/<id>/…`
+ * shape; a route that does NOT nest under `/items/` (ticket 11's `/focus`
+ * may not) needs its own pattern added alongside `WRITE_ROUTE_PATTERN`
+ * below, never a widening of this one.
  */
-export const DAEMON_WRITE_ROUTE_ACTIONS: readonly string[] = ["run", "done", "dismiss"];
+export const DAEMON_WRITE_ROUTE_ACTIONS: readonly string[] = ["run", "done", "dismiss", "answer"];
 
 /**
  * Every host spelling that reaches the Daemon's own loopback listener

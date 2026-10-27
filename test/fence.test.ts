@@ -45,6 +45,12 @@ describe("matchesBuiltInFence (decision 05, ticket 09) — pure, POSITIVE cases"
   test("a write route — the IPv6 loopback bracket form", () => {
     expect(matchesBuiltInFence(shell(`curl http://[::1]:${DEFAULT_DAEMON_PORT}/items/abc/run`))).toBe(true);
   });
+
+  test("ticket 10: a write route — the answer action (live approve/reject from the browser)", () => {
+    expect(
+      matchesBuiltInFence(shell(`curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/items/abc/answer`)),
+    ).toBe(true);
+  });
 });
 
 describe("matchesBuiltInFence — NEGATIVE cases (must NOT match — ordinary work, never fenced)", () => {

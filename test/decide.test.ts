@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { liveAnsweredEvent } from "../src/contract/event";
+import { writeAlive } from "../src/daemonlink";
 import { decideAction } from "../src/decide";
+import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
-import { readSessionEvents } from "../src/log";
+import { appendHumanEvent, readSessionEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import { sessionLogPath } from "../src/paths";
 
@@ -333,6 +336,178 @@ effect = "flag"
 
       expect(result.decision).toBe("allow");
       expect(result.logged).toBe(false);
+    });
+  });
+
+  describe("Live answering (ticket 10, decision 06)", () => {
+    beforeEach(() => {
+      writeFileSync(
+        path.join(home, "config", "policy.toml"),
+        `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+
+[live]
+wait_seconds = 2
+`,
+      );
+      process.env.TENAZA_LIVE_POLL_MS = "20";
+    });
+
+    afterEach(() => {
+      delete process.env.TENAZA_LIVE_POLL_MS;
+    });
+
+    function postAnswer(session: string, answer: "approve" | "reject", message?: string): void {
+      // The hold's identity line is the FIRST `action.decided` line this
+      // fresh Session ever writes — line 1 — matching `decideAction`'s own
+      // `inboxIdentityHash(session, line)`.
+      const fullId = inboxIdentityHash(session, 1);
+      appendHumanEvent(home, liveAnsweredEvent(session, fullId, answer, message));
+    }
+
+    test("no Daemon up at all (absent heartbeat) — degrades to the exact v0.1 immediate deny, no hold attempted", async () => {
+      const startedAt = Date.now();
+      const result = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.decision).toBe("deny");
+      expect(elapsedMs).toBeLessThan(500); // never waited for the 2s window
+      expect(result.decision === "deny" && result.reason).toBeUndefined(); // the plain wording, untouched
+    });
+
+    test("Daemon up (fresh heartbeat), human answers APPROVE with a message — allows, message as additionalContext, item closes", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      postAnswer("sess-1", "approve", "dale, adelante");
+
+      const result = await decisionPromise;
+      expect(result.decision).toBe("allow");
+      expect(result.logged && result.decision === "allow" && result.additionalContext).toBe("dale, adelante");
+      expect(deriveInbox(home)).toHaveLength(0); // closed — no longer open
+    });
+
+    test("approve with NO message — allows, additionalContext stays undefined (never an empty string)", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      postAnswer("sess-1", "approve");
+
+      const result = await decisionPromise;
+      expect(result.decision).toBe("allow");
+      expect(result.decision === "allow" && result.logged && result.additionalContext).toBeUndefined();
+    });
+
+    test("Daemon up, human answers REJECT with a message — denies, the message is the reason, item closes", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      postAnswer("sess-1", "reject", "primero corré los tests");
+
+      const result = await decisionPromise;
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.reason).toBe("primero corré los tests");
+      expect(deriveInbox(home)).toHaveLength(0); // closed (dismissed) — no longer open
+    });
+
+    test("reject with NO message — denies with a generic reason, never blank", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      postAnswer("sess-1", "reject");
+
+      const result = await decisionPromise;
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.reason && result.reason.length > 0).toBe(true);
+    });
+
+    test("no answer within the window — denies with the es-AR expiry wording, item stays OPEN as pending", async () => {
+      writeAlive(home);
+      const result = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.reason).toContain("nadie respondió");
+      expect(result.decision === "deny" && result.reason).toContain("para que el humano lo corra");
+
+      const inbox = deriveInbox(home);
+      expect(inbox).toHaveLength(1); // still open — never resolved
+    });
+
+    test("TIME IS STATE: after expiry, the row's own decision line still reads 'held' — no second Event was ever written for the transition", async () => {
+      writeAlive(home);
+      await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+
+      const events = readSessionEvents("sess-1", home);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: "action.decided", data: { decision: "held" } });
+    });
+
+    test("heartbeat goes stale mid-wait — denies at once, well inside the window, same expiry-style wording", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      rmSync(path.join(home, "state", "daemon.alive"), { force: true });
+
+      const startedWaitingAt = Date.now();
+      const result = await decisionPromise;
+      const elapsedMs = Date.now() - startedWaitingAt;
+
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.reason).toContain("nadie respondió");
+      expect(elapsedMs).toBeLessThan(1900); // well inside the 2s window — never waited for the full expiry
+    });
+
+    test("no `block` Capability — never holds at all, resolves immediately exactly as ADR 0001's unblockable case", async () => {
+      writeAlive(home);
+      const startedAt = Date.now();
+      const result = await decideAction(
+        home,
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        ["observe"],
+      );
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.decision).toBe("allow"); // unchanged ADR 0001 shape
+      expect(elapsedMs).toBeLessThan(500); // never entered the hold loop
+    });
+
+    test("fires 🟡 the moment the item is born live, before any answer — never silently held", async () => {
+      writeAlive(home);
+      const decisionPromise = decideAction(home, "sess-1", {
+        kind: "shell",
+        command: "gh pr merge 58",
+        tool: "Bash",
+      });
+      await Bun.sleep(60);
+      postAnswer("sess-1", "approve");
+      await decisionPromise;
+
+      const notifications = readNotificationRecorder(home);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.message).toContain("te espera tu respuesta en la vista");
     });
   });
 });

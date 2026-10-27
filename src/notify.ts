@@ -1,11 +1,15 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Event } from "./contract/event";
+import { buildDaemonUrl, readDaemonToken } from "./daemonlink";
 import { findInboxRow, type InboxRow } from "./inbox";
 import { readSessionEvents } from "./log";
-import { notifyRecorderPath, notifySoundStatePath, tenazaHome } from "./paths";
+import { DEFAULT_DAEMON_PORT, notifyRecorderPath, notifySoundStatePath, tenazaHome } from "./paths";
 import { buildSessionIndex, categoryWord, deriveProject, roleOf, type SessionNode } from "./sessions";
 import { describeAction, UNBLOCKED_MARKER } from "./status";
+
+/** Ticket 10: "te espera tu respuesta en la vista" — the 🟡 wording for a FRESHLY BORN LIVE item, distinct from both the enforced-deny ("tenaza run <id>") and unblocked ("ya corrió") wordings: nothing has run yet, and nothing can be `tenaza run` either — the agent itself is paused, waiting on the Live surface. */
+const LIVE_HOLD_MARKER = "te espera tu respuesta en la vista";
 
 /**
  * The single notifier port (ticket 08): everything upstream builds one of
@@ -18,6 +22,8 @@ export interface Notification {
   title: string;
   subtitle: string;
   message: string;
+  /** Ticket 10: "Clicking the 🟡 notification opens the view" — the Daemon URL `sendMacNotification` hands to `terminal-notifier -open` when it's on PATH. `undefined` when no Daemon has ever written a token (nothing to open, or the plain `osascript` sender anyway, which cannot act on a click regardless). Only `buildInboxOpenedNotification` ever sets this — the threshold/grave-fault notifications stay exactly as they were. */
+  openUrl?: string;
 }
 
 /** What the recorder keeps: the Notification plus whether THIS send actually played a sound. */
@@ -107,17 +113,22 @@ export function buildInboxOpenedNotification(
   row: InboxRow,
   shortId: string,
   context: { project: string; role: string },
+  openUrl?: string,
 ): Notification {
   const commandLine = describeAction(row.action);
-  const message = row.blocked
-    ? `${commandLine} · tenaza run ${shortId}`
-    : `${commandLine}  ${UNBLOCKED_MARKER}`;
+  const message =
+    row.decision === "held"
+      ? `${commandLine}  ${LIVE_HOLD_MARKER}`
+      : row.blocked
+        ? `${commandLine} · tenaza run ${shortId}`
+        : `${commandLine}  ${UNBLOCKED_MARKER}`;
 
   return {
     tag: `inbox-${row.id}`,
     title: `🟡 Tenaza · ${categoryWord("waits", false)} · inbox ${shortId}`,
     subtitle: `${context.project} / ${context.role} / sesión ${row.session}`,
     message,
+    openUrl,
   };
 }
 
@@ -217,25 +228,69 @@ function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+/** The argv `sendMacNotification` would actually spawn — split out as a PURE function (ticket 10) so the terminal-notifier-vs-osascript choice is unit-testable without ever touching a real process or PATH. */
+export interface MacNotifierCommand {
+  tool: "terminal-notifier" | "osascript";
+  argv: string[];
+}
+
 /**
- * The real macOS sender: `osascript -e 'display notification …'` — ships
- * with every macOS, so installing Tenaza needs nothing extra for this (no
- * `terminal-notifier`, no new Homebrew dependency). The tradeoff, stated
- * plainly rather than papered over: `display notification` has no
- * identifier/group parameter, so it cannot ask Notification Center to
- * REPLACE an earlier banner the way a stable tag would with a tool that
- * supports one — `tag` here is Tenaza's own bookkeeping key, not an OS-level
- * one (see `Notification.tag`'s own doc). Fired with `Bun.spawn` and never
- * awaited: the hook must not block on, or fail because of, the human's
- * notification center.
+ * Ticket 10: "Clicking the 🟡 notification opens the view" — `osascript
+ * display notification` has no click-action parameter at all (see the doc
+ * below), so a clickable notification needs `terminal-notifier -open <url>`
+ * instead. Decided here, every time, rather than assumed: `terminal-notifier`
+ * is an EXTRA Homebrew dependency the human may not have installed, and an
+ * item with no `openUrl` at all (no Daemon has ever run) has nothing to open
+ * regardless — either reason falls through to the unchanged `osascript`
+ * path, with no click action, exactly as before ticket 10.
  */
-function sendMacNotification(notification: Notification, sound: boolean): void {
+export function buildMacNotifierCommand(
+  notification: Notification,
+  sound: boolean,
+  hasTerminalNotifier: boolean,
+): MacNotifierCommand {
+  if (notification.openUrl && hasTerminalNotifier) {
+    const argv = [
+      "terminal-notifier",
+      "-title",
+      notification.title,
+      "-subtitle",
+      notification.subtitle,
+      "-message",
+      notification.message,
+      "-open",
+      notification.openUrl,
+    ];
+    if (sound) argv.push("-sound", "default");
+    return { tool: "terminal-notifier", argv };
+  }
+
   const script =
     `display notification ${quoteAppleScriptString(notification.message)} ` +
     `with title ${quoteAppleScriptString(notification.title)} ` +
     `subtitle ${quoteAppleScriptString(notification.subtitle)}` +
     (sound ? ' sound name "Glass"' : "");
-  Bun.spawn(["osascript", "-e", script], { stdout: "ignore", stderr: "ignore" });
+  return { tool: "osascript", argv: ["osascript", "-e", script] };
+}
+
+/**
+ * The real macOS sender: `terminal-notifier -open <url>` when it's on PATH
+ * and there's a URL to open (ticket 10), else `osascript -e 'display
+ * notification …'` — ships with every macOS, so installing Tenaza needs
+ * nothing extra for the FALLBACK (no `terminal-notifier`, no new Homebrew
+ * dependency required). The tradeoff, stated plainly rather than papered
+ * over: `display notification` has no identifier/group parameter, so it
+ * cannot ask Notification Center to REPLACE an earlier banner the way a
+ * stable tag would with a tool that supports one, NOR can it act on a
+ * click at all — `tag` here is Tenaza's own bookkeeping key, not an OS-level
+ * one (see `Notification.tag`'s own doc). Fired with `Bun.spawn` and never
+ * awaited: the hook must not block on, or fail because of, the human's
+ * notification center.
+ */
+function sendMacNotification(notification: Notification, sound: boolean): void {
+  const hasTerminalNotifier = Bun.which("terminal-notifier") !== null;
+  const { argv } = buildMacNotifierCommand(notification, sound, hasTerminalNotifier);
+  Bun.spawn(argv, { stdout: "ignore", stderr: "ignore" });
 }
 
 /**
@@ -293,7 +348,14 @@ export function notifyNewInboxItem(home: string, fullId: string, shortId: string
     const row = findInboxRow(home, fullId);
     if (!row) return;
     const context = sessionContext(home, row.session);
-    sendNotification(home, buildInboxOpenedNotification(row, shortId, context), now);
+    // Ticket 10: the URL `-open` carries — ONLY when a Daemon has ever
+    // written a token (never a bare guess with nothing to open): ALWAYS
+    // the default port either way (same documented, accepted gap
+    // `fence.ts`'s own write-route pattern already carries: no file names
+    // which port a NON-default `tenaza ui --port <n>` bound to).
+    const token = readDaemonToken(home);
+    const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
+    sendNotification(home, buildInboxOpenedNotification(row, shortId, context, openUrl), now);
   } catch {
     // See `sendNotification`'s own doc — the same guarantee, one level up.
   }

@@ -534,8 +534,20 @@ kbd {
   color: var(--mut);
 }
 
+/* Ticket 10: "pedido de <project> · #<id><ticket>" (prototype's own `.req`) — its own line, below `__top`, now that `__top` carries only the badge and the age. */
+.inbox-card__req {
+  font: 500 12px var(--font-mono);
+  color: var(--fg);
+  margin: 8px 0 10px;
+}
+
+.inbox-card__id {
+  color: var(--mut);
+}
+
 .inbox-card__ticket {
   color: var(--teal);
+  margin-left: 6px;
 }
 
 .inbox-card__when {
@@ -730,4 +742,185 @@ kbd {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+/* -------------------------------------------------------------------- */
+/* Column header tooltip (ticket 10, prototype's `.colh span[title]`)   */
+/* -------------------------------------------------------------------- */
+
+/* TE NECESITA's own tooltip ("el agente no está esperando…") is the ONLY column title that ever carries a `title` attribute — this rule is dormant on every other column. */
+.column__title[title] {
+  cursor: help;
+  border-bottom: 1px dotted var(--dim);
+}
+
+/* -------------------------------------------------------------------- */
+/* Status badge — the "wait" tone (ticket 10)                           */
+/* -------------------------------------------------------------------- */
+
+.status-badge--wait {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+}
+
+/* -------------------------------------------------------------------- */
+/* Live request block (ticket 10, prototype's `.live-item`) — docked on a */
+/* Session's own card while its agent is held, live.                    */
+/* -------------------------------------------------------------------- */
+
+/* A left rail while held (amber) — the card's own "TE ESPERA" cue even before the eye reaches the badge itself. */
+.session-card--waiting {
+  border-left: 2px solid var(--amber);
+}
+
+/* Ticket 10's cross-highlight: a selected TE NECESITA card points at the Session that raised it. Teal, same hue `card--selected` already uses for "this is the thing you're acting on" — distinct enough in context (this card is never ALSO the keyboard selection at the same time: the selection sits on the TE NECESITA card instead). */
+.session-card--highlighted {
+  border-color: var(--teal);
+}
+
+.live-request {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+
+.live-request__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 11px var(--font-mono);
+  color: var(--mut);
+}
+
+.live-request__when {
+  margin-left: auto;
+  color: var(--dim);
+}
+
+.live-request__cmd {
+  margin: 10px 0 11px;
+  background: var(--bg);
+  border: var(--border-width) solid var(--line);
+  padding: 9px 11px;
+  font: 500 13px var(--font-mono);
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.live-request__tool {
+  color: var(--dim);
+  margin-right: 8px;
+}
+
+.live-request__prompt {
+  color: var(--amber);
+  margin-right: 8px;
+}
+
+.live-request__timer {
+  height: 2px;
+  background: var(--s3);
+  margin: -11px 0 11px;
+}
+
+.live-request__timer i {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+  transition: width 1s linear;
+}
+
+.live-request__acts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.live-request__input {
+  flex: 1 1 100%;
+  background: var(--bg);
+  border: var(--border-width) solid var(--line);
+  color: var(--fg);
+  font: 12px var(--font-mono);
+  padding: 6px 9px;
+  outline: none;
+}
+
+.live-request__input:focus {
+  border-color: var(--teal);
+}
+
+.live-request__input::placeholder {
+  color: var(--dim);
+}
+
+/* Rechazar/aprobar's own tones over the shared `.btn` base (prototype's `.btn.ok`/`.btn.no`). */
+.btn--ok {
+  border-color: color-mix(in srgb, var(--green) 50%, transparent);
+  color: var(--green);
+}
+
+.btn--no {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+}
+
+/* -------------------------------------------------------------------- */
+/* Resolution trace (ticket 10, prototype's `.trace`) — the Session card's */
+/* own memory of its latest request's outcome.                          */
+/* -------------------------------------------------------------------- */
+
+.resolution-trace {
+  font: 11px var(--font-mono);
+  margin: 6px 0 0;
+  line-height: 1.4;
+  cursor: help;
+}
+
+.resolution-trace__more {
+  color: var(--dim);
+}
+
+.resolution-trace--ok {
+  color: var(--green);
+}
+
+.resolution-trace--muted {
+  color: var(--mut);
+}
+
+.resolution-trace--reject {
+  color: color-mix(in srgb, var(--red) 55%, var(--mut) 45%);
+}
+
+.resolution-trace--fail {
+  color: var(--red);
+}
+
+/* -------------------------------------------------------------------- */
+/* Toast stack (ticket 10, prototype's `#toast`/`.toast`) — "resolving a */
+/* request gives visible feedback... never a silent vanish" (spec).     */
+/* -------------------------------------------------------------------- */
+
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 46px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  z-index: 9;
+}
+
+.toast {
+  background: var(--s2);
+  border: var(--border-width) solid var(--line2);
+  border-left: 2px solid var(--teal);
+  color: var(--fg);
+  font: 12px var(--font-mono);
+  padding: 9px 13px;
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+  max-width: 360px;
 }

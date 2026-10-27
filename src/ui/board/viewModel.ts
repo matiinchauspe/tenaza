@@ -11,8 +11,23 @@
  */
 
 import { computeContextTrack, formatContextNumber, type ContextTrack } from "../../contextbar";
-import { formatAge, projectLabel, sessionColumn, worktreeLabel, type SessionColumn } from "../../board";
-import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession, SessionRole } from "../../contract/live";
+import {
+  formatAge,
+  liveItemPhase,
+  liveWaitRemainingFraction,
+  projectLabel,
+  sessionColumn,
+  worktreeLabel,
+  type SessionColumn,
+} from "../../board";
+import type {
+  ActionSummary,
+  BoardInboxItem,
+  BoardPayload,
+  BoardSession,
+  ResolutionTraceEntry,
+  SessionRole,
+} from "../../contract/live";
 
 /** `label` reuses `formatContextNumber` (`contextbar.ts`) — the SAME "243k" / "⚑243k" / "—" the CLI's `status` tree already shows, so a Session never reads two different numbers in two different places. */
 export type ContextDisplay = { kind: "track"; track: ContextTrack; label: string } | { kind: "unavailable" };
@@ -36,6 +51,52 @@ export interface InboxCardViewModel {
   offersRun: boolean;
 }
 
+/**
+ * Ticket 10: the TE ESPERA block a Session's own card grows while its
+ * agent is held, live — the spec's own "command, a draining wait bar, a
+ * message input, rechazar/aprobar". `id` is the item's FULL identity hash,
+ * what the view's `answer` write (`a`/`r`, or the buttons) posts back
+ * against — never shown on the badge itself (the prototype's own layout
+ * carries no id here at all, unlike a pending TE NECESITA card).
+ */
+export interface LiveRequestViewModel {
+  id: string;
+  tool: string;
+  command: string | undefined;
+  toolLabel: string;
+  /** "hace Ns" since the hold began. */
+  age: string;
+  /** Seconds left before the window lapses — the badge's own "TE ESPERA · Ns". Never negative. */
+  remainingSeconds: number;
+  /** 0..1, how much of the draining bar is still filled. */
+  remainingFraction: number;
+}
+
+/** One line of a Session's resolution trace (spec "Requests vs agents") — already resolved to its es-AR symbol/text/tone; `SessionCard` only ever composes these into the final "✓ #<id> <text> · hace <age>" string, never re-derives the wording itself. */
+export interface ResolutionTraceLineViewModel {
+  symbol: "✓" | "✕" | "✗";
+  /**
+   * Cosmetic-only display id (same convention `InboxCard`'s own
+   * `ID_DISPLAY_LENGTH` truncation already uses for `card.id` — NOT a
+   * collision-safe shortest-unique-prefix: that needs the full population
+   * of every id ever assigned, computed server-side with `node:crypto`
+   * (`identity.ts`), which must never reach this browser bundle). The
+   * full hash stays one hover away via the trace's own tooltip text.
+   */
+  shortId: string;
+  text: string;
+  tone: "ok" | "muted" | "reject" | "fail";
+  age: string;
+}
+
+export interface ResolutionTraceViewModel {
+  latest: ResolutionTraceLineViewModel;
+  /** How many OLDER resolutions exist beyond `latest` — 0 renders no "+N más" at all. */
+  moreCount: number;
+  /** Every resolution, newest first, one per line — the trace's own `title` tooltip when `moreCount > 0`. */
+  tooltip: string;
+}
+
 export interface SessionCardViewModel {
   id: string;
   project: string;
@@ -54,6 +115,10 @@ export interface SessionCardViewModel {
   /** "Last signal" (spec's own field): what this Session most recently attempted, or "—" when it never has. */
   lastSignal: string;
   age: string;
+  /** Ticket 10: present while this Session's agent is held, waiting on a live answer — `undefined` for every other card, including one whose hold already lapsed to pending (that item renders in TE NECESITA instead, same payload row, classified by `liveItemPhase`). */
+  liveRequest: LiveRequestViewModel | undefined;
+  /** Ticket 10: this Session's own resolution trace, or `undefined` when it never raised a request. */
+  resolutionTrace: ResolutionTraceViewModel | undefined;
 }
 
 export interface BoardColumnViewModel<Card> {
@@ -64,6 +129,7 @@ export interface BoardColumnViewModel<Card> {
 
 /** The header's own stat chips (ticket 08's human fix round, decision 04's "stat chips"): plain counts, never re-derived by the header — same rule as everything else here, one pass over the already-classified cards. */
 export interface BoardStats {
+  /** Ticket 10: "the TE NECESITAN stat chip... count live + pending" (spec) — the TOTAL of every currently-live request PLUS every plain pending one, even though the TE NECESITA COLUMN itself only ever lists the pending half (`teNecesita.cards`). */
   teNecesita: number;
   corriendo: number;
   trabada: number;
@@ -110,6 +176,65 @@ function toInboxCard(item: BoardInboxItem, now: Date): InboxCardViewModel {
     age: formatAge(item.ts, now),
     blocked: item.blocked,
     offersRun: item.blocked && item.action.kind === "shell",
+  };
+}
+
+/** Ticket 10: a still-live held item's own TE ESPERA block, docked on its Session's card — never shown on a TE NECESITA card at all (`buildBoardViewModel` routes a live-phase "held" row here instead of through `toInboxCard`). */
+function toLiveRequest(item: BoardInboxItem, now: Date, waitSeconds: number): LiveRequestViewModel {
+  const elapsedMs = now.getTime() - new Date(item.ts).getTime();
+  const remainingSeconds = Math.max(0, Math.round((waitSeconds * 1000 - elapsedMs) / 1000));
+  return {
+    id: item.id,
+    tool: item.action.tool,
+    command: item.action.command,
+    toolLabel: toolLabelFor(item.action),
+    age: formatAge(item.ts, now),
+    remainingSeconds,
+    remainingFraction: liveWaitRemainingFraction(item.ts, now, waitSeconds),
+  };
+}
+
+/** Display truncation only (see `ResolutionTraceLineViewModel.shortId`'s own doc) — never a collision-safe shortest-unique-prefix. */
+const TRACE_ID_DISPLAY_LENGTH = 4;
+
+/** The resolution trace's own es-AR wording (spec "Requests vs agents") — the ONE place every kind maps to its symbol/text/tone, so `SessionCard` never re-derives or duplicates this copy. */
+function traceInfo(entry: ResolutionTraceEntry): { symbol: ResolutionTraceLineViewModel["symbol"]; text: string; tone: ResolutionTraceLineViewModel["tone"] } {
+  switch (entry.kind) {
+    case "ran":
+      return { symbol: "✓", text: "corrido por vos", tone: "ok" };
+    case "done":
+      return { symbol: "✓", text: "cerrado como listo", tone: "muted" };
+    case "dismissed":
+      return { symbol: "✕", text: "descartado", tone: "reject" };
+    case "failed":
+      return { symbol: "✗", text: `falló (código ${entry.exitCode ?? "?"})`, tone: "fail" };
+    case "approved":
+      return { symbol: "✓", text: "aprobado", tone: "ok" };
+    case "rejected":
+      return { symbol: "✕", text: "rechazado", tone: "reject" };
+  }
+}
+
+function toTraceLine(entry: ResolutionTraceEntry, now: Date): ResolutionTraceLineViewModel {
+  const info = traceInfo(entry);
+  return {
+    symbol: info.symbol,
+    text: info.text,
+    tone: info.tone,
+    shortId: entry.id.slice(0, TRACE_ID_DISPLAY_LENGTH),
+    age: formatAge(entry.ts, now),
+  };
+}
+
+/** `resolutions` arrives newest-first (`inbox.ts`'s `deriveResolutionTraceBySession`) — never re-sorted here. `undefined` when the Session never raised a request, so `SessionCard` renders nothing rather than an empty trace line. */
+function toResolutionTrace(resolutions: readonly ResolutionTraceEntry[], now: Date): ResolutionTraceViewModel | undefined {
+  const [latestEntry, ...rest] = resolutions;
+  if (!latestEntry) return undefined;
+  const lines = resolutions.map((entry) => toTraceLine(entry, now));
+  return {
+    latest: toTraceLine(latestEntry, now),
+    moreCount: rest.length,
+    tooltip: lines.map((line) => `${line.symbol} #${line.shortId} ${line.text} · hace ${line.age}`).join("\n"),
   };
 }
 
@@ -166,6 +291,8 @@ function toSessionCard(
   now: Date,
   contextThresholdTokens: number,
   byId: ReadonlyMap<string, BoardSession>,
+  liveItem: BoardInboxItem | undefined,
+  waitSeconds: number,
 ): SessionCardViewModel {
   return {
     id: session.id,
@@ -179,6 +306,8 @@ function toSessionCard(
     context: contextDisplayFor(session, contextThresholdTokens),
     lastSignal: session.lastSignal ? toolLabelFor(session.lastSignal) : "—",
     age: formatAge(session.lastEventTs, now),
+    liveRequest: liveItem ? toLiveRequest(liveItem, now, waitSeconds) : undefined,
+    resolutionTrace: toResolutionTrace(session.resolutions, now),
   };
 }
 
@@ -192,17 +321,70 @@ function byMostRecentEventFirst(a: BoardSession, b: BoardSession): number {
   return (b.lastEventTs ?? "").localeCompare(a.lastEventTs ?? "");
 }
 
+/**
+ * Ticket 10 (spec "Requests vs agents"): TE NECESITA now holds pending
+ * REQUESTS only — "TE NECESITA · pedidos" names that directly, with
+ * `TE_NECESITA_TOOLTIP` (below) spelling out why in `Column`'s own header.
+ */
 const COLUMN_TITLES = {
-  teNecesita: "TE NECESITA",
+  teNecesita: "TE NECESITA · pedidos",
   corriendo: "CORRIENDO",
   trabada: "TRABADA",
   termino: "TERMINÓ",
 } as const;
 
+/** The TE NECESITA header's own tooltip (spec, verbatim from the approved prototype's `col()` call) — only this column carries one. */
+export const TE_NECESITA_TOOLTIP = "el agente no está esperando: ya recibió el deny y siguió";
+
+/**
+ * Ticket 10: split `payload.inbox` into the TE NECESITA rows (plain pending
+ * items, unchanged, PLUS a held row whose window has already lapsed —
+ * `liveItemPhase` reads that one as pending too, same as the hook itself
+ * would by now) and the still-live rows that dock onto their OWN Session's
+ * card instead (`liveBySessionId`). A held row whose Session cannot be
+ * found at all (should not happen — see `toSessionCard`'s own callers)
+ * degrades to the pending list rather than vanishing silently.
+ */
+function splitInboxByLivePhase(
+  inbox: readonly BoardInboxItem[],
+  now: Date,
+  waitSeconds: number,
+): { pending: BoardInboxItem[]; liveBySessionId: Map<string, BoardInboxItem> } {
+  const pending: BoardInboxItem[] = [];
+  const liveBySessionId = new Map<string, BoardInboxItem>();
+
+  for (const item of inbox) {
+    if (item.decision === "held" && liveItemPhase(item.ts, now, waitSeconds) === "live") {
+      // At most one live hold per Session in practice (an agent waits on
+      // one tool call at a time) — a second one, were it ever to happen,
+      // simply overwrites the first here; nothing silently drops it from
+      // the LOG, only from this one render's badge.
+      liveBySessionId.set(item.sessionId, item);
+    } else {
+      pending.push(item);
+    }
+  }
+
+  return { pending, liveBySessionId };
+}
+
 export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardViewModel {
   const byId = new Map(payload.sessions.map((session) => [session.id, session] as const));
+  const sessionIds = new Set(payload.sessions.map((session) => session.id));
 
-  const inboxCards = [...payload.inbox].sort(byOldestFirst).map((item) => toInboxCard(item, now));
+  const { pending, liveBySessionId } = splitInboxByLivePhase(payload.inbox, now, payload.policy.waitSeconds);
+
+  // A live row whose Session this payload doesn't carry at all is an
+  // orphan this render can never dock anywhere — fall back to the pending
+  // list rather than dropping it (no silent failures, per review).
+  for (const [sessionId, item] of liveBySessionId) {
+    if (!sessionIds.has(sessionId)) {
+      liveBySessionId.delete(sessionId);
+      pending.push(item);
+    }
+  }
+
+  const inboxCards = [...pending].sort(byOldestFirst).map((item) => toInboxCard(item, now));
 
   const sessionsByColumn: Record<SessionColumn, BoardSession[]> = { corriendo: [], trabada: [], termino: [] };
   for (const session of payload.sessions) {
@@ -214,7 +396,15 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
 
   const toCards = (list: readonly BoardSession[]): SessionCardViewModel[] =>
     nestUnderParents(list).map(({ session, nested }) =>
-      toSessionCard(session, nested, now, payload.policy.contextThresholdTokens, byId),
+      toSessionCard(
+        session,
+        nested,
+        now,
+        payload.policy.contextThresholdTokens,
+        byId,
+        liveBySessionId.get(session.id),
+        payload.policy.waitSeconds,
+      ),
     );
 
   const corriendoCards = toCards(sessionsByColumn.corriendo);
@@ -229,7 +419,12 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
     corriendo: { key: "corriendo", title: COLUMN_TITLES.corriendo, cards: corriendoCards },
     trabada: { key: "trabada", title: COLUMN_TITLES.trabada, cards: trabadaCards },
     termino: { key: "termino", title: COLUMN_TITLES.termino, cards: terminoCards },
-    stats: { teNecesita: inboxCards.length, corriendo: corriendoCards.length, trabada: trabadaCards.length, over200k },
+    stats: {
+      teNecesita: inboxCards.length + liveBySessionId.size,
+      corriendo: corriendoCards.length,
+      trabada: trabadaCards.length,
+      over200k,
+    },
     orderedIds: [
       ...inboxCards.map((card) => card.id),
       ...corriendoCards.map((card) => card.id),
@@ -237,4 +432,17 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
       ...terminoCards.map((card) => card.id),
     ],
   };
+}
+
+/**
+ * Ticket 10: "selecting [a pending request] highlights that Session's
+ * card" (spec) — pure lookup, never baked into `buildBoardViewModel` itself
+ * (selection is the container's own state, not a fact of the payload).
+ * `undefined` when nothing is selected, or the selection isn't a TE
+ * NECESITA card at all (a live request's own card needs no cross-highlight
+ * — it's already selected directly).
+ */
+export function highlightedSessionId(viewModel: BoardViewModel, selectedId: string | undefined): string | undefined {
+  if (selectedId === undefined) return undefined;
+  return viewModel.teNecesita.cards.find((card) => card.id === selectedId)?.sessionId;
 }

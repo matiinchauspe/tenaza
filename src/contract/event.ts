@@ -6,7 +6,17 @@ import { z } from "zod";
  * agree on this shape and nothing else.
  */
 
-export const DecisionSchema = z.enum(["allow", "deny"]);
+/**
+ * `"held"` (ticket 10, decision 06): a `human` match the hook is currently
+ * WAITING on a live answer for — neither allowed nor (yet) denied. Written
+ * exactly once, at the moment the item is born live, on the SAME
+ * `action.decided` Event every other match already uses (ADR 0005's own
+ * identity line never moves). The line never changes again afterward —
+ * TIME IS STATE: whether a `"held"` row still reads as live or has lapsed
+ * to pending is derived fresh against the clock (`board.ts`'s
+ * `liveItemPhase`), never by writing a second Event over this one.
+ */
+export const DecisionSchema = z.enum(["allow", "deny", "held"]);
 export type Decision = z.infer<typeof DecisionSchema>;
 
 export const EffectSchema = z.enum(["human", "flag"]);
@@ -102,6 +112,50 @@ const SessionEndedData = z.object({
 const ApprovalResolvedData = z.object({
   ref: z.string(),
   outcome: z.enum(["done", "dismissed"]),
+  /**
+   * Ticket 10: which PATH produced this resolution, when the resolution
+   * trace needs to tell it apart from the plain, by-hand case — `"run"`
+   * (closed by a successful `tenaza run`, CLI or the view's own streaming
+   * run alike) or `"live"` (a live-answering approve/reject). Absent for a
+   * plain `done`/`dismiss` (by hand, CLI or the view) — the trace reads
+   * THAT as "cerrado como listo" / "descartado", its own default. Never a
+   * third discriminator beyond what the trace actually needs.
+   */
+  via: z.enum(["run", "live"]).optional(),
+});
+
+/**
+ * Ticket 10: the human's answer to a LIVE Inbox item, appended to the human
+ * log (`state/human.jsonl`) by the Daemon's write route the instant the
+ * browser posts it — the ONE thing the waiting hook (`live.ts`) polls that
+ * file for. `ref` is the item's FULL identity hash (ADR 0005) — the same
+ * one the `action.decided` "held" line already fixed. Distinct from
+ * `approval.resolved`: THAT Event is the hook's own record that it actually
+ * acted on this answer (closing the item); THIS one is only the raw answer
+ * itself, and a hook that crashes or a browser double-post never turns it
+ * into a second resolution on its own.
+ */
+const LiveAnsweredData = z.object({
+  ref: z.string(),
+  answer: z.enum(["approve", "reject"]),
+  /** Optional on approve (spec: "with an optional message"); reject without one gets a generic deny reason — the hook's own call, never stored as an empty string here. */
+  message: z.string().optional(),
+});
+
+/**
+ * Ticket 10: `tenaza run`/the view's own run exited non-zero. Spec: "falló
+ * (código N) (the item stays open)" — this is NEVER a Resolution (the item
+ * stays open for a retry), so it is deliberately NOT folded into
+ * `approval.resolved`'s `outcome` — `dedupOutstanding` (`inbox.ts`) only
+ * ever reads `approval.resolved`, so a `run.failed` Event can never close an
+ * item on its own. Lives in the human log alongside `approval.resolved`
+ * (same writer, same reason to exist: a human-initiated attempt, not
+ * something the Session itself did) purely for the resolution trace to
+ * read back.
+ */
+const RunFailedData = z.object({
+  ref: z.string(),
+  exitCode: z.number(),
 });
 
 const envelope = <Type extends string, Data extends z.ZodType>(
@@ -123,6 +177,8 @@ export const EventSchema = z.discriminatedUnion("type", [
   envelope("usage.sampled", UsageSampledData),
   envelope("session.ended", SessionEndedData),
   envelope("approval.resolved", ApprovalResolvedData),
+  envelope("live.answered", LiveAnsweredData),
+  envelope("run.failed", RunFailedData),
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
@@ -130,6 +186,9 @@ export type SessionStartedEvent = Extract<Event, { type: "session.started" }>;
 export type SessionLabeledEvent = Extract<Event, { type: "session.labeled" }>;
 export type SessionEndedEvent = Extract<Event, { type: "session.ended" }>;
 export type UsageSampledEvent = Extract<Event, { type: "usage.sampled" }>;
+export type ApprovalResolvedEvent = Extract<Event, { type: "approval.resolved" }>;
+export type LiveAnsweredEvent = Extract<Event, { type: "live.answered" }>;
+export type RunFailedEvent = Extract<Event, { type: "run.failed" }>;
 
 /**
  * Build an `action.decided` Event envelope with the current timestamp.
@@ -236,18 +295,62 @@ export function usageSampledEvent(
  * Build an `approval.resolved` Event envelope with the current timestamp.
  * `session` is the Session whose denied Action this Resolution closes (not
  * who is resolving it — the human, through the CLI); `ref` is the Inbox
- * item's stable id, as a string.
+ * item's stable id, as a string. `via` (ticket 10) is omitted entirely —
+ * never written as an explicit `undefined` key — for the plain, by-hand
+ * `done`/`dismiss` case; see `ApprovalResolvedData`'s own doc for what each
+ * value means to the resolution trace.
  */
 export function approvalResolvedEvent(
   session: string,
   ref: string,
   outcome: "done" | "dismissed",
-): Event {
+  via?: "run" | "live",
+): ApprovalResolvedEvent {
   return EventSchema.parse({
     v: 1,
     ts: new Date().toISOString(),
     session,
     type: "approval.resolved",
-    data: { ref, outcome },
-  });
+    data: via ? { ref, outcome, via } : { ref, outcome },
+  }) as ApprovalResolvedEvent;
+}
+
+/**
+ * Build a `live.answered` Event envelope with the current timestamp (ticket
+ * 10) — appended to the human log by the Daemon's `/items/<id>/answer`
+ * write route the instant the browser posts an answer. `session` is the
+ * item's OWN Session (resolved server-side from the Inbox row, never trusted
+ * from the browser) — same convention as `approvalResolvedEvent`. `message`
+ * is omitted entirely when absent, never written as an empty string.
+ */
+export function liveAnsweredEvent(
+  session: string,
+  ref: string,
+  answer: "approve" | "reject",
+  message?: string,
+): LiveAnsweredEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "live.answered",
+    data: message ? { ref, answer, message } : { ref, answer },
+  }) as LiveAnsweredEvent;
+}
+
+/**
+ * Build a `run.failed` Event envelope with the current timestamp (ticket
+ * 10) — appended by `resolve.ts`'s `runInboxItem`/`startInboxItemRunStream`
+ * on a non-zero exit, so the resolution trace has something to read back
+ * for "falló (código N)" even though the item itself stays open (never a
+ * Resolution — see `RunFailedData`'s own doc).
+ */
+export function runFailedEvent(session: string, ref: string, exitCode: number): RunFailedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "run.failed",
+    data: { ref, exitCode },
+  }) as RunFailedEvent;
 }

@@ -3,8 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
+import { liveAnsweredEvent } from "../../src/contract/event";
+import { writeAlive } from "../../src/daemonlink";
 import { decideAction } from "../../src/decide";
-import { readSessionEvents } from "../../src/log";
+import { inboxIdentityHash } from "../../src/identity";
+import { appendHumanEvent, readSessionEvents } from "../../src/log";
 import { readNotificationRecorder } from "../../src/notify";
 import { renderSessionTree } from "../../src/sessions";
 
@@ -582,6 +585,112 @@ effect = "human"
       expect(notifications).toHaveLength(1);
       expect(notifications[0]?.tag).toBe("threshold-agent-1");
     });
+  });
+});
+
+describe("Live answering wiring (ticket 10): the adapter's own permission decision", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-live-"));
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+
+[live]
+wait_seconds = 2
+`,
+    );
+    process.env.TENAZA_LIVE_POLL_MS = "20";
+  });
+
+  afterEach(() => {
+    delete process.env.TENAZA_LIVE_POLL_MS;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function postAnswer(session: string, answer: "approve" | "reject", message?: string): void {
+    appendHumanEvent(home, liveAnsweredEvent(session, inboxIdentityHash(session, 1), answer, message));
+  }
+
+  test("a live APPROVE returns an EXPLICIT allow, with the human's message as additionalContext", async () => {
+    writeAlive(home);
+    const responsePromise = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+    });
+    await Bun.sleep(60);
+    postAnswer("sess-1", "approve", "dale, adelante");
+
+    const response = await responsePromise;
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("allow");
+    expect(response?.hookSpecificOutput?.additionalContext).toBe("dale, adelante");
+  });
+
+  test("a live APPROVE with no message carries no additionalContext key at all", async () => {
+    writeAlive(home);
+    const responsePromise = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+    });
+    await Bun.sleep(60);
+    postAnswer("sess-1", "approve");
+
+    const response = await responsePromise;
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("allow");
+    expect("additionalContext" in (response?.hookSpecificOutput ?? {})).toBe(false);
+  });
+
+  test("a live REJECT denies with the human's own message as the reason, never the generic 'Reserved for the human' wording", async () => {
+    writeAlive(home);
+    const responsePromise = handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+    });
+    await Bun.sleep(60);
+    postAnswer("sess-1", "reject", "primero corré los tests");
+
+    const response = await responsePromise;
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(response?.hookSpecificOutput?.permissionDecisionReason).toBe("primero corré los tests");
+  });
+
+  test("expiry (no answer) denies with the spec's own es-AR wording, naming the inbox id", async () => {
+    writeAlive(home);
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    const reason = response?.hookSpecificOutput?.permissionDecisionReason ?? "";
+    expect(reason).toContain("nadie respondió");
+    expect(reason).toMatch(/inbox [0-9a-f]{4,40} /);
+  });
+
+  test("no Daemon up at all — the plain, unchanged deny wording, byte for byte with the pre-ticket-10 shape", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 58" },
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    const reason = response?.hookSpecificOutput?.permissionDecisionReason ?? "";
+    expect(reason.toLowerCase()).toContain("reserved for the human");
   });
 });
 

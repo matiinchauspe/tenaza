@@ -9,6 +9,8 @@ export interface ColumnProps {
   tone: ColumnTone;
   /** Shown instead of the list when `count` is 0 (prototype's own `.empty` placeholder) — es-AR copy, the column's call. */
   emptyMessage: string;
+  /** Ticket 10: TE NECESITA's own header tooltip ("el agente no está esperando…", `viewModel.ts`'s `TE_NECESITA_TOOLTIP`) — `undefined` for every other column, which carries none. */
+  tooltip?: string;
   children: ReactNode;
 }
 
@@ -20,12 +22,14 @@ export interface ColumnProps {
  * the column's own status signal — color is never the ONLY one, since the
  * title text itself always names the column ("CORRIENDO", "TRABADA", …).
  */
-export function Column({ title, count, tone, emptyMessage, children }: ColumnProps) {
+export function Column({ title, count, tone, emptyMessage, tooltip, children }: ColumnProps) {
   return (
     <section className="column" aria-label={`${title} (${count})`}>
       <header className="column__header">
         <span className={`column__dot column__dot--${tone}`} aria-hidden="true" />
-        <h2 className={`column__title column__title--${tone}`}>{title}</h2>
+        <h2 className={`column__title column__title--${tone}`} title={tooltip}>
+          {title}
+        </h2>
         <span className="column__count">{count}</span>
       </header>
       {count > 0 ? (

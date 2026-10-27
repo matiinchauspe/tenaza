@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
-import { approvalResolvedEvent } from "./contract/event";
+import { liveItemPhase } from "./board";
+import { approvalResolvedEvent, liveAnsweredEvent, runFailedEvent } from "./contract/event";
 import { findInboxRow, isResolved, type InboxRow } from "./inbox";
+import { LIVE_ANSWER_CUTOFF_MS } from "./live";
 import { appendHumanEvent } from "./log";
+import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import { runFailureTrailer } from "./runoutput";
 import { cwdForSession } from "./sessions";
 
@@ -138,9 +141,15 @@ export async function runInboxItem(home: string, id: string): Promise<RunOutcome
   });
   const exitCode = await proc.exited;
 
-  if (exitCode !== 0) return { kind: "stays-open", exitCode };
+  if (exitCode !== 0) {
+    // Ticket 10: a NON-resolving Event — the item stays open for a retry
+    // (unchanged) — purely so the resolution trace has something to read
+    // back for "falló (código N)" (spec).
+    appendHumanEvent(home, runFailedEvent(row.session, id, exitCode));
+    return { kind: "stays-open", exitCode };
+  }
 
-  appendHumanEvent(home, approvalResolvedEvent(row.session, id, "done"));
+  appendHumanEvent(home, approvalResolvedEvent(row.session, id, "done", "run"));
   return { kind: "closed" };
 }
 
@@ -234,8 +243,11 @@ export function startInboxItemRunStream(home: string, id: string): RunStreamStar
       } finally {
         const exitCode = await proc.exited;
         if (exitCode === 0) {
-          appendHumanEvent(home, approvalResolvedEvent(row.session, id, "done"));
+          appendHumanEvent(home, approvalResolvedEvent(row.session, id, "done", "run"));
         } else {
+          // Ticket 10: same non-resolving trace Event the CLI's own
+          // `runInboxItem` writes on a failed run — the item stays open.
+          appendHumanEvent(home, runFailedEvent(row.session, id, exitCode));
           controller.enqueue(new TextEncoder().encode(runFailureTrailer(exitCode)));
         }
         controller.close();
@@ -244,4 +256,52 @@ export function startInboxItemRunStream(home: string, id: string): RunStreamStar
   });
 
   return { kind: "stream", stream };
+}
+
+// ---------------------------------------------------------------------------
+// Live answering (ticket 10, decision 06): the browser's own POST, from the
+// Session card's rechazar/aprobar buttons.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every reason the Daemon's `/items/<id>/answer` route refuses OUTRIGHT —
+ * nothing is ever appended. `"not-live"` covers BOTH an item that was never
+ * born live (a plain pending/unblocked row) and one that WAS, but has
+ * already lapsed to pending (TIME IS STATE: `row.decision` stays `"held"`
+ * forever once written, so the elapsed-time check below is what actually
+ * tells a still-live hold apart from one the hook already gave up on) —
+ * either way there is no hook left polling for this answer, so accepting it
+ * would be a SILENT no-op the human could never see failed.
+ */
+export type AnswerRefusal = { kind: "already-resolved" } | { kind: "not-live" };
+
+export type AnswerResult = AnswerRefusal | { kind: "accepted" };
+
+/**
+ * Append the human's live answer to the human log — the ONE write this
+ * route makes; the hold's own hook (`decide.ts`/`live.ts`) is what actually
+ * closes the item once it reads this back. `id` is the item's FULL identity
+ * hash (ADR 0005), same convention as `resolveInboxItem`/`runInboxItem`.
+ */
+export function postLiveAnswer(
+  home: string,
+  id: string,
+  answer: "approve" | "reject",
+  message?: string,
+  now: Date = new Date(),
+): AnswerResult {
+  const row = findInboxRow(home, id);
+  if (!row) throw new UnknownInboxItemError(id);
+  if (isResolved(home, id)) return { kind: "already-resolved" };
+  if (row.decision !== "held") return { kind: "not-live" };
+
+  const policy = loadPolicy(home);
+  const waitSeconds = effectiveWaitSeconds(policy);
+  if (liveItemPhase(row.ts, now, waitSeconds) !== "live") return { kind: "not-live" };
+  // Review fix (race at the deadline): too close to expiry to be sure the hook still reads it.
+  const remainingMs = new Date(row.ts).getTime() + waitSeconds * 1000 - now.getTime();
+  if (remainingMs < LIVE_ANSWER_CUTOFF_MS) return { kind: "not-live" };
+
+  appendHumanEvent(home, liveAnsweredEvent(row.session, id, answer, message));
+  return { kind: "accepted" };
 }

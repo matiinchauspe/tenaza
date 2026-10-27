@@ -100,3 +100,11 @@ effect = "human"
 # the shipped default; uncomment and change it to override. Only the Daemon
 # reads this — no hook depends on it (decision 05).
 # stall_minutes = 15
+
+# Seconds a `human` match holds the agent's call for a live answer before
+# it lapses to pending, same as v0.1's deny + Inbox (ticket 10, decision
+# 06). 180 (3 minutes) is the shipped default; uncomment and change it to
+# override — the hold itself never waits longer than the hook's own
+# timeout budget allows (240s minus a 30s margin = 210s), whatever you set
+# here.
+# wait_seconds = 180

@@ -143,6 +143,30 @@ function worktreeLayout(segments: readonly string[]): { repo: string; worktree: 
 }
 
 /**
+ * Ticket 10: a "held" Inbox row's own `action.decided` line NEVER changes
+ * once written (ADR 0005's identity line is permanent) — whether it still
+ * reads as live (the hook is still polling, holding the agent's call) or
+ * has lapsed to pending (the window passed) is derived fresh against the
+ * clock every time, exactly like `sessionColumn`'s own stall
+ * classification. `waitSeconds` is the EFFECTIVE (already-capped) window —
+ * `LivePolicy.waitSeconds` on the wire, never a raw, unconfigured default.
+ */
+export type LiveItemPhase = "live" | "pending";
+
+export function liveItemPhase(heldAt: string, now: Date, waitSeconds: number): LiveItemPhase {
+  const elapsedMs = now.getTime() - new Date(heldAt).getTime();
+  return elapsedMs <= waitSeconds * 1000 ? "live" : "pending";
+}
+
+/** The draining wait bar's own fill fraction (1 = just born live, 0 = about to lapse), clamped to `[0, 1]` — a `waitSeconds` of 0 (a degenerate test Policy) never divides by zero. */
+export function liveWaitRemainingFraction(heldAt: string, now: Date, waitSeconds: number): number {
+  const totalMs = waitSeconds * 1000;
+  if (totalMs <= 0) return 0;
+  const elapsedMs = now.getTime() - new Date(heldAt).getTime();
+  return Math.max(0, Math.min(1, 1 - elapsedMs / totalMs));
+}
+
+/**
  * The board's keyboard selection, as pure list math (`useBoardKeyboard`
  * wraps this in a hook): given the CURRENT flattened order of visible card
  * ids, move one step from `currentId`. Keyed by id, never by a stored

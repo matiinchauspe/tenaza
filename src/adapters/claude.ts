@@ -136,6 +136,8 @@ export interface ClaudeHookResponse {
     hookEventName: "PreToolUse";
     permissionDecision: "allow" | "deny";
     permissionDecisionReason: string;
+    /** Ticket 10: set only on a live-answering APPROVE that carried a message — "next to the tool result" (code.claude.com/docs/en/hooks' own `additionalContext` field, inside `hookSpecificOutput` alongside `permissionDecision`). */
+    additionalContext?: string;
   };
 }
 
@@ -211,14 +213,21 @@ export function denyMessage(inboxId: string | undefined): string {
 function buildHookResponse(
   decision: "allow" | "deny",
   reason: string,
+  additionalContext?: string,
 ): ClaudeHookResponse {
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: decision,
       permissionDecisionReason: reason,
+      ...(additionalContext ? { additionalContext } : {}),
     },
   };
+}
+
+/** Ticket 10: the agent-facing reason for a live-answering APPROVE's explicit allow — there is no "denial" to explain, so this names what actually happened instead of reusing `denyMessage`'s own deny-shaped wording. */
+function liveApproveReason(): string {
+  return "Approved by the human from the Live surface.";
 }
 
 function describeSkippedLines(skipped: number): string {
@@ -315,16 +324,32 @@ async function handlePreToolUse(
   const skippedLines = result.logged ? result.skippedLines : undefined;
 
   if (result.decision === "deny") {
-    return withSkippedLinesWarning(buildHookResponse("deny", denyMessage(result.inboxId)), skippedLines);
+    // Ticket 10: `result.reason` carries the live-answering wording
+    // (a reject's own message or the generic fallback, or the es-AR expiry
+    // text) when this deny came out of a hold — `denyMessage(inboxId)`
+    // stays the fallback for every OTHER deny (no Daemon up at all),
+    // unchanged from before ticket 10.
+    return withSkippedLinesWarning(buildHookResponse("deny", result.reason ?? denyMessage(result.inboxId)), skippedLines);
   }
 
-  // Every other case is an allow — no Rule matched, or a `flag` Rule did —
-  // and EITHER way Tenaza returns NO permission decision at all (decision
-  // 07, H2): an explicit hook `allow` runs BEFORE Claude Code's own
-  // auto-mode classifier and skips it, which is LESS safe than saying
-  // nothing at all — v0.1's own mistake, fixed here. Only a skipped-log-line
-  // warning, when `decideAction` hit one, still rides along as a bare
-  // systemMessage with no accompanying permission decision.
+  // Ticket 10: a live-answering APPROVE is the ONE allow that explicitly
+  // wants to skip Claude Code's own auto-mode classifier (decision 08) —
+  // the human already said yes. Every OTHER allow (no Rule matched, a
+  // `flag` Rule did, or the ADR 0001 unblockable case) returns NO
+  // permission decision at all (decision 07, H2): an explicit hook `allow`
+  // runs BEFORE that classifier and skips it, which is LESS safe than
+  // saying nothing at all for any of THOSE cases — v0.1's own mistake,
+  // fixed by ticket 01 and left untouched here.
+  if (result.decision === "allow" && result.logged && result.live) {
+    return withSkippedLinesWarning(
+      buildHookResponse("allow", liveApproveReason(), result.additionalContext),
+      skippedLines,
+    );
+  }
+
+  // Only a skipped-log-line warning, when `decideAction` hit one, still
+  // rides along as a bare systemMessage with no accompanying permission
+  // decision.
   return skippedLines ? { systemMessage: describeSkippedLines(skippedLines) } : undefined;
 }
 

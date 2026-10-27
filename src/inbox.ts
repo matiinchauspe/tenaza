@@ -1,8 +1,9 @@
-import type { Action, Event } from "./contract/event";
+import type { Action, Decision, Event } from "./contract/event";
 import { FULL_HASH_LENGTH, inboxIdentityHash, shortHashIndex } from "./identity";
 import {
   type LoggedEvent,
   readAllSessionEventsWithLinesTolerant,
+  readHumanEvents,
   readHumanEventsTolerant,
 } from "./log";
 import { tenazaHome } from "./paths";
@@ -27,6 +28,16 @@ export interface InboxRow {
   ts: string;
   action: Action;
   blocked: boolean;
+  /**
+   * Ticket 10: the row's own RAW decision, straight off its `action.decided`
+   * Event — `"held"` while the hook still polls for a live answer, `"deny"`
+   * for a plain enforced match, `"allow"` for the ADR 0001
+   * Capability-lacking case. `blocked` stays `decision !== "allow"` (every
+   * pre-ticket-10 caller that only ever wrote "allow"/"deny" sees IDENTICAL
+   * behavior); callers that need to tell a live hold apart from a plain
+   * pending match read THIS field instead.
+   */
+  decision: Decision;
 }
 
 /** Alias kept for callers that only ever see the open Inbox (ticket 01's name). */
@@ -52,7 +63,13 @@ export function buildInboxRows(matches: HumanMatchLine[]): InboxRow[] {
     session: event.session,
     ts: event.ts,
     action: event.data.action,
-    blocked: event.data.decision === "deny",
+    // Ticket 10: "held" is exactly as blocked as "deny" from the human's
+    // own vantage — the agent's call is paused either way, awaiting the
+    // human — so this stays `decision !== "allow"` rather than a narrower
+    // `=== "deny"`, which keeps every pre-ticket-10 caller (every row ever
+    // written was "allow" or "deny") byte-for-byte unaffected.
+    blocked: event.data.decision !== "allow",
+    decision: event.data.decision,
   }));
 }
 
@@ -241,4 +258,65 @@ export function findInboxRow(home: string, id: string): InboxRow | undefined {
 /** Whether a Resolution already closed the Inbox item with this FULL identity hash. */
 export function isResolved(home: string, id: string): boolean {
   return resolvedRefs(home).has(id);
+}
+
+/**
+ * Ticket 10: one past resolution of a request, resolved from the raw log
+ * Event into exactly the kind the resolution trace tells apart. `undefined`
+ * for any OTHER Event type — `deriveResolutionTraceBySession` below filters
+ * on that, so adding a future human-log Event type never silently grows
+ * the trace with something it was never meant to show.
+ */
+export interface ResolutionTraceEntry {
+  id: string;
+  kind: "ran" | "done" | "dismissed" | "failed" | "approved" | "rejected";
+  ts: string;
+  exitCode?: number;
+}
+
+function traceEntryFor(event: Event): ResolutionTraceEntry | undefined {
+  if (event.type === "approval.resolved") {
+    const { ref, outcome, via } = event.data;
+    const kind: ResolutionTraceEntry["kind"] =
+      outcome === "done"
+        ? via === "live"
+          ? "approved"
+          : via === "run"
+            ? "ran"
+            : "done"
+        : via === "live"
+          ? "rejected"
+          : "dismissed";
+    return { id: ref, kind, ts: event.ts };
+  }
+  if (event.type === "run.failed") {
+    return { id: event.data.ref, kind: "failed", ts: event.ts, exitCode: event.data.exitCode };
+  }
+  return undefined;
+}
+
+/**
+ * Every past resolution, grouped by the SESSION that raised the request it
+ * resolves (the envelope's own `session` — the item's owning Session, the
+ * same convention `approvalResolvedEvent`/`runFailedEvent` already carry),
+ * newest first. Read from the human log alone — `run.failed` and
+ * `approval.resolved` both live there (`log.ts`'s own `appendHumanEvent`),
+ * never a Session's own log. Tolerant of a torn line (ADR 0007's own
+ * spirit): a trace is cosmetic, so a skip here is silently dropped rather
+ * than threaded through as a `skippedLines` warning the way `decideAction`'s
+ * own identity derivation must.
+ */
+export function deriveResolutionTraceBySession(
+  home: string = tenazaHome(),
+): Map<string, ResolutionTraceEntry[]> {
+  const bySession = new Map<string, ResolutionTraceEntry[]>();
+  for (const event of readHumanEvents(home)) {
+    const entry = traceEntryFor(event);
+    if (!entry) continue;
+    const list = bySession.get(event.session) ?? [];
+    list.push(entry);
+    bySession.set(event.session, list);
+  }
+  for (const list of bySession.values()) list.sort((a, b) => b.ts.localeCompare(a.ts));
+  return bySession;
 }

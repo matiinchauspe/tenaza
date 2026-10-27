@@ -343,6 +343,7 @@ describe("dedupOutstanding (pure)", () => {
     ts: "t1",
     action: { kind: "shell" as const, command: "a", tool: "Bash" },
     blocked: true,
+    decision: "deny" as const,
   };
   const rowB = {
     id: idB,
@@ -350,6 +351,7 @@ describe("dedupOutstanding (pure)", () => {
     ts: "t2",
     action: { kind: "shell" as const, command: "b", tool: "Bash" },
     blocked: true,
+    decision: "deny" as const,
   };
 
   test("drops a row whose id is in the resolved set", () => {

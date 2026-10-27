@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { parseRunOutput } from "../../runoutput";
 
 /** The HTTP shapes `daemon.ts`'s write routes answer with (ticket 09) — matched here only to decide what to DO with the response, never re-validated against a schema (unlike `BoardPayload`, which travels over SSE and needs one). */
 const STALE_TOKEN_STATUS = 403;
@@ -20,12 +21,48 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "no-cwd": "No se sabe en qué directorio correrlo",
   "cwd-missing": "El directorio de la Session ya no existe",
   "spawn-failed": "No se pudo iniciar el comando",
+  /** Ticket 10: `postLiveAnswer`'s own refusal — the window already lapsed (or it was never live) before this answer reached the Daemon. */
+  "not-live": "Ya no está en vivo — pasó a pendiente",
+  "invalid-answer": "Respuesta inválida",
+  "invalid-body": "No se pudo enviar la respuesta",
 };
 
 /** 404 — the item doesn't exist UNDER THIS id any more (closed from elsewhere, e.g. the CLI, between this tab's last SSE push and the click). Plain text body (`daemon.ts`'s `new Response("not found\n", ...)`), never JSON — handled by status alone, before any `res.json()` attempt. */
 const NOT_FOUND_MESSAGE = "Ese ítem ya no está pendiente";
 
 const GENERIC_MESSAGE = (status: number): string => `No se pudo (${status})`;
+
+/**
+ * Ticket 10: "resolving a pending request gives visible feedback: a short
+ * toast... never a silent vanish" (spec). Fired ONLY on a CONFIRMED
+ * success — `done`/`dismiss`'s own 200 response, or `run`'s stream ending
+ * with no failure trailer — never optimistically on click, so a refused
+ * write (409/422/500/404, surfaced in `errors[id]` instead) never shows a
+ * false "listo" alongside it. `run`/`answer` never show one on their OWN
+ * (a live answer's feedback is the resolution trace + the agent
+ * continuing, not a toast — spec scopes the toast to "run / listo /
+ * descartar" alone).
+ */
+const RESOLUTION_VERBS: Record<"run" | "done" | "dismiss", string> = {
+  run: "corrido",
+  done: "listo",
+  dismiss: "descartado",
+};
+
+/** Display truncation only (same convention `InboxCard`'s own `ID_DISPLAY_LENGTH` already uses) — never a collision-safe shortest-unique-prefix. */
+const TOAST_ID_DISPLAY_LENGTH = 8;
+
+function buildToastMessage(id: string, action: "run" | "done" | "dismiss"): string {
+  return `✓ pedido #${id.slice(0, TOAST_ID_DISPLAY_LENGTH)} cerrado como ${RESOLUTION_VERBS[action]} — el agente no se entera`;
+}
+
+/** How long a toast stays up before it's dropped (the prototype's own ~2.6s). */
+const TOAST_LIFETIME_MS = 2600;
+
+export interface ToastViewModel {
+  id: string;
+  message: string;
+}
 
 /**
  * A non-ok, NON-403 write response → its short es-AR message (review fix:
@@ -55,22 +92,31 @@ export interface InboxActionsState {
   errors: Readonly<Record<string, string>>;
   /** True once any write has come back 403 — the Daemon's token rotated (a restart) and this tab's cookie is stale (decision 05, ticket 09's own "stale tab" note). Never clears itself: reopening the view (a fresh `/auth` load) is the only fix, so there is nothing to recover from in place. */
   staleToken: boolean;
+  /** Ticket 10: every currently-visible toast, oldest first — each one drops itself after `TOAST_LIFETIME_MS`. */
+  toasts: readonly ToastViewModel[];
   run(id: string): void;
   done(id: string): void;
   dismiss(id: string): void;
+  /** Ticket 10: post a live-answering APPROVE for `id` — `message` is the human's optional note, forwarded as the agent's own `additionalContext`. */
+  approve(id: string, message?: string): void;
+  /** Ticket 10: post a live-answering REJECT for `id` — `message` is the deny reason the agent reads; empty/omitted gets a generic one (`live.ts`'s own `GENERIC_REJECT_REASON`), never silently dropped. */
+  reject(id: string, message?: string): void;
 }
 
-function itemActionUrl(id: string, action: "run" | "done" | "dismiss"): string {
+function itemActionUrl(id: string, action: "run" | "done" | "dismiss" | "answer"): string {
   return `/items/${id}/${action}`;
 }
 
 /**
- * Owns every write the board's action cards make (ticket 09) — `run`,
- * `done`, `dismiss` — and the per-item state those writes produce
- * (streamed output, which ids are mid-run, whether this tab's token has
- * gone stale, and now a per-item error message for a refused write). The
- * container (`BoardApp`) calls this and hands the result down; `InboxCard`
- * itself stays pure presentational, exactly as ticket 08 left it.
+ * Owns every write the board's action cards make (ticket 09's `run`,
+ * `done`, `dismiss`; ticket 10's `approve`/`reject`) — and the per-item
+ * state those writes produce (streamed output, which ids are mid-run,
+ * whether this tab's token has gone stale, and a per-item error message
+ * for a refused write). The container (`BoardApp`) calls this and hands
+ * the result down; `InboxCard`/`SessionCard` stay pure presentational,
+ * exactly as ticket 08 left them. `approve`/`reject` are fire-and-forget,
+ * same shape as `done`/`dismiss` — the hold's own CLOSE (or expiry) is
+ * read back from `/events`, never from this fetch's response.
  *
  * The RESOLVED outcome of a SUCCESSFUL `run` or `done`/`dismiss` —
  * whether the item actually closed — is still never read from the fetch
@@ -86,14 +132,17 @@ export function useInboxActions(): InboxActionsState {
   const [outputs, setOutputs] = useState<Readonly<Record<string, string>>>({});
   const [errors, setErrors] = useState<Readonly<Record<string, string>>>({});
   const [staleToken, setStaleToken] = useState(false);
+  const [toasts, setToasts] = useState<readonly ToastViewModel[]>([]);
   // A fetch that resolves after this hook's owner unmounts (e.g. the board
   // re-renders away mid-stream) must never call `setState` on a gone
   // component — a plain ref, not state, since nothing ever needs to
   // RENDER off this flag.
   const unmountedRef = useRef(false);
+  const toastTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   useEffect(() => {
     return () => {
       unmountedRef.current = true;
+      for (const timeout of toastTimeoutsRef.current) clearTimeout(timeout);
     };
   }, []);
 
@@ -106,23 +155,49 @@ export function useInboxActions(): InboxActionsState {
     });
   }
 
-  const post = useCallback(async (id: string, action: "run" | "done" | "dismiss"): Promise<Response> => {
-    const res = await fetch(itemActionUrl(id, action), { method: "POST" });
-    if (unmountedRef.current) return res;
+  /** Push one toast and schedule its own removal — a plain, self-contained lifecycle, never dependent on the component re-rendering for any other reason to notice the timeout fired. */
+  function pushToast(message: string): void {
+    if (unmountedRef.current) return;
+    const toastId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setToasts((prev) => [...prev, { id: toastId, message }]);
+    const timeout = setTimeout(() => {
+      toastTimeoutsRef.current.delete(timeout);
+      if (unmountedRef.current) return;
+      setToasts((prev) => prev.filter((toast) => toast.id !== toastId));
+    }, TOAST_LIFETIME_MS);
+    toastTimeoutsRef.current.add(timeout);
+  }
 
-    if (res.status === STALE_TOKEN_STATUS) {
-      setStaleToken(true);
-    } else if (!res.ok) {
-      // `run`'s own SUCCESS path (200, a stream) never reaches here — only
-      // a refusal (409/422/500) or a 404 does, neither of which carries a
-      // body a later reader needs, so consuming it here is safe.
-      const message = await describeWriteError(res.clone());
-      if (!unmountedRef.current) setErrors((prev) => ({ ...prev, [id]: message }));
-    } else {
-      clearError(id);
-    }
-    return res;
-  }, []);
+  const post = useCallback(
+    async (id: string, action: "run" | "done" | "dismiss" | "answer", body?: unknown): Promise<Response> => {
+      const res = await fetch(itemActionUrl(id, action), {
+        method: "POST",
+        ...(body !== undefined
+          ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+          : {}),
+      });
+      if (unmountedRef.current) return res;
+
+      if (res.status === STALE_TOKEN_STATUS) {
+        setStaleToken(true);
+      } else if (!res.ok) {
+        // `run`'s own SUCCESS path (200, a stream) never reaches here — only
+        // a refusal (409/422/500) or a 404 does, neither of which carries a
+        // body a later reader needs, so consuming it here is safe.
+        const message = await describeWriteError(res.clone());
+        if (!unmountedRef.current) setErrors((prev) => ({ ...prev, [id]: message }));
+      } else {
+        clearError(id);
+        // Ticket 10: `done`/`dismiss` confirm success INLINE, in this same
+        // response — unlike `run`, which only confirms its STREAM started;
+        // that one's own toast fires once the stream actually ends (below),
+        // never here.
+        if (action === "done" || action === "dismiss") pushToast(buildToastMessage(id, action));
+      }
+      return res;
+    },
+    [],
+  );
 
   const done = useCallback(
     (id: string) => {
@@ -138,12 +213,33 @@ export function useInboxActions(): InboxActionsState {
     [post],
   );
 
+  const approve = useCallback(
+    (id: string, message?: string) => {
+      void post(id, "answer", { answer: "approve", message });
+    },
+    [post],
+  );
+
+  const reject = useCallback(
+    (id: string, message?: string) => {
+      void post(id, "answer", { answer: "reject", message });
+    },
+    [post],
+  );
+
   const run = useCallback(
     (id: string) => {
       setRunningIds((prev) => new Set(prev).add(id));
       setOutputs((prev) => ({ ...prev, [id]: "" }));
 
       void (async () => {
+        // Ticket 10: accumulated LOCALLY too (never just read back from
+        // `outputs` state, which closes over a stale value) so the toast
+        // check below — "did this run end WITHOUT a failure trailer" — has
+        // the complete text the instant the stream itself ends, not
+        // whatever React happened to have committed by then.
+        let accumulated = "";
+        let streamEndedCleanly = false;
         try {
           const res = await post(id, "run");
           if (res.status === STALE_TOKEN_STATUS || !res.ok || !res.body) return;
@@ -155,14 +251,22 @@ export function useInboxActions(): InboxActionsState {
             const { value, done: streamDone } = await reader.read();
             if (streamDone) break;
             const chunk = decoder.decode(value, { stream: true });
+            accumulated += chunk;
             if (unmountedRef.current) continue;
             setOutputs((prev) => ({ ...prev, [id]: (prev[id] ?? "") + chunk }));
           }
+          streamEndedCleanly = true;
         } catch {
           // A network drop mid-stream — the item's own state (closed or
           // still open) is read back from `/events` regardless; nothing
           // more to do here than stop showing it as running.
         } finally {
+          // The stream ending with NO failure trailer is `run`'s own
+          // success signal — `startInboxItemRunStream`'s one and only way
+          // of saying "closed as done" short of re-deriving the Inbox.
+          if (streamEndedCleanly && parseRunOutput(accumulated).error === undefined) {
+            pushToast(buildToastMessage(id, "run"));
+          }
           if (!unmountedRef.current) {
             setRunningIds((prev) => {
               const next = new Set(prev);
@@ -176,5 +280,5 @@ export function useInboxActions(): InboxActionsState {
     [post],
   );
 
-  return { runningIds, outputs, errors, staleToken, run, done, dismiss };
+  return { runningIds, outputs, errors, staleToken, toasts, run, done, dismiss, approve, reject };
 }

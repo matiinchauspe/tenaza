@@ -1,17 +1,15 @@
 import type { ReactNode } from "react";
 
 /**
- * The action card's own two badge states (ticket 08's read-only slice of
- * decision 04's prototype): denied and awaiting `run` ("inbox", dim) vs.
- * already ran unenforced ("ran", red — ADR 0001's "YA CORRIÓ"). The
- * prototype's THIRD state ("wait", a live item draining toward the Inbox)
- * has no source yet — the contract carries no `kind` to tell a live item
- * apart from a plain pending one (ticket 10) — so it is out of scope here
- * and not a tone this type offers. `StatusBadge` itself stays generic;
- * Session cards no longer render through it at all (a colored dot, inline
- * on the card, carries that signal instead — see `SessionCard`).
+ * The board's badge states: a pending request awaiting `run` ("inbox",
+ * dim), one already ran unenforced ("ran", red — ADR 0001's "YA CORRIÓ"),
+ * and — ticket 10 — a Session's own live hold, draining toward pending
+ * ("wait", amber, the prototype's own tone). `StatusBadge` itself stays
+ * generic; a plain Session card with no live hold still renders through a
+ * colored dot instead (inline on the card — see `SessionCard`), never this
+ * component.
  */
-export type BadgeTone = "inbox" | "ran";
+export type BadgeTone = "inbox" | "ran" | "wait";
 
 export interface StatusBadgeProps {
   tone: BadgeTone;

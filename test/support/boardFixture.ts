@@ -4,7 +4,7 @@ import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession } from "
 export function makeBoardPayload(overrides: Partial<BoardPayload> = {}): BoardPayload {
   return {
     v: 1,
-    policy: { stallMinutes: 15, contextThresholdTokens: 200_000 },
+    policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
     sessions: [],
     inbox: [],
     ...overrides,
@@ -17,6 +17,7 @@ export function makeSession(overrides: Partial<BoardSession> = {}): BoardSession
     project: "tenaza",
     role: "sesión",
     hasMeasureCapability: true,
+    resolutions: [],
     ...overrides,
   };
 }
@@ -33,6 +34,7 @@ export function makeInboxItem(
     ts: "2026-01-01T00:00:00.000Z",
     action: { kind: "shell", tool: "Bash", command: "gh pr merge 58", ...action },
     blocked: true,
+    decision: "deny",
     ...rest,
   };
 }

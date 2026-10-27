@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES, loadPolicy, matchRule, policyWarning } from "../src/policy";
+import {
+  DEFAULT_CONTEXT_THRESHOLD,
+  DEFAULT_STALL_MINUTES,
+  DEFAULT_WAIT_SECONDS,
+  MAX_WAIT_SECONDS,
+  effectiveWaitSeconds,
+  loadPolicy,
+  matchRule,
+  policyWarning,
+} from "../src/policy";
 import { policyLkgPath } from "../src/paths";
 
 describe("Policy", () => {
@@ -102,6 +111,58 @@ stall_minutes = 30
     );
 
     expect(loadPolicy(home).stallMinutes).toBe(30);
+  });
+
+  test("an absent policy file yields the default wait seconds (ticket 10)", () => {
+    expect(loadPolicy(home).waitSeconds).toBe(DEFAULT_WAIT_SECONDS);
+    expect(DEFAULT_WAIT_SECONDS).toBe(180);
+  });
+
+  test("a policy.toml without a [live] section still yields the default wait seconds", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+`,
+    );
+
+    expect(loadPolicy(home).waitSeconds).toBe(DEFAULT_WAIT_SECONDS);
+  });
+
+  test("a custom [live] wait_seconds overrides the default", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[live]
+wait_seconds = 60
+`,
+    );
+
+    expect(loadPolicy(home).waitSeconds).toBe(60);
+  });
+
+  test("[live] stall_minutes and wait_seconds coexist independently", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[live]
+stall_minutes = 30
+wait_seconds = 60
+`,
+    );
+
+    const policy = loadPolicy(home);
+    expect(policy.stallMinutes).toBe(30);
+    expect(policy.waitSeconds).toBe(60);
+  });
+
+  test("effectiveWaitSeconds caps a raw Policy value at MAX_WAIT_SECONDS", () => {
+    expect(MAX_WAIT_SECONDS).toBe(210);
+    expect(effectiveWaitSeconds({ waitSeconds: 180 })).toBe(180);
+    expect(effectiveWaitSeconds({ waitSeconds: 300 })).toBe(210);
+    expect(effectiveWaitSeconds({ waitSeconds: 210 })).toBe(210);
   });
 
   test("matchRule finds a human rule as a contiguous run in the parsed command", async () => {
@@ -381,6 +442,7 @@ effect = "human"
     const saved = JSON.parse(readFileSync(policyLkgPath(home), "utf8"));
     expect(saved.rules).toEqual([{ match: "gh pr merge", effect: "human" }]);
     expect(saved.stallMinutes).toBe(DEFAULT_STALL_MINUTES);
+    expect(saved.waitSeconds).toBe(DEFAULT_WAIT_SECONDS);
     expect(typeof saved.savedAt).toBe("string");
   });
 
@@ -400,6 +462,25 @@ effect = "human"
     const policy = loadPolicy(home);
     expect(policy.rules).toEqual([{ match: "gh pr merge", effect: "human" }]);
     expect(policy.stallMinutes).toBe(DEFAULT_STALL_MINUTES);
+  });
+
+  test("ticket 10: an LKG written before waitSeconds existed still loads, defaulting it rather than failing the whole cache", () => {
+    mkdirSync(path.join(home, "state"), { recursive: true });
+    writeFileSync(
+      policyLkgPath(home),
+      JSON.stringify({
+        rules: [{ match: "gh pr merge", effect: "human" }],
+        thresholdTokens: 200_000,
+        stallMinutes: 15,
+        savedAt: new Date().toISOString(),
+        // deliberately no `waitSeconds` — the pre-ticket-10 shape.
+      }),
+    );
+    writeFileSync(policyFile(), "[[rule\nmatch = broken"); // force the fallback to the LKG
+
+    const policy = loadPolicy(home);
+    expect(policy.rules).toEqual([{ match: "gh pr merge", effect: "human" }]);
+    expect(policy.waitSeconds).toBe(DEFAULT_WAIT_SECONDS);
   });
 
   test("a malformed policy.toml falls back to the last-known-good Policy instead of dropping every Rule", () => {

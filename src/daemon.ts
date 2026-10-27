@@ -1,9 +1,20 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Action } from "./contract/event";
-import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession } from "./contract/live";
-import { type InboxItem, deriveInbox } from "./inbox";
+import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession, ResolutionTraceEntry } from "./contract/live";
+import {
+  buildDaemonUrl,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_HEARTBEAT_STALE_MS,
+  generateDaemonToken,
+  heartbeatIntervalMs,
+  isHeartbeatFresh,
+  readAlive,
+  readDaemonToken,
+  writeAlive,
+  writeDaemonToken,
+} from "./daemonlink";
+import { type InboxItem, deriveInbox, deriveResolutionTraceBySession } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import {
   daemonAlivePath,
@@ -14,8 +25,9 @@ import {
   sessionsDir,
   tenazaHome,
 } from "./paths";
-import { loadPolicy } from "./policy";
+import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import {
+  postLiveAnswer,
   resolveInboxItem,
   startInboxItemRunStream,
   UnknownInboxItemError,
@@ -36,21 +48,23 @@ import index from "./ui/index.html";
 /** Re-exported from `paths.ts` (its real home — see that file's own doc comment on why) so every EXISTING caller that looks for it here, `tenaza ui`'s own default included, is unaffected. */
 export { DEFAULT_DAEMON_PORT };
 
-/** "rewritten every ~2 s" (ticket 07) — overridable via `TENAZA_HEARTBEAT_MS` so a test never waits 2 real seconds per assertion. */
-export const DEFAULT_HEARTBEAT_INTERVAL_MS = 2000;
-
 /**
- * How stale a heartbeat has to read before a FUTURE reader (ticket 10's
- * live-answering hook) should treat the Daemon as gone — "heartbeat going
- * stale mid-wait → deny at once" (decision 06). Exposed here, in the one
- * place the heartbeat itself is written, so a later hook and this module
- * can never disagree on the threshold; ticket 07 writes the heartbeat and
- * defines this constant, but — "hooks never talk to it" — wires NOTHING to
- * it yet. 2.5x the write interval: generous enough that one slow tick under
- * load never reads as dead, tight enough to notice a genuinely gone process
- * within a few seconds.
+ * Re-exported from `daemonlink.ts` (its real home, as of ticket 10 — see
+ * that module's own doc comment on why the heartbeat/token surface moved
+ * out of this file) so every EXISTING caller that looked for them HERE
+ * (ticket 07's own tests included) is unaffected.
  */
-export const DEFAULT_HEARTBEAT_STALE_MS = 5000;
+export {
+  buildDaemonUrl,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_HEARTBEAT_STALE_MS,
+  generateDaemonToken,
+  isHeartbeatFresh,
+  readAlive,
+  readDaemonToken,
+  writeAlive,
+  writeDaemonToken,
+};
 
 /** Overridable via `TENAZA_SSE_POLL_MS` (same reasoning as the heartbeat). */
 export const DEFAULT_SSE_POLL_INTERVAL_MS = 500;
@@ -68,87 +82,8 @@ function positiveIntFromEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function heartbeatIntervalMs(): number {
-  return positiveIntFromEnv("TENAZA_HEARTBEAT_MS", DEFAULT_HEARTBEAT_INTERVAL_MS);
-}
-
 function ssePollIntervalMs(): number {
   return positiveIntFromEnv("TENAZA_SSE_POLL_MS", DEFAULT_SSE_POLL_INTERVAL_MS);
-}
-
-// ---------------------------------------------------------------------------
-// Heartbeat (state/daemon.alive)
-// ---------------------------------------------------------------------------
-
-/** Rewrite the heartbeat file with the current timestamp. Never throws — a failing write here must never crash the Daemon's own event loop. */
-export function writeAlive(home: string, now: Date = new Date()): void {
-  try {
-    const file = daemonAlivePath(home);
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, now.toISOString(), "utf8");
-  } catch {
-    // See the doc comment above.
-  }
-}
-
-/** The heartbeat's own timestamp, or `undefined` when absent or unreadable — never thrown. */
-export function readAlive(home: string = tenazaHome()): Date | undefined {
-  const file = daemonAlivePath(home);
-  if (!existsSync(file)) return undefined;
-  try {
-    const parsed = new Date(readFileSync(file, "utf8").trim());
-    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Pure: is the heartbeat read as fresh right now? Defined here for a future hook to call (ticket 10) — not called by anything in THIS ticket (decision 05: "hooks never talk to it"). */
-export function isHeartbeatFresh(
-  aliveAt: Date | undefined,
-  now: Date,
-  maxAgeMs: number = DEFAULT_HEARTBEAT_STALE_MS,
-): boolean {
-  if (!aliveAt) return false;
-  return now.getTime() - aliveAt.getTime() <= maxAgeMs;
-}
-
-// ---------------------------------------------------------------------------
-// Token (state/daemon.token)
-// ---------------------------------------------------------------------------
-
-/** A fresh random token, one per `tenaza ui` launch (decision 05) — not a security boundary (agents run as the same user), just honest mistake-proofing. */
-export function generateDaemonToken(): string {
-  return randomBytes(24).toString("hex");
-}
-
-/**
- * Write the launch token, mode 0600 (ticket 07). `writeFileSync`'s own
- * `mode` option sets that on a FRESH file at creation (the common case: a
- * clean `clearDaemonFiles` leaves nothing behind) — but POSIX `open()`
- * ignores the `mode` argument when the path already exists, so a leftover
- * file from an earlier launch would otherwise keep whatever permission it
- * already had. `chmodSync` is the belt-and-suspenders for exactly that
- * stale-file case, not the normal path.
- */
-export function writeDaemonToken(home: string, token: string): void {
-  const file = daemonTokenPath(home);
-  mkdirSync(path.dirname(file), { recursive: true });
-  const existedBefore = existsSync(file);
-  writeFileSync(file, token, { mode: 0o600 });
-  if (existedBefore) chmodSync(file, 0o600);
-}
-
-/** The CURRENT Daemon's token — whichever one is running, since there is only ever one `daemon.token` per `TENAZA_HOME` (the port is the lock, decision 05). `undefined` when no Daemon has ever written one, or the file can't be read. */
-export function readDaemonToken(home: string = tenazaHome()): string | undefined {
-  const file = daemonTokenPath(home);
-  if (!existsSync(file)) return undefined;
-  try {
-    const token = readFileSync(file, "utf8").trim();
-    return token.length > 0 ? token : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function removeIfExists(file: string): void {
@@ -232,7 +167,7 @@ function toActionSummary(action: Action): ActionSummary {
   };
 }
 
-function toBoardSession(node: SessionNode): BoardSession {
+function toBoardSession(node: SessionNode, resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>): BoardSession {
   return {
     id: node.id,
     parentId: node.parent,
@@ -245,6 +180,8 @@ function toBoardSession(node: SessionNode): BoardSession {
     hasMeasureCapability: node.capabilities.includes("measure"),
     contextTokens: node.contextTokens,
     lastSignal: node.lastAction ? toActionSummary(node.lastAction) : undefined,
+    // Ticket 10: newest-first, already derived (`deriveResolutionTraceBySession`) — never re-sorted or re-filtered here.
+    resolutions: resolutions.get(node.id) ?? [],
   };
 }
 
@@ -259,6 +196,7 @@ function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, Session
     ts: row.ts,
     action: toActionSummary(row.action),
     blocked: row.blocked,
+    decision: row.decision,
   };
 }
 
@@ -281,11 +219,16 @@ export function buildBoardPayload(home: string): BoardPayload {
     (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()),
   );
   const policy = loadPolicy(home);
+  const resolutions = deriveResolutionTraceBySession(home);
 
   return {
     v: 1,
-    policy: { stallMinutes: policy.stallMinutes, contextThresholdTokens: policy.thresholdTokens },
-    sessions: visibleSessions.map(toBoardSession),
+    policy: {
+      stallMinutes: policy.stallMinutes,
+      contextThresholdTokens: policy.thresholdTokens,
+      waitSeconds: effectiveWaitSeconds(policy),
+    },
+    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions)),
     inbox: deriveInbox(home).map((row) => toBoardInboxItem(row, fullIndex)),
   };
 }
@@ -507,8 +450,8 @@ function eventsResponse(ctx: DaemonContext): Response {
 // Write routes (ticket 09): resolve a pending Inbox item from the view
 // ---------------------------------------------------------------------------
 
-/** `POST /items/<id>/run|done|dismiss` — the only shapes this ticket defines; tickets 10/11 add their own paths alongside this one, never by widening this pattern. `id` is the item's FULL identity hash (ADR 0005) — the board's own contract (`contract/live.ts`) never carries anything shorter, so the view has no prefix to resolve. */
-const ITEM_ACTION_PATTERN = /^\/items\/([0-9a-f]{4,64})\/(run|done|dismiss)$/;
+/** `POST /items/<id>/run|done|dismiss|answer` (ticket 09 shipped the first three; ticket 10 adds `answer`) — ticket 11 adds its own paths alongside this one ONLY if they share this exact `/items/<id>/…` shape, never by widening this pattern. `id` is the item's FULL identity hash (ADR 0005) — the board's own contract (`contract/live.ts`) never carries anything shorter, so the view has no prefix to resolve. */
+const ITEM_ACTION_PATTERN = /^\/items\/([0-9a-f]{4,64})\/(run|done|dismiss|answer)$/;
 
 /** A refusal `startInboxItemRunStream` reported WITHOUT ever spawning anything — translated to a client error the view can show inline, never a 200 with no content. `already-resolved`/`unblockable`/`not-runnable` are all "this item's own state forbids it" (409); `no-cwd`/`cwd-missing` are "Tenaza cannot resolve where to run it" (422) — distinct enough from a plain conflict to point the human at a different fix (the stored command itself, printed back, same as the CLI's own refusal messages). */
 function runRefusalResponse(refusal: RunRefusal): Response {
@@ -562,13 +505,48 @@ function resolveItemResponse(ctx: DaemonContext, id: string, outcome: Resolution
   }
 }
 
+/**
+ * `POST /items/<id>/answer` (ticket 10, decision 06): the ONE write route
+ * the browser's own TE ESPERA card ever posts to — appending the human's
+ * raw answer (`postLiveAnswer`, `resolve.ts`) for the item's own HELD hook
+ * to read back and act on. This route never closes the item itself, and
+ * never touches the agent's own call — it only records what the human
+ * said. A malformed body (no valid JSON, or `answer` not exactly
+ * `"approve"`/`"reject"`) is a plain 400, never a 500 or a silent accept; a
+ * refusal `postLiveAnswer` reports WITHOUT writing anything (already
+ * resolved, or no longer live) is a 409 — the SAME "this item's own state
+ * forbids it" shape `runRefusalResponse` already uses for `run`.
+ */
+async function answerItemResponse(ctx: DaemonContext, id: string, req: Request): Promise<Response> {
+  let body: { answer?: unknown; message?: unknown };
+  try {
+    body = (await req.json()) as { answer?: unknown; message?: unknown };
+  } catch {
+    return Response.json({ error: "invalid-body" }, { status: 400 });
+  }
+  if (body.answer !== "approve" && body.answer !== "reject") {
+    return Response.json({ error: "invalid-answer" }, { status: 400 });
+  }
+  const message = typeof body.message === "string" && body.message.length > 0 ? body.message : undefined;
+
+  try {
+    const result = postLiveAnswer(ctx.home, id, body.answer, message);
+    if (result.kind === "accepted") return Response.json({ ok: true });
+    return Response.json({ error: result.kind }, { status: 409 });
+  } catch (error) {
+    if (error instanceof UnknownInboxItemError) return new Response("not found\n", { status: 404 });
+    throw error;
+  }
+}
+
 /** Dispatch one `/items/<id>/<action>` write — `undefined` when `pathname` doesn't even match the shape, so the caller falls through to the SAME bare 404 any other unrecognized path already gets. */
-function itemActionResponse(ctx: DaemonContext, pathname: string): Response | undefined {
+async function itemActionResponse(ctx: DaemonContext, pathname: string, req: Request): Promise<Response | undefined> {
   const match = ITEM_ACTION_PATTERN.exec(pathname);
   if (!match) return undefined;
-  const [, id, action] = match as unknown as [string, string, "run" | "done" | "dismiss"];
+  const [, id, action] = match as unknown as [string, string, "run" | "done" | "dismiss" | "answer"];
 
   if (action === "run") return runItemResponse(ctx, id);
+  if (action === "answer") return answerItemResponse(ctx, id, req);
   return resolveItemResponse(ctx, id, action === "done" ? "done" : "dismissed");
 }
 
@@ -584,14 +562,15 @@ function itemActionResponse(ctx: DaemonContext, pathname: string): Response | un
  * `GET /events` and `GET /auth` are the only OPEN reads still answered
  * HERE — `/auth` validates the token itself, so it cannot sit behind the
  * token gate below. Everything else — any other path, any non-GET method,
- * including every write route this ticket and tickets 10-11 add (`run`,
- * `done`, `dismiss`, answer, focus) — is DENIED BY DEFAULT unless it
- * carries the token: `itemActionResponse` is called only AFTER that gate,
- * never wrapped around any route individually, so there is no path to
- * "write" here that could ever be written without it.
+ * including every write route ticket 09 (`run`, `done`, `dismiss`), ticket
+ * 10 (`answer`) and ticket 11 (`focus`, if it shares this exact shape) add
+ * — is DENIED BY DEFAULT unless it carries the token: `itemActionResponse`
+ * is called only AFTER that gate, never wrapped around any route
+ * individually, so there is no path to "write" here that could ever be
+ * written without it.
  */
 export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response | Promise<Response> {
-  return (req: Request): Response | Promise<Response> => {
+  return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") return healthResponse();
@@ -603,7 +582,7 @@ export function createFetchHandler(ctx: DaemonContext): (req: Request) => Respon
     }
 
     if (req.method === "POST") {
-      const handled = itemActionResponse(ctx, url.pathname);
+      const handled = await itemActionResponse(ctx, url.pathname, req);
       if (handled) return handled;
     }
 
@@ -649,20 +628,6 @@ export async function probeExistingDaemon(
   } finally {
     clearTimeout(timer);
   }
-}
-
-/**
- * The URL the launcher opens (ticket 08 fix) — `/auth?token=`, not `/?token=`:
- * `/auth` is the ONE route that still validates the token and sets the
- * cookie server-side (`authResponse`, above); landing straight on `/` with
- * the token would skip that entirely, which is exactly the regression this
- * ticket's own `bootstrapTokenCookie` reintroduced. No token to carry (the
- * `readDaemonToken` miss case) → open the plain page directly, since there
- * is nothing for `/auth` to validate.
- */
-export function buildDaemonUrl(port: number, token: string | undefined): string {
-  const origin = `http://127.0.0.1:${port}`;
-  return token ? `${origin}/auth?token=${token}` : `${origin}/`;
 }
 
 function describeBindError(error: unknown): string {

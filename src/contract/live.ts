@@ -24,6 +24,17 @@ import { z } from "zod";
 export const LivePolicySchema = z.object({
   stallMinutes: z.number(),
   contextThresholdTokens: z.number(),
+  /**
+   * Ticket 10: the EFFECTIVE (already-capped) live-answering window in
+   * seconds — `policy.ts`'s `effectiveWaitSeconds`, never the raw
+   * `Policy.waitSeconds` a human may have configured past the hook's own
+   * ceiling. The client's draining bar (`board.ts`'s `liveItemPhase`/
+   * `liveWaitRemainingFraction`) must drain over the SAME window the hook
+   * itself actually holds for, or a generous `[live] wait_seconds` would
+   * show a bar still draining long after the hook already denied and the
+   * item turned pending.
+   */
+  waitSeconds: z.number(),
 });
 export type LivePolicy = z.infer<typeof LivePolicySchema>;
 
@@ -56,6 +67,27 @@ export const ActionSummarySchema = z.object({
 export type ActionSummary = z.infer<typeof ActionSummarySchema>;
 
 /**
+ * Ticket 10: one past resolution of a request THIS Session raised — the
+ * resolution trace's own raw material (spec "Requests vs agents"). `kind`
+ * is already resolved from the log's own `approval.resolved`/`run.failed`
+ * Events (`inbox.ts`'s `deriveResolutionTraceBySession`) into exactly the
+ * six the trace tells apart: `ran` ("corrido por vos"), `done` ("cerrado
+ * como listo"), `dismissed` ("descartado"), `failed` ("falló (código N)" —
+ * the item stays open), `approved`/`rejected` (a live answer). `id` is the
+ * FULL identity hash (ADR 0005); `ts` is a plain fact the client formats
+ * its own age from (`board.ts`'s `formatAge`), same convention as every
+ * other timestamp in this contract.
+ */
+export const ResolutionTraceEntrySchema = z.object({
+  id: z.string(),
+  kind: z.enum(["ran", "done", "dismissed", "failed", "approved", "rejected"]),
+  ts: z.string(),
+  /** Set only for `kind: "failed"` — the stored command's own exit code. */
+  exitCode: z.number().optional(),
+});
+export type ResolutionTraceEntry = z.infer<typeof ResolutionTraceEntrySchema>;
+
+/**
  * One Session's row on the board — already resolved to a project
  * (`deriveProject`, `sessions.ts`) server-side, since that shells out to
  * `git` and is never shippable to a browser bundle. Everything else here
@@ -78,6 +110,8 @@ export const BoardSessionSchema = z.object({
   contextTokens: z.number().optional(),
   /** "Last signal" (spec's own field, distinct from `age`): the latest Action this Session attempted, allowed or not — `sessions.ts`'s `lastAction`. `undefined` when it has never attempted one. */
   lastSignal: ActionSummarySchema.optional(),
+  /** Ticket 10: every past resolution of a request THIS Session raised, newest first — empty when it never raised one. Always present (never `undefined`) so the client never special-cases its absence. */
+  resolutions: z.array(ResolutionTraceEntrySchema),
 });
 export type BoardSession = z.infer<typeof BoardSessionSchema>;
 
@@ -92,6 +126,16 @@ export const BoardInboxItemSchema = z.object({
   action: ActionSummarySchema,
   /** An enforced deny (awaiting `run`) vs. YA CORRIÓ (ticket 06, ADR 0001) — carried for 09 to act on; ticket 08 renders it the same either way. */
   blocked: z.boolean(),
+  /**
+   * Ticket 10: the row's OWN raw decision — `"held"` while the hook still
+   * polls for an answer, `"deny"` for a plain pending item (today's v0.1
+   * shape, or a held item whose window has already lapsed), `"allow"` for
+   * the ADR 0001 unblockable case. The client derives live-vs-pending from
+   * this plus `ts` and the Policy's own `waitSeconds`
+   * (`board.ts`'s `liveItemPhase`) — never from a server-side time check,
+   * which `contract/live.ts`'s own doc comment rules out for this payload.
+   */
+  decision: z.enum(["allow", "deny", "held"]),
 });
 export type BoardInboxItem = z.infer<typeof BoardInboxItemSchema>;
 

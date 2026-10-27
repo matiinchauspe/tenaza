@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBoardViewModel } from "../../../src/ui/board/viewModel";
+import { buildBoardViewModel, highlightedSessionId } from "../../../src/ui/board/viewModel";
 import { makeBoardPayload, makeInboxItem, makeSession } from "../../support/boardFixture";
 
 const NOW = new Date("2026-01-02T00:00:00.000Z");
@@ -308,7 +308,7 @@ describe("buildBoardViewModel — Session card fields", () => {
 
   test("measure Capability present builds a track, reusing contextbar's own math and label", () => {
     const payload = makeBoardPayload({
-      policy: { stallMinutes: 15, contextThresholdTokens: 200_000 },
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
       sessions: [
         makeSession({ id: "a", hasMeasureCapability: true, contextTokens: 242_170, lastEventTs: NOW.toISOString() }),
       ],
@@ -385,5 +385,193 @@ describe("buildBoardViewModel — stats (header chips, human fix round)", () => 
     });
     const model = buildBoardViewModel(payload, NOW);
     expect(model.stats.over200k).toBe(2);
+  });
+});
+
+describe("ticket 10: live answering — a held item docks on its OWN Session's card, never TE NECESITA, while still live", () => {
+  test("a fresh held item renders as liveRequest on its Session's card, not as a TE NECESITA card", () => {
+    const payload = makeBoardPayload({
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
+      sessions: [makeSession({ id: "b71", lastEventTs: NOW.toISOString() })],
+      inbox: [
+        makeInboxItem({
+          id: "abc123",
+          sessionId: "b71",
+          decision: "held",
+          ts: NOW.toISOString(),
+          action: { tool: "Bash", command: "gh pr merge 58 --merge" },
+        }),
+      ],
+    });
+
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.teNecesita.cards).toHaveLength(0);
+    const card = model.corriendo.cards.find((c) => c.id === "b71");
+    expect(card?.liveRequest).toMatchObject({
+      id: "abc123",
+      tool: "Bash",
+      command: "gh pr merge 58 --merge",
+      remainingSeconds: 180,
+    });
+    expect(card?.liveRequest?.remainingFraction).toBe(1);
+  });
+
+  test("the TE NECESITA stat counts live + pending TOGETHER, even though the column itself only lists the pending half (spec: 'the stat chip... counts live + pending')", () => {
+    const payload = makeBoardPayload({
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
+      sessions: [makeSession({ id: "live-1", lastEventTs: NOW.toISOString() })],
+      inbox: [
+        makeInboxItem({ id: "live-item", sessionId: "live-1", decision: "held", ts: NOW.toISOString() }),
+        makeInboxItem({ id: "pending-item", sessionId: "unrelated", decision: "deny" }),
+      ],
+    });
+
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.teNecesita.cards).toHaveLength(1); // only the pending one
+    expect(model.stats.teNecesita).toBe(2); // live + pending
+  });
+
+  test("TIME IS STATE: once the window has lapsed, the SAME held row renders as a plain TE NECESITA card instead — no new event, just the clock", () => {
+    const heldAt = new Date(NOW.getTime() - 200_000); // 200s ago, past the 180s window
+    const payload = makeBoardPayload({
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
+      sessions: [makeSession({ id: "b71", lastEventTs: NOW.toISOString() })],
+      inbox: [makeInboxItem({ id: "abc123", sessionId: "b71", decision: "held", ts: heldAt.toISOString() })],
+    });
+
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.teNecesita.cards.map((c) => c.id)).toEqual(["abc123"]);
+    const card = model.corriendo.cards.find((c) => c.id === "b71");
+    expect(card?.liveRequest).toBeUndefined();
+  });
+
+  test("a held item for an UNKNOWN Session (orphan) falls back to a plain TE NECESITA card rather than vanishing", () => {
+    const payload = makeBoardPayload({
+      sessions: [], // the held item's own Session isn't in this payload at all
+      inbox: [makeInboxItem({ id: "abc123", sessionId: "ghost", decision: "held", ts: NOW.toISOString() })],
+    });
+
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.teNecesita.cards.map((c) => c.id)).toEqual(["abc123"]);
+  });
+
+  test("a plain pending item (decision deny) is entirely unaffected — same TE NECESITA card as before ticket 10", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "e12", lastEventTs: NOW.toISOString() })],
+      inbox: [makeInboxItem({ id: "pend1", sessionId: "e12", decision: "deny" })],
+    });
+
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.teNecesita.cards.map((c) => c.id)).toEqual(["pend1"]);
+    const card = model.corriendo.cards.find((c) => c.id === "e12");
+    expect(card?.liveRequest).toBeUndefined();
+  });
+});
+
+describe("ticket 10: resolution trace", () => {
+  test("no resolutions at all — resolutionTrace is undefined, never an empty object", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "a", resolutions: [] })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.resolutionTrace).toBeUndefined();
+  });
+
+  test("a single resolution renders as the latest line with moreCount 0", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "c09",
+          resolutions: [{ id: "deadbeef00112233445566778899aabbccddeeff", kind: "ran", ts: NOW.toISOString() }],
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    const trace = model.corriendo.cards[0]?.resolutionTrace;
+    expect(trace?.moreCount).toBe(0);
+    expect(trace?.latest).toMatchObject({ symbol: "✓", text: "corrido por vos", tone: "ok", shortId: "dead" });
+  });
+
+  test("several resolutions: latest is the FIRST (server already sorted newest-first), moreCount counts the rest", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "c09",
+          resolutions: [
+            { id: "1111111111111111111111111111111111111a", kind: "ran", ts: "2026-01-01T23:58:00.000Z" },
+            { id: "2222222222222222222222222222222222222b", kind: "done", ts: "2026-01-01T23:50:00.000Z" },
+            { id: "3333333333333333333333333333333333333c", kind: "dismissed", ts: "2026-01-01T23:40:00.000Z" },
+          ],
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    const trace = model.corriendo.cards[0]?.resolutionTrace;
+    expect(trace?.latest.text).toBe("corrido por vos");
+    expect(trace?.moreCount).toBe(2);
+    expect(trace?.tooltip.split("\n")).toHaveLength(3);
+  });
+
+  test("a failed run names its exit code", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "c09",
+          resolutions: [{ id: "4444444444444444444444444444444444444d", kind: "failed", ts: NOW.toISOString(), exitCode: 2 }],
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.resolutionTrace?.latest).toMatchObject({
+      symbol: "✗",
+      text: "falló (código 2)",
+      tone: "fail",
+    });
+  });
+
+  test("approved/rejected (live answers) read distinctly from done/dismissed", () => {
+    const approvedPayload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          resolutions: [{ id: "5555555555555555555555555555555555555e", kind: "approved", ts: NOW.toISOString() }],
+        }),
+      ],
+    });
+    expect(buildBoardViewModel(approvedPayload, NOW).corriendo.cards[0]?.resolutionTrace?.latest).toMatchObject({
+      symbol: "✓",
+      text: "aprobado",
+    });
+
+    const rejectedPayload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          resolutions: [{ id: "6666666666666666666666666666666666666f", kind: "rejected", ts: NOW.toISOString() }],
+        }),
+      ],
+    });
+    expect(buildBoardViewModel(rejectedPayload, NOW).corriendo.cards[0]?.resolutionTrace?.latest).toMatchObject({
+      symbol: "✕",
+      text: "rechazado",
+    });
+  });
+});
+
+describe("highlightedSessionId (ticket 10): selecting a pending request highlights its Session's card", () => {
+  test("undefined when nothing is selected", () => {
+    const payload = makeBoardPayload({ inbox: [makeInboxItem({ id: "p1", sessionId: "s1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(highlightedSessionId(model, undefined)).toBeUndefined();
+  });
+
+  test("resolves to the OWNING Session's id when a pending TE NECESITA card is selected", () => {
+    const payload = makeBoardPayload({ inbox: [makeInboxItem({ id: "p1", sessionId: "s1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(highlightedSessionId(model, "p1")).toBe("s1");
+  });
+
+  test("undefined when the selection is a Session card itself, not a TE NECESITA row", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "s1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(highlightedSessionId(model, "s1")).toBeUndefined();
   });
 });

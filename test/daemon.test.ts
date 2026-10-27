@@ -11,20 +11,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, sessionStartedEvent } from "../src/contract/event";
+import { actionDecidedEvent, approvalResolvedEvent, sessionStartedEvent } from "../src/contract/event";
 import { isHeartbeatFresh, readDaemonToken, readOpenRecorder, DEFAULT_HEARTBEAT_STALE_MS } from "../src/daemon";
 import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
-import { appendEvent, readHumanEvents } from "../src/log";
-import { daemonAlivePath, daemonTokenPath } from "../src/paths";
-import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES } from "../src/policy";
+import { LIVE_ANSWER_CUTOFF_MS } from "../src/live";
+import { postLiveAnswer } from "../src/resolve";
+import { appendEvent, appendHumanEvent, readHumanEvents } from "../src/log";
+import { daemonAlivePath, daemonTokenPath, DEFAULT_DAEMON_PORT } from "../src/paths";
+import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES, DEFAULT_WAIT_SECONDS } from "../src/policy";
 import { RUN_FAILURE_MARKER } from "../src/runoutput";
 import { TENAZA_VERSION } from "../src/version";
 
 /** Ticket 08: `/events` now also carries the Live surface's own contract envelope and Policy numbers — every "freshly started, nothing observed yet" assertion below includes this. */
 const EMPTY_BOARD_PAYLOAD = {
   v: 1,
-  policy: { stallMinutes: DEFAULT_STALL_MINUTES, contextThresholdTokens: DEFAULT_CONTEXT_THRESHOLD },
+  policy: { stallMinutes: DEFAULT_STALL_MINUTES, contextThresholdTokens: DEFAULT_CONTEXT_THRESHOLD, waitSeconds: DEFAULT_WAIT_SECONDS },
   sessions: [],
   inbox: [],
 };
@@ -369,9 +371,15 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
     const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_SSE_POLL_MS: "50" } });
     try {
       mkdirSync(path.join(home, "config"), { recursive: true });
+      // Ticket 10: this Daemon is genuinely up with a fresh heartbeat, so a
+      // `human` match would otherwise go LIVE and hold for the default
+      // ~180s wait window — this test cares about the SSE push, not live
+      // answering, so `wait_seconds = 0` makes the hold expire on its own
+      // first check (no answer posted), landing on the exact same "deny,
+      // Inbox opens" outcome this test already asserted pre-ticket-10.
       writeFileSync(
         path.join(home, "config", "policy.toml"),
-        '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n',
+        '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n\n[live]\nwait_seconds = 0\n',
       );
 
       const healthCheck = await fetch(`http://127.0.0.1:${daemon.port}/events`);
@@ -381,7 +389,11 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       const sse = await connectEvents(daemon.port);
 
       const initial = await sse.nextEvent(2000);
-      expect(initial).toEqual(EMPTY_BOARD_PAYLOAD);
+      // `wait_seconds = 0` above (this test's own Policy) is the only
+      // difference from `EMPTY_BOARD_PAYLOAD`'s default — everything else
+      // still matches a freshly-started, nothing-observed-yet Daemon.
+      const expectedInitial = { ...EMPTY_BOARD_PAYLOAD, policy: { ...EMPTY_BOARD_PAYLOAD.policy, waitSeconds: 0 } };
+      expect(initial).toEqual(expectedInitial);
 
       const hookResult = await runCli(["hook", "claude"], {
         home,
@@ -611,7 +623,11 @@ describe("write routes — run/done/dismiss (ticket 09)", () => {
       const body = await res.text();
 
       expect(deriveInbox(home)).toHaveLength(1);
-      expect(readHumanEvents(home)).toEqual([]);
+      // Ticket 10: a `run.failed` Event IS written now (never a
+      // Resolution — the item stays open) — the resolution trace's own
+      // raw material for "falló (código N)".
+      expect(readHumanEvents(home)).toHaveLength(1);
+      expect(readHumanEvents(home)[0]).toMatchObject({ type: "run.failed", data: { ref: id, exitCode: 1 } });
       expect(body).toContain(`${RUN_FAILURE_MARKER}1`);
     } finally {
       await daemon.stop();
@@ -778,6 +794,227 @@ describe("write routes — run/done/dismiss (ticket 09)", () => {
         headers: { cookie: `tenaza_token=${daemon.token}` },
       });
       expect(await second.json()).toEqual({ outcome: "dismissed", alreadyResolved: true });
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+/**
+ * `POST /items/<id>/answer` (ticket 10, decision 06) — the browser's own
+ * write from a Session card's rechazar/aprobar buttons. Items are opened
+ * directly with `appendEvent`/`actionDecidedEvent`, same convention as the
+ * run/done/dismiss suite above: this is the HTTP surface's own job, not a
+ * re-proof of `decide.ts`'s hold loop (covered in `test/decide.test.ts` and
+ * `test/adapters/claude.test.ts`).
+ */
+describe("write route — answer (ticket 10)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-answer-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** A freshly-born-live item (`decision: "held"`) for `session`, at `heldAt` (defaulting to now). */
+  function openLiveItem(session: string, command: string, heldAt: Date = new Date()): string {
+    const event = actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "held", {
+      match: command,
+      effect: "human",
+    });
+    appendEvent(home, { ...event, ts: heldAt.toISOString() });
+    return inboxIdentityHash(session, 1);
+  }
+
+  function spawnAnswerDaemon() {
+    return spawnDaemon(["--port", "0"], { home });
+  }
+
+  test("POST /items/<id>/answer with approve appends a live.answered Event, token required", async () => {
+    const id = openLiveItem("sess-1", "gh pr merge 58");
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const bare = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ answer: "approve" }),
+      });
+      expect(bare.status).toBe(403);
+
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "approve", message: "dale" }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+
+      const events = readHumanEvents(home);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "live.answered",
+        session: "sess-1",
+        data: { ref: id, answer: "approve", message: "dale" },
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("POST /items/<id>/answer with reject, no message, appends a live.answered Event with no message key", async () => {
+    const id = openLiveItem("sess-1", "gh pr merge 58");
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "reject" }),
+      });
+      expect(res.status).toBe(200);
+
+      const events = readHumanEvents(home);
+      expect(events[0]).toMatchObject({ data: { ref: id, answer: "reject" } });
+      expect((events[0] as { data: { message?: string } }).data.message).toBeUndefined();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an invalid answer value is a plain 400, never a 500 or a silent accept", async () => {
+    const id = openLiveItem("sess-1", "gh pr merge 58");
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "maybe" }),
+      });
+      expect(res.status).toBe(400);
+      expect(readHumanEvents(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a plain pending item (never born live) refuses with 409 — nothing is appended", async () => {
+    const command = "gh pr merge 58";
+    appendEvent(
+      home,
+      actionDecidedEvent("sess-1", { kind: "shell", command, tool: "Bash" }, "deny", {
+        match: command,
+        effect: "human",
+      }),
+    );
+    const id = inboxIdentityHash("sess-1", 1);
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "approve" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("not-live");
+      expect(readHumanEvents(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a live item whose window already lapsed refuses with 409 — TIME IS STATE, `decision` alone is not enough", async () => {
+    const longAgo = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago, past any sane wait_seconds
+    const id = openLiveItem("sess-1", "gh pr merge 58", longAgo);
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "approve" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("not-live");
+      expect(readHumanEvents(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an answer inside the window's last cutoff is refused as not-live — the hook may already be denying on expiry", () => {
+    const heldAt = new Date("2026-10-27T12:00:00.000Z");
+    const id = openLiveItem("sess-1", "gh pr merge 58", heldAt);
+    const deadlineMs = heldAt.getTime() + DEFAULT_WAIT_SECONDS * 1000;
+
+    const tooLate = postLiveAnswer(home, id, "approve", undefined, new Date(deadlineMs - LIVE_ANSWER_CUTOFF_MS / 2));
+    expect(tooLate).toEqual({ kind: "not-live" });
+    expect(readHumanEvents(home)).toEqual([]);
+
+    const inTime = postLiveAnswer(home, id, "approve", undefined, new Date(deadlineMs - LIVE_ANSWER_CUTOFF_MS * 2));
+    expect(inTime).toEqual({ kind: "accepted" });
+    expect(readHumanEvents(home)).toHaveLength(1);
+  });
+
+  test("an already-resolved item refuses with 409", async () => {
+    const id = openLiveItem("sess-1", "gh pr merge 58");
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", id, "done", "live"));
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${id}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "approve" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("already-resolved");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an unknown id 404s, same shape as run/done/dismiss", async () => {
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/items/${"0".repeat(40)}/answer`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+        body: JSON.stringify({ answer: "approve" }),
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("the built-in fence covers the answer route too — an agent targeting it is denied and lands in the Inbox", async () => {
+    const id = openLiveItem("sess-1", "gh pr merge 58");
+    // The fence's write-route pattern is text-only and keys ONLY off
+    // `DEFAULT_DAEMON_PORT` (`fence.ts`'s own documented, accepted gap —
+    // never the port a `--port 0` test daemon actually bound to), so the
+    // curl text below targets that literal port regardless of where
+    // `spawnAnswerDaemon()` is really listening. This Daemon is genuinely
+    // up with a fresh heartbeat, so the fence match (itself a
+    // `human`-effect Rule) would otherwise go LIVE and hold for the
+    // default ~180s window — `wait_seconds = 0` makes it expire on its own
+    // first check instead, landing on the same "deny" outcome this test
+    // cares about.
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), "[live]\nwait_seconds = 0\n");
+    const daemon = await spawnAnswerDaemon();
+    try {
+      const result = await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-2",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: {
+            command: `curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/items/${id}/answer -d '{"answer":"approve"}'`,
+          },
+        }),
+      });
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
     } finally {
       await daemon.stop();
     }

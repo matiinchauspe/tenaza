@@ -1,11 +1,12 @@
 import { Board } from "./Board";
 import { LiveDot } from "./LiveDot";
+import { ToastStack } from "./ToastStack";
 import { useBoardKeyboard } from "./useBoardKeyboard";
 import { useDocumentTitle } from "./useDocumentTitle";
 import { useEventSource } from "./useEventSource";
 import { useInboxActions } from "./useInboxActions";
 import { useNow } from "./useNow";
-import { buildBoardViewModel, type BoardStats } from "./viewModel";
+import { buildBoardViewModel, highlightedSessionId, type BoardStats } from "./viewModel";
 
 const EVENTS_URL = "/events";
 
@@ -31,15 +32,17 @@ const STALE_TOKEN_MESSAGE =
  *
  * Header (restyled per the approved prototype, human fix round): the
  * `⚒ TENAZA` wordmark, the stat chips, and the live dot — no sim menu, no
- * activity feed (ticket 10's own territory, out of scope here). The
- * footer keybar shows the keys wired so far — `j`/`k` (ticket 08), now
- * `d`/`x` (ticket 09) — the prototype's `a`/`r`/`t` belong to later
- * tickets.
+ * activity feed. The footer keybar shows the keys wired so far — `j`/`k`
+ * (ticket 08), `d`/`x` (ticket 09), now `a`/`r` (ticket 10) — the
+ * prototype's `t` belongs to a later ticket.
  *
  * `d`/`x` only ever dispatch against an id this render actually knows is
- * an Inbox card (`inboxIds`, below) — `useBoardKeyboard` itself stays
- * ignorant of card kinds, so this gate is this container's to draw, never
- * the hook's.
+ * an Inbox card (`inboxIds`, below); `a` only ever dispatches against a
+ * Session card that actually carries a `liveRequest` right now
+ * (`liveRequestSessionIds`) — `useBoardKeyboard` itself stays ignorant of
+ * card kinds, so every one of these gates is this container's to draw,
+ * never the hook's. `r` carries no gate at all: it only ever focuses a
+ * message input that may or may not exist (see that hook's own doc).
  */
 export function BoardApp() {
   const { payload, connectionState } = useEventSource(EVENTS_URL);
@@ -49,6 +52,11 @@ export function BoardApp() {
   const actions = useInboxActions();
 
   const inboxIds = new Set(viewModel?.teNecesita.cards.map((card) => card.id) ?? []);
+  const liveRequestSessionIds = new Set(
+    [...(viewModel?.corriendo.cards ?? []), ...(viewModel?.trabada.cards ?? []), ...(viewModel?.termino.cards ?? [])]
+      .filter((card) => card.liveRequest)
+      .map((card) => card.id),
+  );
   const { selectedId, select } = useBoardKeyboard(orderedIds, {
     onDone: (id) => {
       if (inboxIds.has(id)) actions.done(id);
@@ -56,9 +64,14 @@ export function BoardApp() {
     onDismiss: (id) => {
       if (inboxIds.has(id)) actions.dismiss(id);
     },
+    onApprove: (id, message) => {
+      if (liveRequestSessionIds.has(id)) actions.approve(id, message);
+    },
   });
+  const highlightedId = viewModel ? highlightedSessionId(viewModel, selectedId) : undefined;
 
-  useDocumentTitle(viewModel?.teNecesita.cards.length ?? 0);
+  // Ticket 10: "the (n) Tenaza tab title count live + pending" (spec) — `stats.teNecesita`, never `teNecesita.cards.length` alone, which only ever holds the pending half now.
+  useDocumentTitle(viewModel?.stats.teNecesita ?? 0);
 
   return (
     <div className="app">
@@ -89,12 +102,15 @@ export function BoardApp() {
           viewModel={viewModel}
           selectedId={selectedId}
           onSelect={select}
+          highlightedSessionId={highlightedId}
           runningIds={actions.runningIds}
           outputs={actions.outputs}
           errors={actions.errors}
           onRun={actions.run}
           onDone={actions.done}
           onDismiss={actions.dismiss}
+          onApprove={actions.approve}
+          onReject={actions.reject}
         />
       ) : (
         <p className="app__loading">conectando con el Daemon…</p>
@@ -105,12 +121,19 @@ export function BoardApp() {
           <kbd>k</kbd> mover
         </span>
         <span className="app__key">
+          <kbd>a</kbd> aprobar
+        </span>
+        <span className="app__key">
+          <kbd>r</kbd> rechazar
+        </span>
+        <span className="app__key">
           <kbd>d</kbd> listo
         </span>
         <span className="app__key">
           <kbd>x</kbd> descartar
         </span>
       </footer>
+      <ToastStack toasts={actions.toasts} />
     </div>
   );
 }

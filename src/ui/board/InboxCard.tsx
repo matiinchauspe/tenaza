@@ -67,6 +67,14 @@ function stopCardSelect(event: { stopPropagation(): void }): void {
  * Adapter could never actually block — the SAME es-AR note instead of a
  * `run` button, never an invented one.
  *
+ * Ticket 10 (BC2's own `pendingCard`, "Requests vs agents"): every card
+ * HERE is now a REQUEST, never a waiting agent — a live hold renders on
+ * its own Session's card instead (`SessionCard`'s `LiveRequestBlock`). The
+ * top row reads "pedido de &lt;project&gt; · #&lt;id&gt;" rather than
+ * showing the raw `sessionId` text; selecting the card cross-highlights
+ * that Session's own card elsewhere on the board (`BoardApp`'s
+ * `highlightedSessionId`), which is how the two stay visually linked now.
+ *
  * Two DISTINCT failure surfaces, both review fixes, both red
  * (`inbox-card__output-error`, the prototype's own `--red`) but never
  * conflated: `output`'s own trailing failure trailer (`run` STARTED and
@@ -94,19 +102,20 @@ export function InboxCard({
       className={`card inbox-card${selected ? " card--selected" : ""}`}
       role="option"
       aria-selected={selected}
-      aria-label={`${card.blocked ? "Inbox" : "Ya corrió"}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}, ${card.toolLabel}`}
+      aria-label={`pedido ${card.blocked ? "pendiente" : "ya corrió"}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}, ${card.toolLabel}`}
       tabIndex={selected ? 0 : -1}
       onClick={() => onSelect(card.id)}
     >
       <div className="inbox-card__top">
-        <StatusBadge tone={card.blocked ? "inbox" : "ran"}>{card.blocked ? "Inbox" : "Ya corrió"}</StatusBadge>
+        <StatusBadge tone={card.blocked ? "inbox" : "ran"}>{card.blocked ? "Pendiente" : "Ya corrió"}</StatusBadge>
+        <span className="inbox-card__when">hace {card.age}</span>
+      </div>
+      <div className="inbox-card__req">
+        pedido de <span className="inbox-card__project">{card.project}</span> ·{" "}
         <span className="inbox-card__id" title={card.id}>
           #{card.id.slice(0, ID_DISPLAY_LENGTH)}
         </span>
-        <span className="inbox-card__project">{card.project}</span>
         {card.ticket && <span className="inbox-card__ticket">{card.ticket}</span>}
-        <span className="inbox-card__session">· {card.sessionId}</span>
-        <span className="inbox-card__when">hace {card.age}</span>
       </div>
       <div className="inbox-card__cmd" title={card.toolLabel}>
         <span className="inbox-card__cmd-text">

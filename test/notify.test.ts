@@ -6,6 +6,7 @@ import { usageSampledEvent } from "../src/contract/event";
 import {
   buildGraveFaultNotification,
   buildInboxOpenedNotification,
+  buildMacNotifierCommand,
   buildThresholdCrossedNotification,
   maxUsageSample,
   NOTIFY_BURST_WINDOW_MS,
@@ -82,6 +83,7 @@ describe("buildInboxOpenedNotification (🟡)", () => {
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "shell", command: "gh pr merge 58 --merge", tool: "Bash" },
         blocked: true,
+        decision: "deny",
       },
       "dce9",
       { project: "reservee", role: "RES-131" },
@@ -103,6 +105,7 @@ describe("buildInboxOpenedNotification (🟡)", () => {
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "shell", command: "gh pr merge 58", tool: "fake" },
         blocked: false,
+        decision: "allow",
       },
       "3333",
       { project: "(sin proyecto)", role: "sesión" },
@@ -120,6 +123,7 @@ describe("buildInboxOpenedNotification (🟡)", () => {
         ts: "2026-01-01T00:00:00.000Z",
         action: { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod" } },
         blocked: true,
+        decision: "deny",
       },
       "9999",
       { project: "reservee", role: "RES-131" },
@@ -135,11 +139,109 @@ describe("buildInboxOpenedNotification (🟡)", () => {
       ts: "2026-01-01T00:00:00.000Z",
       action: { kind: "shell" as const, command: "x", tool: "Bash" },
       blocked: true,
+      decision: "deny" as const,
     };
     const first = buildInboxOpenedNotification(row, "7777", { project: "p", role: "r" });
     const second = buildInboxOpenedNotification(row, "7777", { project: "p", role: "r" });
     expect(first.tag).toBe(`inbox-${row.id}`);
     expect(first.tag).toBe(second.tag);
+  });
+
+  test("ticket 10: a freshly-born-live item (decision 'held') never says 'tenaza run' — there's nothing to run yet, the agent itself is paused", () => {
+    const notification = buildInboxOpenedNotification(
+      {
+        id: "dce936648342af60c57be01d81e2fc98abd32a27",
+        session: "b71",
+        ts: "2026-01-01T00:00:00.000Z",
+        action: { kind: "shell", command: "gh pr merge 58 --merge", tool: "Bash" },
+        blocked: true,
+        decision: "held",
+      },
+      "dce9",
+      { project: "reservee", role: "RES-131" },
+    );
+
+    expect(notification.message).not.toContain("tenaza run");
+    expect(notification.message).toContain("te espera tu respuesta en la vista");
+  });
+
+  test("ticket 10: carries the openUrl given, for the clickable notifier to use", () => {
+    const notification = buildInboxOpenedNotification(
+      {
+        id: "dce936648342af60c57be01d81e2fc98abd32a27",
+        session: "b71",
+        ts: "2026-01-01T00:00:00.000Z",
+        action: { kind: "shell", command: "gh pr merge 58 --merge", tool: "Bash" },
+        blocked: true,
+        decision: "held",
+      },
+      "dce9",
+      { project: "reservee", role: "RES-131" },
+      "http://127.0.0.1:4747/auth?token=abc",
+    );
+
+    expect(notification.openUrl).toBe("http://127.0.0.1:4747/auth?token=abc");
+  });
+
+  test("openUrl stays undefined when the caller passes none — the plain pre-ticket-10 shape, byte for byte", () => {
+    const notification = buildInboxOpenedNotification(
+      {
+        id: "dce936648342af60c57be01d81e2fc98abd32a27",
+        session: "b71",
+        ts: "2026-01-01T00:00:00.000Z",
+        action: { kind: "shell", command: "gh pr merge 58 --merge", tool: "Bash" },
+        blocked: true,
+        decision: "deny",
+      },
+      "dce9",
+      { project: "reservee", role: "RES-131" },
+    );
+
+    expect(notification).toEqual({
+      tag: "inbox-dce936648342af60c57be01d81e2fc98abd32a27",
+      title: "🟡 Tenaza · te espera · inbox dce9",
+      subtitle: "reservee / RES-131 / sesión b71",
+      message: "Bash: gh pr merge 58 --merge · tenaza run dce9",
+    });
+  });
+});
+
+describe("buildMacNotifierCommand (ticket 10: terminal-notifier -open <url>, else osascript with no click action)", () => {
+  const notification = {
+    tag: "inbox-abc",
+    title: "🟡 Tenaza · te espera · inbox abc1",
+    subtitle: "reservee / RES-131 / sesión b71",
+    message: "Bash: gh pr merge 58 · tenaza run abc1",
+  };
+
+  test("terminal-notifier on PATH AND an openUrl present → terminal-notifier -open <url>", () => {
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, true);
+
+    expect(command.tool).toBe("terminal-notifier");
+    expect(command.argv[0]).toBe("terminal-notifier");
+    expect(command.argv).toContain("-open");
+    expect(command.argv).toContain("http://127.0.0.1:4747/auth?token=t");
+    expect(command.argv).toContain("-sound");
+  });
+
+  test("terminal-notifier missing → falls back to osascript, no click action, even with an openUrl", () => {
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, false);
+
+    expect(command.tool).toBe("osascript");
+    expect(command.argv[0]).toBe("osascript");
+    expect(command.argv.join(" ")).not.toContain("http://127.0.0.1:4747");
+  });
+
+  test("no openUrl at all → osascript even when terminal-notifier IS on PATH (nothing to open)", () => {
+    const command = buildMacNotifierCommand(notification, true, true);
+
+    expect(command.tool).toBe("osascript");
+  });
+
+  test("no sound this time → terminal-notifier argv omits -sound", () => {
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://x" }, false, true);
+
+    expect(command.argv).not.toContain("-sound");
   });
 });
 

@@ -6,10 +6,27 @@ export interface BoardKeyboard {
   select(id: string): void;
 }
 
-/** Ticket 09's own two keys, dispatched against whatever is CURRENTLY selected — a plain callback per key, `undefined` when the container has nothing to wire it to (e.g. this board has no action cards at all). The container decides WHETHER `selectedId` actually names something `d`/`x` apply to (an Inbox card) — this hook stays ignorant of card kinds, same as it already is for `j`/`k`. */
+/**
+ * Ticket 09's own two keys (`d`/`x`), plus ticket 10's `a` — dispatched
+ * against whatever is CURRENTLY selected — a plain callback per key,
+ * `undefined` when the container has nothing to wire it to (e.g. this
+ * board has no action cards at all). The container decides WHETHER
+ * `selectedId` actually names something the key applies to (an Inbox card
+ * for `d`/`x`, a Session card with a live request for `a`) — this hook
+ * stays ignorant of card kinds, same as it already is for `j`/`k`.
+ *
+ * `r` carries NO callback here at all (ticket 10): it only ever FOCUSES the
+ * selected card's own message input (`liveMessageInputElementId`), a pure
+ * DOM move with no network effect — a no-op when that element doesn't
+ * exist (a selection with no live request). Firing the actual reject comes
+ * from the input's own `Enter` key or the card's `rechazar` button, both
+ * wired directly to `SessionCard`'s own `onReject` prop, never through this
+ * hook.
+ */
 export interface BoardKeyboardActions {
   onDone?(id: string): void;
   onDismiss?(id: string): void;
+  onApprove?(id: string, message: string | undefined): void;
 }
 
 export function isTypingTarget(target: EventTarget | null): boolean {
@@ -20,6 +37,18 @@ export function isTypingTarget(target: EventTarget | null): boolean {
 /** The DOM id a card renders under — the one contract between this hook and `InboxCard`/`SessionCard`, so "visible focus" is an ACTUAL roving `tabIndex` + `.focus()` call, not aria-selected alone. */
 export function boardCardElementId(cardId: string): string {
   return `board-card-${cardId}`;
+}
+
+/** Ticket 10: the DOM id a Session card's own live-request message input renders under — `r` focuses this directly; `a`'s own current-value read (below) goes through the SAME id, so a card and this hook can never disagree on which input either key means. */
+export function liveMessageInputElementId(sessionCardId: string): string {
+  return `live-message-${sessionCardId}`;
+}
+
+/** The message input's own CURRENT value for `sessionCardId`, read straight from the DOM — `a` needs it at the INSTANT the key fires, and this hook owns no React state of its own for a per-card draft (`SessionCard` does, as a plain controlled input). `undefined` for an empty value, never an empty string, and `undefined` outright when no such input is even mounted (a selection with no live request). */
+function currentLiveMessage(sessionCardId: string): string | undefined {
+  const el = document.getElementById(liveMessageInputElementId(sessionCardId));
+  if (!(el instanceof HTMLInputElement)) return undefined;
+  return el.value.length > 0 ? el.value : undefined;
 }
 
 /**
@@ -76,6 +105,13 @@ export function useBoardKeyboard(
         actions.onDone?.(selectedId);
       } else if (event.key === "x" && selectedId !== undefined) {
         actions.onDismiss?.(selectedId);
+      } else if (event.key === "a" && selectedId !== undefined) {
+        actions.onApprove?.(selectedId, currentLiveMessage(selectedId));
+      } else if (event.key === "r" && selectedId !== undefined) {
+        // No callback, no network effect — see `BoardKeyboardActions`'s own
+        // doc. A no-op when the selected card carries no live request at
+        // all (nothing to focus).
+        document.getElementById(liveMessageInputElementId(selectedId))?.focus();
       }
     }
     window.addEventListener("keydown", onKeyDown);

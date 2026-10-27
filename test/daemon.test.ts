@@ -244,7 +244,12 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
   test("the launcher opens /auth?token=, not /?token= — the route that validates server-side", async () => {
     const daemon = await spawnDaemon(["--port", "0"], { home });
     try {
-      const opened = readOpenRecorder(home);
+      // The Daemon prints "serving on" BEFORE its opener appends to the recorder — poll, or a loaded suite races it.
+      let opened = readOpenRecorder(home);
+      for (let i = 0; opened.length === 0 && i < 40; i++) {
+        await Bun.sleep(50);
+        opened = readOpenRecorder(home);
+      }
       expect(opened.length).toBeGreaterThan(0);
       for (const url of opened) expect(url).toContain("/auth?token=");
     } finally {

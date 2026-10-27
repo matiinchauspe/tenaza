@@ -135,6 +135,34 @@ describe("buildBoardViewModel — TE NECESITA (Inbox)", () => {
     expect(model.teNecesita.cards.find((c) => c.id === "blocked")?.blocked).toBe(true);
     expect(model.teNecesita.cards.find((c) => c.id === "ran")?.blocked).toBe(false);
   });
+
+  describe("offersRun (ticket 09): a YA CORRIÓ item and an mcp item never offer run", () => {
+    test("a blocked shell item offers run", () => {
+      const payload = makeBoardPayload({
+        inbox: [makeInboxItem({ id: "x", blocked: true, action: { kind: "shell", tool: "Bash", command: "true" } })],
+      });
+      const model = buildBoardViewModel(payload, NOW);
+      expect(model.teNecesita.cards[0]?.offersRun).toBe(true);
+    });
+
+    test("a YA CORRIÓ (unblocked) shell item never offers run", () => {
+      const payload = makeBoardPayload({
+        inbox: [makeInboxItem({ id: "x", blocked: false, action: { kind: "shell", tool: "Bash", command: "true" } })],
+      });
+      const model = buildBoardViewModel(payload, NOW);
+      expect(model.teNecesita.cards[0]?.offersRun).toBe(false);
+    });
+
+    test("an mcp item never offers run, even when blocked", () => {
+      const payload = makeBoardPayload({
+        inbox: [
+          makeInboxItem({ id: "x", blocked: true, action: { kind: "mcp", tool: "mcp__neon__run_sql", command: undefined } }),
+        ],
+      });
+      const model = buildBoardViewModel(payload, NOW);
+      expect(model.teNecesita.cards[0]?.offersRun).toBe(false);
+    });
+  });
 });
 
 describe("buildBoardViewModel — Session card fields", () => {

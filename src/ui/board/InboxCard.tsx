@@ -1,3 +1,4 @@
+import { parseRunOutput } from "../../runoutput";
 import { boardCardElementId } from "./useBoardKeyboard";
 import { StatusBadge } from "./StatusBadge";
 import type { InboxCardViewModel } from "./viewModel";
@@ -6,6 +7,15 @@ export interface InboxCardProps {
   card: InboxCardViewModel;
   selected: boolean;
   onSelect: (id: string) => void;
+  /** Ticket 09: whether THIS card's `run` is currently streaming — disables the button and swaps its label, never a second independent loading flag the card would have to own itself. */
+  running: boolean;
+  /** The combined stdout+stderr captured so far for this card's own `run`, if it has ever started one in this tab — `undefined` (never rendered) until the first byte arrives. A trailing failure trailer (`runoutput.ts`), if present, is parsed OUT and styled separately — never shown as plain output text. */
+  output: string | undefined;
+  /** Review fix: a short es-AR message for the LAST non-ok, non-403 response any write for THIS item got (a 409 refusal, a 404 because it was resolved elsewhere, …) — `useInboxActions` owns deciding when this is set; the card only ever renders it. `undefined` when the last write (if any) succeeded. */
+  errorMessage: string | undefined;
+  onRun: (id: string) => void;
+  onDone: (id: string) => void;
+  onDismiss: (id: string) => void;
 }
 
 /**
@@ -25,25 +35,59 @@ export interface InboxCardProps {
  */
 const ID_DISPLAY_LENGTH = 8;
 
+/** Stop a click on an action button from ALSO firing the `<li>`'s own `onClick` (select) — selecting the card you just acted on is harmless either way, but suppressing the bubble keeps the click's effect legible to one thing at a time. */
+function stopCardSelect(event: { stopPropagation(): void }): void {
+  event.stopPropagation();
+}
+
 /**
- * A pending Inbox item's card (ticket 08 — read-only; ticket 09 adds
- * run/listo/descartar over this SAME card). Pure presentational: props in,
- * markup out, no fetching, no global state. `aria-selected` carries the
- * keyboard selection non-visually; the roving `tabIndex` (0 only when
- * selected) is what lets `useBoardKeyboard` actually move DOM focus here,
- * so the visible focus ring (tokens.css) and a screen reader's listbox
- * semantics both follow j/k, not just the ARIA attribute.
+ * A pending Inbox item's card (ticket 08 read-only; ticket 09 adds its
+ * run/listo/descartar buttons and keys `d`/`x` over this SAME card). Pure
+ * presentational: props in, callbacks out, no fetching of its own — every
+ * write goes through the callbacks the container (`BoardApp`, via
+ * `useInboxActions`) supplies. `aria-selected` carries the keyboard
+ * selection non-visually; the roving `tabIndex` (0 only when selected) is
+ * what lets `useBoardKeyboard` actually move DOM focus here, so the
+ * visible focus ring (tokens.css) and a screen reader's listbox semantics
+ * both follow j/k, not just the ARIA attribute.
  *
  * Restyled per the approved prototype's action card (human fix round): the
  * command sits in its own box (`inbox-card__cmd`), clamped to 3 lines
  * (`tokens.css`) so a 40-line heredoc never balloons the card — the full
  * text is always one hover away (`title`, native tooltip) and, selected,
- * the clamp lifts so the whole thing reads inline. Ticket 08 never carries
+ * the clamp lifts so the whole thing reads inline. Ticket 08 never carried
  * a live (awaiting-approval) item — the contract has no `kind` to tell one
  * apart from a plain pending row yet (ticket 10) — so every card here uses
  * the prototype's dimmer "inbox" left border, never its amber "live" one.
+ *
+ * The buttons and the YA CORRIÓ note below are ported literally from the
+ * prototype's own action card (`PROTOTYPE-live-surface-BC.ts`'s
+ * `actionCard`): `▶ tenaza run` only when `card.offersRun`, `listo`/
+ * `descartar` always, each with its own `kbd`, and — for an item the
+ * Adapter could never actually block — the SAME es-AR note instead of a
+ * `run` button, never an invented one.
+ *
+ * Two DISTINCT failure surfaces, both review fixes, both red
+ * (`inbox-card__output-error`, the prototype's own `--red`) but never
+ * conflated: `output`'s own trailing failure trailer (`run` STARTED and
+ * the command itself exited non-zero — "stays open WITH THE ERROR", spec)
+ * vs. `errorMessage` (a write call — `run`, `done` or `dismiss` alike —
+ * was REFUSED outright, nothing ever ran). Either, both, or neither can be
+ * present on a given card at once; each renders in its own slot.
  */
-export function InboxCard({ card, selected, onSelect }: InboxCardProps) {
+export function InboxCard({
+  card,
+  selected,
+  onSelect,
+  running,
+  output,
+  errorMessage,
+  onRun,
+  onDone,
+  onDismiss,
+}: InboxCardProps) {
+  const parsedOutput = output !== undefined && output.length > 0 ? parseRunOutput(output) : undefined;
+
   return (
     <li
       id={boardCardElementId(card.id)}
@@ -77,6 +121,51 @@ export function InboxCard({ card, selected, onSelect }: InboxCardProps) {
           )}
         </span>
       </div>
+      <div className="inbox-card__acts">
+        {card.offersRun && (
+          <button
+            type="button"
+            className="btn"
+            disabled={running}
+            onClick={(event) => {
+              stopCardSelect(event);
+              onRun(card.id);
+            }}
+          >
+            {running ? "corriendo…" : "▶ tenaza run"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn"
+          onClick={(event) => {
+            stopCardSelect(event);
+            onDone(card.id);
+          }}
+        >
+          listo <kbd>d</kbd>
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={(event) => {
+            stopCardSelect(event);
+            onDismiss(card.id);
+          }}
+        >
+          descartar <kbd>x</kbd>
+        </button>
+      </div>
+      {parsedOutput && parsedOutput.body.length > 0 && (
+        <pre className="inbox-card__output">{parsedOutput.body}</pre>
+      )}
+      {parsedOutput?.error && <div className="inbox-card__output-error">{parsedOutput.error}</div>}
+      {errorMessage && <div className="inbox-card__output-error">{errorMessage}</div>}
+      {!card.blocked && (
+        <div className="inbox-card__note">
+          el adapter no pudo frenarlo — quedó registrado, no lo vuelvas a correr
+        </div>
+      )}
     </li>
   );
 }

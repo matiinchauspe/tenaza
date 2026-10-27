@@ -32,6 +32,8 @@ export interface InboxCardViewModel {
   age: string;
   /** Denied and awaiting `run` vs. already ran unenforced (ticket 06, ADR 0001) — read-only in ticket 08, picks the card's badge. */
   blocked: boolean;
+  /** Ticket 09: a YA CORRIÓ item (`blocked: false`) and an `mcp` item (no stored command) both offer no `run` — this is the ONE place that rule is computed, so `InboxCard` never re-derives it from `blocked`/`command` separately. */
+  offersRun: boolean;
 }
 
 export interface SessionCardViewModel {
@@ -101,6 +103,7 @@ function toInboxCard(item: BoardInboxItem, now: Date): InboxCardViewModel {
     toolLabel: toolLabelFor(item.action),
     age: formatAge(item.ts, now),
     blocked: item.blocked,
+    offersRun: item.blocked && item.action.kind === "shell",
   };
 }
 

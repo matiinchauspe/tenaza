@@ -122,6 +122,61 @@ describe("useBoardKeyboard", () => {
     rerender({ ids: ["x", "b", "y"] }); // reshuffled, but "b" is still there
     expect(result.current.selectedId).toBe("b");
   });
+
+  describe("d/x dispatch against the CURRENT selection (ticket 09)", () => {
+    test("d calls onDone with the currently selected id", () => {
+      const done: string[] = [];
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"], { onDone: (id) => done.push(id) }));
+      act(() => result.current.select("b"));
+
+      dispatchKey(window, "d");
+
+      expect(done).toEqual(["b"]);
+    });
+
+    test("x calls onDismiss with the currently selected id", () => {
+      const dismissed: string[] = [];
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"], { onDismiss: (id) => dismissed.push(id) }));
+      act(() => result.current.select("a"));
+
+      dispatchKey(window, "x");
+
+      expect(dismissed).toEqual(["a"]);
+    });
+
+    test("d/x with no selection calls nothing — there is no id to act on", () => {
+      const done: string[] = [];
+      renderHook(() => useBoardKeyboard(["a", "b"], { onDone: (id) => done.push(id) }));
+
+      dispatchKey(window, "d");
+
+      expect(done).toEqual([]);
+    });
+
+    test("d/x are ignored when the event's target is a text input, same as j/k", () => {
+      const input = document.createElement("input");
+      document.body.appendChild(input);
+      try {
+        const done: string[] = [];
+        const { result } = renderHook(() => useBoardKeyboard(["a", "b"], { onDone: (id) => done.push(id) }));
+        act(() => result.current.select("a"));
+
+        dispatchKey(input, "d");
+
+        expect(done).toEqual([]);
+      } finally {
+        input.remove();
+      }
+    });
+
+    test("omitting actions entirely never throws on d/x — the hook's second argument stays optional", () => {
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"]));
+      act(() => result.current.select("a"));
+
+      expect(() => dispatchKey(window, "d")).not.toThrow();
+      expect(() => dispatchKey(window, "x")).not.toThrow();
+    });
+  });
 });
 
 /** A fully scriptable `EventSource` stand-in (ticket 08's own "fake EventSource" requirement) — never a real network connection. */

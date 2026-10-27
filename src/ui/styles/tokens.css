@@ -240,6 +240,16 @@ kbd {
   font-family: var(--font-mono);
 }
 
+/* Ticket 09: the token rotates every Daemon launch (decision 05) — a tab left open across a restart gets 403 on every write. No prototype equivalent; a plain, visible banner rather than failing silently. */
+.app__stale-banner {
+  padding: 8px 20px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--bg));
+  border-bottom: var(--border-width) solid color-mix(in srgb, var(--amber) 40%, transparent);
+  color: var(--amber);
+  font: 12px var(--font-mono);
+  flex-shrink: 0;
+}
+
 /* -------------------------------------------------------------------- */
 /* Board + columns (prototype's <main class="board"> / .col / .colh)    */
 /* -------------------------------------------------------------------- */
@@ -555,6 +565,69 @@ kbd {
 .inbox-card__prompt {
   color: var(--amber);
   margin-right: 8px;
+}
+
+/* -------------------------------------------------------------------- */
+/* Action buttons (prototype's .acts/.btn) — ticket 09: run/listo/descartar */
+/* -------------------------------------------------------------------- */
+
+.inbox-card__acts {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-top: 11px;
+}
+
+/* A shared base — same spirit as `.card`/`.status-badge` staying unscoped: every card kind's own action buttons look identical, so there is exactly one rule to change. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--s2);
+  color: var(--fg);
+  border: var(--border-width) solid var(--line2);
+  font: 500 12px var(--font-mono);
+  padding: 5px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--s3);
+}
+
+.btn:disabled {
+  cursor: default;
+  color: var(--mut);
+}
+
+/* The YA CORRIÓ note (prototype's `.ac .note`) — shown instead of a `run` button for an item the Adapter could never actually block (ADR 0001). */
+.inbox-card__note {
+  font: 11px var(--font-mono);
+  color: var(--dim);
+  margin-top: 8px;
+}
+
+/* The streamed output of a `run` in progress (or just finished) — no prototype equivalent (it never wired a real `run`); dim and monospace, same voice as `.inbox-card__note`, capped so a chatty command never blows out the card. */
+.inbox-card__output {
+  margin: 8px 0 0;
+  background: var(--bg);
+  border: var(--border-width) solid var(--line);
+  padding: 8px 9px;
+  font: 11px var(--font-mono);
+  color: var(--mut);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* Review fix: a failed `run`'s own trailer, or a write call Tenaza refused outright — both red (`--red`, the prototype's own error tone), kept visually apart from the command's own (neutral-toned) output above. */
+.inbox-card__output-error {
+  margin: 6px 0 0;
+  font: 11px var(--font-mono);
+  color: var(--red);
+  word-break: break-word;
 }
 
 /* -------------------------------------------------------------------- */

@@ -13,6 +13,16 @@ import { makeBoardPayload, makeInboxItem, makeSession } from "../../support/boar
  * the lighter, DOM-free renderer is the right tool, not a reach for the
  * heavier one "just in case".
  */
+/** Ticket 09's own write props, no-op here — this suite is about the board's RENDER from a payload, never the action wiring (covered by `InboxCard`'s own render and `useInboxActions`). Spread into every `<Board>` call below so a fixture test never has to restate them. */
+const NOOP_ACTION_PROPS = {
+  runningIds: new Set<string>(),
+  outputs: {},
+  errors: {},
+  onRun: () => {},
+  onDone: () => {},
+  onDismiss: () => {},
+};
+
 describe("Board — render from a fixture payload", () => {
   const now = new Date("2026-01-02T00:00:00.000Z");
 
@@ -58,7 +68,7 @@ describe("Board — render from a fixture payload", () => {
   });
 
   const viewModel = buildBoardViewModel(payload, now);
-  const html = renderToStaticMarkup(<Board viewModel={viewModel} selectedId="a1b2" onSelect={() => {}} />);
+  const html = renderToStaticMarkup(<Board viewModel={viewModel} selectedId="a1b2" onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
 
   test("renders all four column titles", () => {
     expect(html).toContain("TE NECESITA");
@@ -84,9 +94,9 @@ describe("Board — render from a fixture payload", () => {
       now,
     );
     const blockedHtml = renderToStaticMarkup(
-      <Board viewModel={blockedPayload} selectedId={undefined} onSelect={() => {}} />,
+      <Board viewModel={blockedPayload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />,
     );
-    const ranHtml = renderToStaticMarkup(<Board viewModel={ranPayload} selectedId={undefined} onSelect={() => {}} />);
+    const ranHtml = renderToStaticMarkup(<Board viewModel={ranPayload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
     expect(blockedHtml).toContain("Inbox");
     expect(ranHtml).toContain("Ya corrió");
   });
@@ -98,7 +108,7 @@ describe("Board — render from a fixture payload", () => {
       }),
       now,
     );
-    const mcpHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} />);
+    const mcpHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
     expect(mcpHtml).toContain('class="inbox-card__cmd" title="mcp__neon__run_sql"><span class="inbox-card__cmd-text">');
     expect(mcpHtml).toContain('<span class="inbox-card__prompt" aria-hidden="true">$</span>mcp__neon__run_sql</span>');
   });
@@ -108,7 +118,7 @@ describe("Board — render from a fixture payload", () => {
       makeBoardPayload({ inbox: [makeInboxItem({ project: "/Users/mati/ws/.worktrees/rudy/aw/fix-3" })] }),
       now,
     );
-    const worktreeHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} />);
+    const worktreeHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
     expect(worktreeHtml).toContain('class="inbox-card__project">rudy</span>');
   });
 
@@ -127,7 +137,7 @@ describe("Board — render from a fixture payload", () => {
       }),
       now,
     );
-    const noTicketHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} />);
+    const noTicketHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
     expect(noTicketHtml).not.toContain("session-card__ticket");
     expect(noTicketHtml).not.toContain("/ —");
     expect(noTicketHtml).not.toContain("—</span>");
@@ -140,7 +150,7 @@ describe("Board — render from a fixture payload", () => {
 
   test("an empty column (no cards) shows its own placeholder instead of an empty list", () => {
     const payload = buildBoardViewModel(makeBoardPayload(), now);
-    const emptyHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} />);
+    const emptyHtml = renderToStaticMarkup(<Board viewModel={payload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />);
     expect(emptyHtml).toContain("nada te espera — los agentes siguen solos");
     expect(emptyHtml).toContain("column__empty");
   });

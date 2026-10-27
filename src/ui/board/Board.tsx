@@ -7,6 +7,14 @@ export interface BoardProps {
   viewModel: BoardViewModel;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
+  /** Ticket 09: forwarded straight through to every `InboxCard` — `Board` itself stays pure, it only threads these to the one place they apply. */
+  runningIds: ReadonlySet<string>;
+  outputs: Readonly<Record<string, string>>;
+  /** Review fix: the last non-ok, non-403 write error per item id, if any — see `InboxCard`'s own prop doc. */
+  errors: Readonly<Record<string, string>>;
+  onRun: (id: string) => void;
+  onDone: (id: string) => void;
+  onDismiss: (id: string) => void;
 }
 
 const SESSION_COLUMNS = ["corriendo", "trabada", "termino"] as const;
@@ -27,7 +35,17 @@ const TE_NECESITA_EMPTY = "nada te espera — los agentes siguen solos";
  * selection; this component only lays them out. No fetching, no effects,
  * no global state.
  */
-export function Board({ viewModel, selectedId, onSelect }: BoardProps) {
+export function Board({
+  viewModel,
+  selectedId,
+  onSelect,
+  runningIds,
+  outputs,
+  errors,
+  onRun,
+  onDone,
+  onDismiss,
+}: BoardProps) {
   return (
     <div className="board">
       <Column
@@ -37,7 +55,18 @@ export function Board({ viewModel, selectedId, onSelect }: BoardProps) {
         emptyMessage={TE_NECESITA_EMPTY}
       >
         {viewModel.teNecesita.cards.map((card) => (
-          <InboxCard key={card.id} card={card} selected={card.id === selectedId} onSelect={onSelect} />
+          <InboxCard
+            key={card.id}
+            card={card}
+            selected={card.id === selectedId}
+            onSelect={onSelect}
+            running={runningIds.has(card.id)}
+            output={outputs[card.id]}
+            errorMessage={errors[card.id]}
+            onRun={onRun}
+            onDone={onDone}
+            onDismiss={onDismiss}
+          />
         ))}
       </Column>
       {SESSION_COLUMNS.map((key) => {

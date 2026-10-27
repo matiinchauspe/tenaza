@@ -1,7 +1,9 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { deriveInbox } from "./inbox";
+import type { Action } from "./contract/event";
+import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession } from "./contract/live";
+import { type InboxItem, deriveInbox } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import {
   daemonAlivePath,
@@ -11,8 +13,17 @@ import {
   sessionsDir,
   tenazaHome,
 } from "./paths";
-import { buildSessionIndex, type SessionNode } from "./sessions";
+import { loadPolicy } from "./policy";
+import {
+  UNKNOWN_PROJECT,
+  buildSessionIndex,
+  deriveProject,
+  eventTypesBySession,
+  isNoiseSession,
+  type SessionNode,
+} from "./sessions";
 import { TENAZA_VERSION } from "./version";
+import index from "./ui/index.html";
 
 /** The Live surface's own default (decision 05); `--port` overrides it. */
 export const DEFAULT_DAEMON_PORT = 4747;
@@ -193,31 +204,95 @@ export function openBrowser(home: string, url: string): void {
 // Derived state (what the SSE stream pushes)
 // ---------------------------------------------------------------------------
 
-export interface DerivedState {
-  sessions: SessionNode[];
-  inbox: ReturnType<typeof deriveInbox>;
+/**
+ * One Session's board row (ticket 08): resolved to a `project` and the
+ * STRUCTURAL `role` server-side — `deriveProject` shells out to `git` and
+ * can never ship to a browser bundle, and `role` here is deliberately NOT
+ * `sessions.ts`'s own `roleOf` (which folds the `ticket` Label into the
+ * fallback for the CLI's one compact line) — the board shows `ticket` and
+ * `role` as separate fields, per the spec's own comma-separated list.
+ * Everything else is a plain, time-independent fact; the board's pure
+ * functions (`src/board.ts`) do the time-based classification against a
+ * ticking clock.
+ */
+/** An `Action` (`contract/event.ts`), flattened to the `ActionSummary` shape the board's contract shares between an Inbox row's "tool + command" and a Session row's "last signal" — `command` only for a `shell` Action, same as `toBoardInboxItem`'s own previous inline version. */
+function toActionSummary(action: Action): ActionSummary {
+  return {
+    kind: action.kind,
+    tool: action.tool,
+    command: action.kind === "shell" ? action.command : undefined,
+  };
 }
 
-/** Sessions and Inbox, derived from the logs exactly like `status` does — nothing kept beside them (ADR 0002). What `/events` pushes on every change. */
-export function buildDerivedState(home: string): DerivedState {
-  const events = readAllSessionEvents(home);
+function toBoardSession(node: SessionNode): BoardSession {
   return {
-    sessions: [...buildSessionIndex(events).values()],
-    inbox: deriveInbox(home),
+    id: node.id,
+    parentId: node.parent,
+    project: deriveProject(node),
+    ticket: node.labels.ticket,
+    role: node.parent !== undefined ? "subagente" : "sesión",
+    startedAt: node.startedAt,
+    endedAt: node.endedAt,
+    lastEventTs: node.lastEventTs,
+    hasMeasureCapability: node.capabilities.includes("measure"),
+    contextTokens: node.contextTokens,
+    lastSignal: node.lastAction ? toActionSummary(node.lastAction) : undefined,
+  };
+}
+
+/** One pending Inbox item's board row — the owning Session's `project`/`ticket` resolved the SAME way a Session row's are, from the FULL (unfiltered) index: an Inbox item's own Session is never noise (it carries an `action.decided` Event, which `isNoiseSession` never matches), but resolving against the full index rather than the already-filtered list costs nothing and never depends on that happening to stay true. */
+function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, SessionNode>): BoardInboxItem {
+  const session = fullIndex.get(row.session);
+  return {
+    id: row.id,
+    sessionId: row.session,
+    project: session ? deriveProject(session) : UNKNOWN_PROJECT,
+    ticket: session?.labels.ticket,
+    ts: row.ts,
+    action: toActionSummary(row.action),
+    blocked: row.blocked,
+  };
+}
+
+/**
+ * The Live surface's own payload (ticket 08, decision 04) — what `/events`
+ * pushes, and the ONE shape `src/contract/live.ts` and the React client
+ * agree on. Sessions and the Inbox, derived from the logs exactly like
+ * `status` does — nothing kept beside them (ADR 0002) — minus the SAME
+ * noise `renderSessionTree` already hides (`isNoiseSession`, reused here
+ * rather than re-derived, so the board and `tenaza status` can never show
+ * a different Session count for the same logs), plus the Policy numbers
+ * (`stallMinutes`, `contextThresholdTokens`) the client's pure functions
+ * need and must never hardcode a second copy of.
+ */
+export function buildBoardPayload(home: string): BoardPayload {
+  const events = readAllSessionEvents(home);
+  const fullIndex = buildSessionIndex(events);
+  const eventTypes = eventTypesBySession(events);
+  const visibleSessions = [...fullIndex.values()].filter(
+    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()),
+  );
+  const policy = loadPolicy(home);
+
+  return {
+    v: 1,
+    policy: { stallMinutes: policy.stallMinutes, contextThresholdTokens: policy.thresholdTokens },
+    sessions: visibleSessions.map(toBoardSession),
+    inbox: deriveInbox(home).map((row) => toBoardInboxItem(row, fullIndex)),
   };
 }
 
 /**
  * A cheap signature of everything the derived state above could possibly
  * depend on — every Session's own `*.jsonl` log (name/size/mtime) plus the
- * human log's own, the SAME files `buildDerivedState` actually reads — so
+ * human log's own, the SAME files `buildBoardPayload` actually reads — so
  * the watcher below can tell "nothing changed" from "something did" WITHOUT
  * recomputing the (more expensive) derived state on every tick.
  *
  * Deliberately excludes `<session>.toolcalls` (orchestrator review): that
  * counter lives beside a Session's log (`paths.ts`'s own `sessionsDir`) and
  * is bumped on EVERY `PostToolUse` call (`toolcalls.ts`), not just the ones
- * that change derived state — `buildDerivedState` never reads it at all
+ * that change derived state — `buildBoardPayload` never reads it at all
  * (only a `usage.sampled` Event, written on every 25th call, feeds the
  * context bar). Including it here would make nearly every tick under
  * ordinary tool-call traffic recompute and (absent the payload check
@@ -293,7 +368,7 @@ export function startStateWatcher(home: string, clients: Set<SseController>): { 
       // ever see. Comparing the actual serialized payload — not just the
       // stat signature — is what makes this push on "a change your client
       // could observe," never on "a tick where some file's mtime moved."
-      const payload = JSON.stringify(buildDerivedState(home));
+      const payload = JSON.stringify(buildBoardPayload(home));
       if (payload === lastPayload) return;
       lastPayload = payload;
 
@@ -367,28 +442,35 @@ function healthResponse(): Response {
 }
 
 /**
- * `GET /` — "No page yet" (ticket 07's own words; the real board lands in
- * ticket 08). An open read, same as `/health` and `/events`: no token check
- * at all. When the URL carries the CURRENT token as `?token=`, set the
- * cookie that every later write-route check will read — the one moment the
- * query-string form of the token is ever meant to be used (decision 05:
- * "passed in the URL it opens, THEN kept in a cookie").
+ * `GET /auth?token=` (ticket 08 fix) — the ONE route a browser load now
+ * carries the token in the URL for. `Bun.serve`'s `routes` table claims
+ * `/` entirely for the static bundled page (decision 05's "open read, no
+ * token" still holds for it), which left no per-request handler free to
+ * set the HttpOnly cookie ticket 07's placeholder `indexResponse` used to
+ * set inline — the regression this ticket shipped instead was a
+ * CLIENT-SIDE `document.cookie` write from `main.tsx`, which can never be
+ * HttpOnly, has no server-side check at all, and leaves the token sitting
+ * in the URL the user's tab keeps. This route restores the server-side
+ * shape: validate the token against THIS launch's own (never trust the
+ * query blindly), set the SAME `HttpOnly; SameSite=Strict; Path=/` cookie
+ * `indexResponse` used to, then 302 the browser on to the plain `/` — the
+ * token never lingers in the address bar the human actually lands on. An
+ * invalid or missing token sets no cookie and answers 401, never falling
+ * through to the page: there is no path through this function that redirects
+ * without having just set a correct cookie.
  */
-function indexResponse(ctx: DaemonContext, url: URL): Response {
-  const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
-  if (url.searchParams.get("token") === ctx.token) {
-    // `Strict`, not `Lax`: the deny-by-default gate (`createFetchHandler`)
-    // covers GET on every non-read path too, not only writes, so a `Lax`
-    // cookie — sent on a cross-site top-level GET navigation — would hand
-    // an attacker-controlled page the SAME cookie a legitimate same-site
-    // GET gets. `Strict` closes that for whatever routes tickets 09-11 add.
-    headers.append("set-cookie", `${TOKEN_COOKIE_NAME}=${ctx.token}; HttpOnly; SameSite=Strict; Path=/`);
+function authResponse(ctx: DaemonContext, url: URL): Response {
+  if (url.searchParams.get("token") !== ctx.token) {
+    return new Response("unauthorized\n", { status: 401 });
   }
-  return new Response(
-    "<!doctype html><html><head><title>Tenaza</title></head>" +
-      "<body><p>Tenaza — no page yet. The board lands in a later ticket.</p></body></html>",
-    { headers },
-  );
+  const headers = new Headers({ location: "/" });
+  // `Strict`, not `Lax` — same reasoning `indexResponse` carried: the
+  // deny-by-default gate covers GET on every non-read path too, so a
+  // `Lax` cookie (sent on a cross-site top-level GET navigation) would
+  // hand an attacker-controlled page the same cookie a legitimate
+  // same-site GET gets.
+  headers.append("set-cookie", `${TOKEN_COOKIE_NAME}=${ctx.token}; HttpOnly; SameSite=Strict; Path=/`);
+  return new Response(null, { status: 302, headers });
 }
 
 /** `GET /events` — an open read: the SSE stream, no token required. Pushes the current derived state immediately on connect, then whatever `startStateWatcher` enqueues later. */
@@ -398,7 +480,7 @@ function eventsResponse(ctx: DaemonContext): Response {
     start(controller) {
       thisController = controller;
       ctx.clients.add(controller);
-      controller.enqueue(encodeSseEvent(buildDerivedState(ctx.home)));
+      controller.enqueue(encodeSseEvent(buildBoardPayload(ctx.home)));
     },
     cancel() {
       if (thisController) ctx.clients.delete(thisController);
@@ -414,18 +496,26 @@ function eventsResponse(ctx: DaemonContext): Response {
 }
 
 /**
- * The Daemon's whole routing table (ticket 07). Three explicit OPEN reads —
- * `GET /health`, `GET /events`, `GET /` — exactly the set decision 05 names
- * as never requiring the token. Everything else — any other path, any
- * non-GET method, including every write route tickets 09-11 will add
- * (`run`, `done`, `dismiss`, answer, focus) — is DENIED BY DEFAULT unless it
- * carries the token: no route is individually wrapped in a check it might
- * one day be written without, because there is no path to "write" here that
- * skips this `else` branch at all. Ticket 07 itself defines no concrete
- * write route yet (the resolve/answer/focus routes are tickets 09-11's own
- * job) — proven instead by hitting this same default against an arbitrary
- * path: 403 without the token, falling through to a plain 404 with it,
- * which is exactly what a real write route will see too once one exists.
+ * The Daemon's routing table for everything `routes` (below) doesn't claim
+ * (ticket 07, narrowed by ticket 08). `GET /` moved OFF this fetch handler
+ * and onto `Bun.serve`'s own `routes` table — the bundled React page is a
+ * static HTML-import route now, which is what gives it (and every asset it
+ * references) Bun's automatic bundling AND, per decision 05, the SAME "open
+ * read, no token" treatment every other static route gets for free: there
+ * is no per-request logic a static route could skip, unlike the old
+ * `indexResponse` it replaces. `GET /health`, `GET /events` and `GET /auth`
+ * are the only OPEN reads still answered HERE — `/auth` validates the
+ * token itself, so it cannot sit behind the token gate below. Everything
+ * else — any other path, any non-GET method, including every write route
+ * tickets 09-11 will add (`run`, `done`, `dismiss`, answer, focus) — is
+ * DENIED BY DEFAULT unless it carries the token: no route is individually
+ * wrapped in a check it might one day be written without, because there is
+ * no path to "write" here that skips this `else` branch at all. Ticket 07
+ * itself defines no concrete write route yet (the resolve/answer/focus
+ * routes are tickets 09-11's own job) — proven instead by hitting this
+ * same default against an arbitrary path: 403 without the token, falling
+ * through to a plain 404 with it, which is exactly what a real write route
+ * will see too once one exists.
  */
 export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response {
   return (req: Request): Response => {
@@ -433,7 +523,7 @@ export function createFetchHandler(ctx: DaemonContext): (req: Request) => Respon
 
     if (req.method === "GET" && url.pathname === "/health") return healthResponse();
     if (req.method === "GET" && url.pathname === "/events") return eventsResponse(ctx);
-    if (req.method === "GET" && url.pathname === "/") return indexResponse(ctx, url);
+    if (req.method === "GET" && url.pathname === "/auth") return authResponse(ctx, url);
 
     if (!isAuthorizedRequest(req, ctx.token)) {
       return new Response("forbidden\n", { status: 403 });
@@ -482,9 +572,18 @@ export async function probeExistingDaemon(
   }
 }
 
+/**
+ * The URL the launcher opens (ticket 08 fix) — `/auth?token=`, not `/?token=`:
+ * `/auth` is the ONE route that still validates the token and sets the
+ * cookie server-side (`authResponse`, above); landing straight on `/` with
+ * the token would skip that entirely, which is exactly the regression this
+ * ticket's own `bootstrapTokenCookie` reintroduced. No token to carry (the
+ * `readDaemonToken` miss case) → open the plain page directly, since there
+ * is nothing for `/auth` to validate.
+ */
 export function buildDaemonUrl(port: number, token: string | undefined): string {
-  const base = `http://127.0.0.1:${port}/`;
-  return token ? `${base}?token=${token}` : base;
+  const origin = `http://127.0.0.1:${port}`;
+  return token ? `${origin}/auth?token=${token}` : `${origin}/`;
 }
 
 function describeBindError(error: unknown): string {
@@ -570,7 +669,13 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
 
   let server: ReturnType<typeof Bun.serve>;
   try {
-    server = Bun.serve({ port, hostname: "127.0.0.1", fetch: createFetchHandler(ctx) });
+    // `routes` claims "/" with the HTML import (ticket 08): Bun bundles the
+    // React board and every asset it references — JS, CSS, the vendored
+    // Geist woff2 files — and serves them, embedded straight into the
+    // `--compile` binary, with no further wiring here. `fetch` stays the
+    // fallback for everything `routes` doesn't claim (health, events, and
+    // every write route tickets 09-11 add).
+    server = Bun.serve({ port, hostname: "127.0.0.1", routes: { "/": index }, fetch: createFetchHandler(ctx) });
   } catch (error) {
     printErr(
       `tenaza: could not start the Daemon on port ${port} (${describeBindError(error)}) — try \`tenaza ui --port <n>\``,

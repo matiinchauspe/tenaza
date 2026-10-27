@@ -4,7 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { isHeartbeatFresh, readDaemonToken, readOpenRecorder, DEFAULT_HEARTBEAT_STALE_MS } from "../src/daemon";
 import { daemonAlivePath, daemonTokenPath } from "../src/paths";
+import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES } from "../src/policy";
 import { TENAZA_VERSION } from "../src/version";
+
+/** Ticket 08: `/events` now also carries the Live surface's own contract envelope and Policy numbers — every "freshly started, nothing observed yet" assertion below includes this. */
+const EMPTY_BOARD_PAYLOAD = {
+  v: 1,
+  policy: { stallMinutes: DEFAULT_STALL_MINUTES, contextThresholdTokens: DEFAULT_CONTEXT_THRESHOLD },
+  sessions: [],
+  inbox: [],
+};
 import { runCli } from "./support/cli";
 import { spawnDaemon } from "./support/daemon";
 
@@ -171,6 +180,62 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
     }
   });
 
+  /**
+   * Ticket 08 fix: `GET /auth?token=` replaces the client-side
+   * `bootstrapTokenCookie` regression (`main.tsx`) — it must be the route
+   * that actually validates the token and sets the cookie SERVER-SIDE,
+   * same name/attributes ticket 07's own `indexResponse` used, then send
+   * the browser on to the plain `/` with the token no longer in the URL
+   * the human's tab keeps.
+   */
+  test("GET /auth with the correct token sets an HttpOnly, SameSite=Strict cookie and 302s to /", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/auth?token=${daemon.token}`, {
+        redirect: "manual",
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+
+      const cookie = res.headers.get("set-cookie");
+      expect(cookie).toBeTruthy();
+      expect(cookie).toContain(`tenaza_token=${daemon.token}`);
+      expect(cookie).toContain("HttpOnly");
+      expect(cookie).toContain("SameSite=Strict");
+      expect(cookie).toContain("Path=/");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("GET /auth with a missing or wrong token sets no cookie and answers 401", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const missing = await fetch(`http://127.0.0.1:${daemon.port}/auth`, { redirect: "manual" });
+      expect(missing.status).toBe(401);
+      expect(missing.headers.get("set-cookie")).toBeNull();
+
+      const wrong = await fetch(`http://127.0.0.1:${daemon.port}/auth?token=not-the-real-one`, {
+        redirect: "manual",
+      });
+      expect(wrong.status).toBe(401);
+      expect(wrong.headers.get("set-cookie")).toBeNull();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("the launcher opens /auth?token=, not /?token= — the route that validates server-side", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const opened = readOpenRecorder(home);
+      expect(opened.length).toBeGreaterThan(0);
+      for (const url of opened) expect(url).toContain("/auth?token=");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   test("reads stay open: GET /, /health and /events never require the token", async () => {
     const daemon = await spawnDaemon(["--port", "0"], { home });
     try {
@@ -183,6 +248,37 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       const events = await fetch(`http://127.0.0.1:${daemon.port}/events`);
       expect(events.status).toBe(200);
       await events.body?.cancel();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  /**
+   * Ticket 08: `GET /` now serves the real, bundled React board (Bun's
+   * `routes` HTML import, `daemon.ts`) instead of ticket 07's "no page
+   * yet" placeholder — and every asset the page references (its bundled
+   * JS, its bundled CSS) must resolve too, as an open read like the page
+   * itself (decision 05: the page and its assets are open reads; nothing
+   * NEW is writable). This is the one server-side seam for the whole UI
+   * layer; the page's own behaviour is verified by hand (ticket's AC).
+   */
+  test("GET / serves the bundled board page, and every asset URL it references resolves, open, with no token", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const page = await fetch(`http://127.0.0.1:${daemon.port}/`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-type")).toContain("text/html");
+
+      const html = await page.text();
+      expect(html).toContain('id="root"');
+
+      const assetPaths = [...html.matchAll(/(?:src|href)="(\/[^"]+\.(?:js|css))"/g)].map((match) => match[1]!);
+      expect(assetPaths.length).toBeGreaterThan(0); // the bundler rewrote at least the entry script
+
+      for (const assetPath of assetPaths) {
+        const asset = await fetch(`http://127.0.0.1:${daemon.port}${assetPath}`);
+        expect(asset.status).toBe(200);
+      }
     } finally {
       await daemon.stop();
     }
@@ -271,7 +367,7 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       const sse = await connectEvents(daemon.port);
 
       const initial = await sse.nextEvent(2000);
-      expect(initial).toEqual({ sessions: [], inbox: [] });
+      expect(initial).toEqual(EMPTY_BOARD_PAYLOAD);
 
       const hookResult = await runCli(["hook", "claude"], {
         home,
@@ -316,7 +412,7 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
     try {
       const sse = await connectEvents(daemon.port);
       const initial = await sse.nextEvent(2000);
-      expect(initial).toEqual({ sessions: [], inbox: [] });
+      expect(initial).toEqual(EMPTY_BOARD_PAYLOAD);
 
       const postToolUse = (): Promise<unknown> =>
         runCli(["hook", "claude"], {

@@ -16,9 +16,11 @@ export interface DaemonHandle {
  * The line `runUi` prints to stdout once it is actually listening
  * (`src/daemon.ts`'s own `print` call) — the one fact a test needs to drive
  * the rest of the black-box seam (its real, OS-assigned port when spawned
- * with `--port 0`, and the launch token).
+ * with `--port 0`, and the launch token). The URL it opens is
+ * `/auth?token=`, not `/?token=` (ticket 08 fix, `buildDaemonUrl`) — `/auth`
+ * is the route that validates the token and sets the cookie server-side.
  */
-const STARTUP_LINE = /tenaza: serving on http:\/\/127\.0\.0\.1:(\d+)\/\?token=([0-9a-f]+)/;
+const STARTUP_LINE = /tenaza: serving on http:\/\/127\.0\.0\.1:(\d+)\/auth\?token=([0-9a-f]+)/;
 
 async function readStartupLine(
   stdout: ReadableStream<Uint8Array>,
@@ -101,7 +103,7 @@ export async function spawnDaemon(
       port,
       token,
       home: options.home,
-      url: `http://127.0.0.1:${port}/?token=${token}`,
+      url: `http://127.0.0.1:${port}/auth?token=${token}`,
       async stop() {
         await stopDaemon(proc);
       },

@@ -572,6 +572,33 @@ effect = "human"
     expect(readSessionEvents("agent-1", home)).toHaveLength(0);
   });
 
+  test("PostToolUse INSIDE a subagent with no agent_transcript_path samples the subagent's OWN transcript beside the parent's on the 25th call — never the parent's tokens", async () => {
+    // Claude Code's real layout: the parent at <dir>/<id>.jsonl, its
+    // subagents at <dir>/<id>/subagents/agent-<agent_id>.jsonl.
+    const projectDir = mkdtempSync(path.join(tmpdir(), "tenaza-claude-subagent-transcript-"));
+    const parentTranscript = path.join(projectDir, "parent-1.jsonl");
+    const subagentTranscript = path.join(projectDir, "parent-1", "subagents", "agent-agent-1.jsonl");
+    writeFileSync(parentTranscript, readFileSync(fixture("above-threshold.jsonl")));
+    mkdirSync(path.dirname(subagentTranscript), { recursive: true });
+    writeFileSync(subagentTranscript, readFileSync(fixture("below-threshold.jsonl")));
+
+    try {
+      for (let i = 1; i <= 25; i++) {
+        await handleClaudeHook(home, {
+          session_id: "sess-1",
+          hook_event_name: "PostToolUse",
+          agent_id: "agent-1",
+          transcript_path: parentTranscript,
+        });
+      }
+
+      const samples = readSessionEvents("agent-1", home).filter((e) => e.type === "usage.sampled");
+      expect(samples).toEqual([expect.objectContaining({ data: { context_tokens: 75704 } })]);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   describe("notifications (ticket 08: 🔴 fires at the moment a sample crosses the threshold)", () => {
     test("a Stop call with a transcript above the threshold fires exactly one 🔴", async () => {
       await handleClaudeHook(home, {

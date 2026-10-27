@@ -16,6 +16,7 @@ import {
   rollupCategory,
 } from "../src/sessions";
 import {
+  actionDecidedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
@@ -93,6 +94,34 @@ describe("buildSessionIndex", () => {
     ]);
 
     expect(index.get("sess-1")?.contextTokens).toBeUndefined();
+  });
+
+  test("lastAction captures the LATEST action.decided Event's Action — ticket 08's 'last signal' (last write wins, same convention as contextTokens)", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "ls -la", tool: "Bash" },
+        "allow",
+        { match: "nothing", effect: "flag" },
+      ),
+      actionDecidedEvent(
+        "sess-1",
+        { kind: "shell", command: "gh pr merge 58", tool: "Bash" },
+        "deny",
+        { match: "gh pr merge", effect: "human" },
+      ),
+    ]);
+
+    expect(index.get("sess-1")?.lastAction).toEqual({ kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+  });
+
+  test("a Session with no action.decided Event has lastAction undefined", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+
+    expect(index.get("sess-1")?.lastAction).toBeUndefined();
   });
 });
 

@@ -1,4 +1,4 @@
-import type { Capability, Event } from "./contract/event";
+import type { Action, Capability, Event } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
 import { readAllSessionEvents, readSessionEvents } from "./log";
@@ -42,6 +42,8 @@ export interface SessionNode {
   lastEventTs?: string;
   /** The context size from the LATEST `usage.sampled` Event this Session has (q9). `undefined` means never sampled, never zero. */
   contextTokens?: number;
+  /** The Action from the LATEST `action.decided` Event (ticket 08's "last signal" — what this Session most recently attempted, allowed or not). Last write wins, same convention as `contextTokens`; `undefined` means it has never attempted a matched or recorded Action. */
+  lastAction?: Action;
 }
 
 function emptyNode(id: string): SessionNode {
@@ -79,6 +81,11 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       // Last write wins, same as endedAt/endedReason above — the file's own
       // chronological order is the only ordering Tenaza trusts (ADR 0002).
       node.contextTokens = event.data.context_tokens;
+    } else if (event.type === "action.decided") {
+      // Every matched Action, not only a `human`-effect one — "last signal"
+      // (ticket 08) is "what did this Session most recently attempt",
+      // independent of whether it was held, denied, flagged or allowed.
+      node.lastAction = event.data.action;
     }
   }
 
@@ -217,8 +224,8 @@ export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>): boolean 
   return eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled");
 }
 
-/** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. */
-function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
+/** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */
+export function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
   const map = new Map<string, Set<Event["type"]>>();
   for (const event of events) {
     const types = map.get(event.session) ?? new Set();

@@ -13,6 +13,7 @@ import {
 } from "./resolve";
 import { renderStatus } from "./status";
 import { formatStatusline } from "./statusline";
+import { TENAZA_VERSION } from "./version";
 
 async function readStdin(): Promise<string> {
   return await new Response(Bun.stdin.stream()).text();
@@ -225,6 +226,15 @@ function runInitCommand(): number {
 
 async function main(argv: string[]): Promise<number> {
   const [command, subcommand] = argv;
+
+  // `tenaza --version` (ticket 05): prints the SAME single-source constant
+  // `health.ts`'s self-check already reads — never a second, independently
+  // bumped copy (e.g. `package.json`'s own version, which a compiled
+  // `bun build --compile` binary cannot read at runtime anyway).
+  if (command === "--version") {
+    process.stdout.write(`${TENAZA_VERSION}\n`);
+    return 0;
+  }
 
   if (command === "hook" && subcommand === "claude") {
     return await runHookClaude();

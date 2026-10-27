@@ -5,6 +5,7 @@ import path from "node:path";
 import { STATUSLINE_PASTE_LINE } from "../src/init";
 import { readNotificationRecorder } from "../src/notify";
 import { policyPath } from "../src/paths";
+import { TENAZA_VERSION } from "../src/version";
 import { runCli } from "./support/cli";
 
 describe("tenaza CLI (black box, temporary TENAZA_HOME)", () => {
@@ -886,6 +887,15 @@ effect = "flag"
 
       expect(readNotificationRecorder(home)).toEqual([]);
     });
+  });
+});
+
+describe("tenaza --version", () => {
+  test("prints TENAZA_VERSION — the SAME single source health.ts's self-check already reads, never a second hardcoded copy", async () => {
+    const result = await runCli(["--version"], { home: "" });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(TENAZA_VERSION);
   });
 });
 

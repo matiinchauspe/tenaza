@@ -2,6 +2,7 @@ import type { Action, Capability } from "../contract/event";
 import { sessionEndedEvent, sessionStartedEvent } from "../contract/event";
 import { decideAction } from "../decide";
 import { appendEvent } from "../log";
+import { isShellRule } from "../policy";
 
 /**
  * A test Adapter (ADR 0001, ticket 06): it emits the same Events every real
@@ -67,11 +68,15 @@ async function handleFakeAction(
   }
   if (result.logged) {
     const enforceable = result.rule.effect !== "human";
+    // This Adapter only ever normalizes a `shell` Action (above), so the
+    // matched Rule is always a `shell` Rule too — `isShellRule` just keeps
+    // that honest for the type checker now that `Rule` also covers `mcp`.
+    const label = isShellRule(result.rule) ? result.rule.match : result.rule.tool;
     return {
       decision: "allow",
       message: enforceable
-        ? `Flagged by Policy rule "${result.rule.match}" and recorded.`
-        : `Matched Policy rule "${result.rule.match}" (effect: human), but this Adapter has no "block" Capability — could not be denied. Recorded instead.`,
+        ? `Flagged by Policy rule "${label}" and recorded.`
+        : `Matched Policy rule "${label}" (effect: human), but this Adapter has no "block" Capability — could not be denied. Recorded instead.`,
     };
   }
   return undefined;

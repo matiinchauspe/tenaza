@@ -121,16 +121,24 @@ export interface ClaudeHookResponse {
 const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block", "measure"];
 
 /**
- * Normalize a PreToolUse payload into a runtime-neutral Action. Only `Bash`
- * calls carrying a string command normalize to `shell` — everything else
- * (a non-Bash tool, or a Bash call Tenaza can't read a command from) is not
- * yet an Action Tenaza has a shape for, and is passed through untouched.
+ * Normalize a PreToolUse payload into a runtime-neutral Action (ticket 04,
+ * decision 07): a `Bash` call carrying a string command normalizes to
+ * `shell`; any `mcp__*` tool call normalizes to `mcp`, carrying the tool's
+ * own name and its raw arguments untouched — no per-provider code, and the
+ * Policy alone decides what, if anything, those arguments mean. Everything
+ * else (a non-Bash, non-MCP tool, or a Bash call Tenaza can't read a
+ * command from) is not yet an Action Tenaza has a shape for, and is passed
+ * through untouched.
  */
 export function normalizeClaudeAction(payload: ClaudeHookPayload): Action | undefined {
-  if (payload.tool_name !== "Bash") return undefined;
-  const command = payload.tool_input?.command;
-  if (typeof command !== "string") return undefined;
-  return { kind: "shell", command, tool: "Bash" };
+  if (payload.tool_name === "Bash") {
+    const command = payload.tool_input?.command;
+    return typeof command === "string" ? { kind: "shell", command, tool: "Bash" } : undefined;
+  }
+  if (payload.tool_name.startsWith("mcp__")) {
+    return { kind: "mcp", tool: payload.tool_name, args: payload.tool_input ?? {} };
+  }
+  return undefined;
 }
 
 /**
@@ -205,13 +213,13 @@ function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: num
  * Decide one Claude Code PreToolUse call against the Policy. Returns
  * `undefined` when there is nothing to tell the host — either the call
  * didn't normalize to an Action, it was a `tenaza label` announce (handled
- * separately, below), or it normalized but matched no Rule (allowed and NOT
- * logged, per the Policy's own rule).
+ * separately, below), or the Policy's own verdict was an allow (whether
+ * because nothing matched, or because a `flag` Rule did).
  */
 async function handlePreToolUse(
   home: string,
   payload: ClaudeHookPayload,
-): Promise<ClaudeHookResponse | undefined> {
+): Promise<ClaudeHookOutput | undefined> {
   const action = normalizeClaudeAction(payload);
   if (!action) return undefined;
 
@@ -233,13 +241,15 @@ async function handlePreToolUse(
   if (result.decision === "deny") {
     return withSkippedLinesWarning(buildHookResponse("deny", denyMessage(result.inboxId)), skippedLines);
   }
-  if (result.logged) {
-    return withSkippedLinesWarning(
-      buildHookResponse("allow", `Flagged by Policy rule "${result.rule.match}" and recorded.`),
-      skippedLines,
-    );
-  }
-  return undefined;
+
+  // Every other case is an allow — no Rule matched, or a `flag` Rule did —
+  // and EITHER way Tenaza returns NO permission decision at all (decision
+  // 07, H2): an explicit hook `allow` runs BEFORE Claude Code's own
+  // auto-mode classifier and skips it, which is LESS safe than saying
+  // nothing at all — v0.1's own mistake, fixed here. Only a skipped-log-line
+  // warning, when `decideAction` hit one, still rides along as a bare
+  // systemMessage with no accompanying permission decision.
+  return skippedLines ? { systemMessage: describeSkippedLines(skippedLines) } : undefined;
 }
 
 /**
@@ -348,7 +358,7 @@ export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayloa
 export async function handleClaudeHook(
   home: string,
   payload: ClaudeHookInput,
-): Promise<ClaudeHookResponse | undefined> {
+): Promise<ClaudeHookOutput | undefined> {
   switch (payload.hook_event_name) {
     case "PreToolUse":
       return await handlePreToolUse(home, payload);
@@ -427,7 +437,7 @@ function faultResponse(message: string): ClaudeHookOutput {
  * Combines with whatever `response` already carries (that skip warning,
  * when `handlePreToolUse` set one) rather than overwriting it.
  */
-function withPolicyDegradation(home: string, response: ClaudeHookResponse | undefined): HookOutcome {
+function withPolicyDegradation(home: string, response: ClaudeHookOutput | undefined): HookOutcome {
   const warning = policyWarning(home);
   const existing = response?.systemMessage;
   if (!warning && !existing) return { output: response };

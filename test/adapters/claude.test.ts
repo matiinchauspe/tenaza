@@ -41,8 +41,8 @@ effect = "flag"
       tool_input: { command: "gh pr merge 58" },
     });
 
-    expect(response?.hookSpecificOutput.permissionDecision).toBe("deny");
-    const reason = response?.hookSpecificOutput.permissionDecisionReason ?? "";
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    const reason = response?.hookSpecificOutput?.permissionDecisionReason ?? "";
     expect(reason).toContain("inbox #1");
     expect(reason.toLowerCase()).toContain("reserved for the human");
     expect(reason.toLowerCase()).toContain("do not retry");
@@ -50,7 +50,11 @@ effect = "flag"
     expect(reason.toLowerCase()).toContain("continue");
   });
 
-  test("allows a flag-ruled Bash command and still logs action.decided", async () => {
+  test("a flag-ruled Bash command still logs action.decided, but returns NO hook output at all (decision 07, H2)", async () => {
+    // v0.1's mistake: answering an explicit `allow` here runs BEFORE Claude
+    // Code's own auto-mode classifier and skips it — LESS safe than saying
+    // nothing. A `flag` match must still be recorded, just never as a
+    // permission decision.
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "PreToolUse",
@@ -58,7 +62,7 @@ effect = "flag"
       tool_input: { command: "railway run -- psql" },
     });
 
-    expect(response?.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(response).toBeUndefined();
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ data: { decision: "allow" } });
@@ -70,6 +74,21 @@ effect = "flag"
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "ls -la" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("an mcp__ tool call normalizes fine even when the Policy carries ZERO mcp Rules (ticket 04 backward compat)", async () => {
+    // The outer Policy (above) has only `shell` Rules — proves a Policy with
+    // no `mcp` Rule at all never crashes on an mcp Action: it's simply an
+    // allow, not logged, same as any other no-match.
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__neon__run_sql",
+      tool_input: { sql: "select 1" },
     });
 
     expect(response).toBeUndefined();
@@ -453,5 +472,124 @@ effect = "human"
       expect(notifications).toHaveLength(1);
       expect(notifications[0]?.tag).toBe("threshold-agent-1");
     });
+  });
+});
+
+describe("Claude Code PreToolUse adapter: mcp Actions (ticket 04, decision 07)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-mcp-"));
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+tool = "mcp__*neon*__run_sql*"
+unless = { branch_id = ["br-dev-123"] }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*vercel*"
+effect = "flag"
+`,
+    );
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("normalizes an mcp__* tool call into { kind: mcp, tool, args } and denies it on a human-ruled match", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__neon__run_sql",
+      tool_input: { branch_id: "br-prod-999", sql: "select 1" },
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "action.decided",
+      data: {
+        action: { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod-999", sql: "select 1" } },
+        decision: "deny",
+      },
+    });
+  });
+
+  test("an ABSENT branch_id still matches — the Neon default-branch-is-prod case", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__neon__run_sql",
+      tool_input: { sql: "select 1" },
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  test("a safe branch_id is exempted — allowed, and not even logged (no Rule matched)", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__neon__run_sql",
+      tool_input: { branch_id: "br-dev-123" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("a flag-ruled mcp call logs action.decided but returns NO hook output at all (H2, same as a shell flag match)", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__vercel__promote_deployment",
+      tool_input: { target: "production" },
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ data: { decision: "allow" } });
+  });
+
+  test("an mcp call matching no Rule produces no response and no log entry", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__railway__status",
+      tool_input: {},
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("a non-Bash, non-mcp__ tool call is still passed through untouched", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/x" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("an mcp call with no tool_input at all normalizes with an empty args record, never a crash", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__neon__run_sql",
+      tool_input: {},
+    });
+
+    // No branch_id at all → unsafe (absent is never safe) → still denies.
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 });

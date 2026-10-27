@@ -176,8 +176,9 @@ shape live in [`docs/adr/`](docs/adr/).
 ## Limits in v1
 
 - **Claude Code only.** The core is runtime-free; other adapters can come later.
-- **Shell commands only.** Rules match Bash commands. Tool calls to MCP servers are not checked
-  yet, so a production write through an MCP tool goes unseen.
+- **MCP Rules match the call, never its content.** An `mcp` Rule matches a tool name and
+  conditions on its arguments (`unless` / `when`); the SQL text or other argument content
+  itself is never inspected.
 - **Subagent attribution is partial.** A subagent's blocked action and tool-call count are
   recorded under its parent session.
 - **macOS notifications cannot be replaced.** Each one is a new banner.

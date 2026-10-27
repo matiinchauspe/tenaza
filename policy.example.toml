@@ -3,22 +3,35 @@
 # again once that file exists. It is yours from that point on: edit it
 # freely, Tenaza never reads this shipped copy again.
 #
-# Matching parses the command with tree-sitter-bash and looks for a Rule's
-# words as a CONTIGUOUS RUN anywhere in a command the line actually
-# executes (ticket 03, ADR 0006) — `timeout 60 gh pr merge 58` and
-# `sudo gh pr merge 58` both match with no launcher table to keep current,
-# while a quoted string, a heredoc body or a commit message that only
-# MENTIONS the words never does. `bash`/`sh`/`zsh -c` strings and `eval`
-# are re-parsed; `$(...)` and backticks are commands, wherever they sit.
-# The FIRST matching [[rule]] in file order still wins. A line that fails
-# to parse (an unterminated quote, zsh-only syntax) falls back to the old
-# plain-substring check (`match` in `command.includes(...)`) instead of
-# going silent. This is a guardrail against honest agent mistakes, never a
-# security boundary — a determined agent (or a differently-worded command)
-# can walk around any Rule here.
+# A `shell` Rule (`match = "…"`) parses the command with tree-sitter-bash
+# and looks for its words as a CONTIGUOUS RUN anywhere in a command the
+# line actually executes (ticket 03, ADR 0006) — `timeout 60 gh pr merge
+# 58` and `sudo gh pr merge 58` both match with no launcher table to keep
+# current, while a quoted string, a heredoc body or a commit message that
+# only MENTIONS the words never does. `bash`/`sh`/`zsh -c` strings and
+# `eval` are re-parsed; `$(...)` and backticks are commands, wherever they
+# sit. A line that fails to parse (an unterminated quote, zsh-only syntax)
+# falls back to the old plain-substring check (`match` in
+# `command.includes(...)`) instead of going silent.
 #
-# Known misses — none of these are caught, on purpose: no per-launcher
-# table, no variable tracking, no re-running a written file.
+# An `mcp` Rule (`tool = "…"`, ticket 04, decision 07) matches an MCP tool
+# call by NAME — a glob where `*` is the only wildcard, e.g.
+# "mcp__*neon*__run_sql*" — with optional conditions on its arguments:
+# `unless = { <arg path> = [safe values] }` exempts the call when an
+# argument holds one of those values — an ABSENT argument is NEVER safe,
+# it still matches (e.g. a Neon `run_sql` with no `branch_id` hits the
+# default branch, which is prod); `when = { <arg path> = value }` requires
+# the argument to equal it. Dotted paths reach nested arguments; an array
+# argument matches if ANY element does. No per-provider code — a Rule for
+# an MCP a project lacks simply never matches — and SQL or other argument
+# CONTENT is never inspected, only these two structural conditions.
+#
+# Either kind: the FIRST matching [[rule]] in file order wins. A guardrail
+# against honest agent mistakes, never a security boundary — a determined
+# agent (or a differently-worded command) can walk around any Rule here.
+#
+# Known misses for `shell` Rules — none of these are caught, on purpose: no
+# per-launcher table, no variable tracking, no re-running a written file.
 #   - `ssh host "gh pr merge 58"` — the remote command is one quoted
 #     string, data to the local shell.
 #   - `C=gh; $C pr merge 58` — variable indirection.
@@ -42,38 +55,37 @@ effect = "human"
 match = "git worktree remove"
 effect = "human"
 
-[[rule]]
-# Railway: setting environment variables. BEST GUESS, confirm it matches
-# what you actually type — assumes the current Railway CLI's
-# `railway variables --set "KEY=VALUE"` form; adjust the string if your
-# CLI version or your own habit differs.
-match = "railway variables --set"
-effect = "human"
+# Everything below is commented out: v0.2 ships with ONLY the two Rules
+# above active ("se frena lo que se frena hoy, nada más" — Tenaza must not
+# get in your way; it blocks only what already needs you). Uncomment and
+# adjust whichever of these you actually use — each is a BEST GUESS at a
+# shape, not a working default.
 
-[[rule]]
-# Railway: running a command against the production environment. BEST
-# GUESS — assumes you name the environment explicitly on the command itself
-# (`railway run --environment production ...`). If you instead switch the
-# linked environment first (`railway environment production`) and then run
-# a bare `railway run ...`, THIS RULE WILL NOT CATCH IT — adjust the string
-# to however you actually invoke a prod run, or add a second [[rule]] for
-# the switch itself.
-match = "railway run --environment production"
-effect = "human"
+# [[rule]]
+# # Neon: running SQL with no branch_id at all hits the DEFAULT branch,
+# # which is production. Adjust the tool glob if your Neon MCP server
+# # names this tool differently, and the safe list to your own dev/staging
+# # branch ids.
+# tool = "mcp__*neon*__run_sql*"
+# unless = { branch_id = ["br-dev-example", "br-staging-example"] }
+# effect = "human"
 
-[[rule]]
-# Neon: running SQL against the production database via a shell command
-# (e.g. `psql`). BEST GUESS, and a real limitation worth knowing: Tenaza v1
-# only normalizes shell (Bash) commands into Actions, so a Neon SQL write
-# issued through an MCP tool call — never a shell command — is INVISIBLE to
-# this Policy no matter what you write here. This rule only ever catches a
-# prod SQL write you run yourself from a terminal. Replace the string below
-# with however your own production connection is actually invoked (your
-# prod connection string's env var name, a project script like
-# `bun run db:prod`, etc.) — the literal below is a placeholder, not a
-# working default.
-match = "psql $PROD_DATABASE_URL"
-effect = "human"
+# [[rule]]
+# # Vercel: promoting a deployment to production. Adjust the tool glob to
+# # however your Vercel MCP server names it.
+# tool = "mcp__*vercel*__request_promote*"
+# effect = "human"
+
+# [[rule]]
+# # Railway: running a command against the production environment via its
+# # CLI. BEST GUESS — assumes you name the environment explicitly on the
+# # command itself (`railway run --environment production ...`). If you
+# # instead switch the linked environment first
+# # (`railway environment production`) and then run a bare `railway run
+# # ...`, THIS RULE WILL NOT CATCH IT — adjust the string to however you
+# # actually invoke a prod run.
+# match = "railway run --environment production"
+# effect = "human"
 
 [flag]
 # The context size (tokens) past which a Session is Flagged in `status` and

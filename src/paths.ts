@@ -149,3 +149,15 @@ export function daemonTokenPath(home: string = tenazaHome()): string {
 export function openRecorderPath(home: string = tenazaHome()): string {
   return path.join(home, "state", "open-recorder.jsonl");
 }
+
+/**
+ * Ticket 11: where the focuser port's test seam records "what step would
+ * have been run" (`focus.ts`) when `TENAZA_FOCUS_RECORDER` swaps the real
+ * spawn/osascript for it — the SAME shape `notifyRecorderPath`/
+ * `openRecorderPath` already give their own ports: a plain JSONL-of-steps
+ * file, never an Event (a focus attempt is not domain state ADR 0002 cares
+ * about; it is the test oracle for the focuser port alone).
+ */
+export function focusRecorderPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "focus-recorder.jsonl");
+}

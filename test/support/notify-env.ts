@@ -11,6 +11,13 @@
  * Same reasoning for the Daemon's browser-opener seam (ticket 07):
  * `TENAZA_OPEN_RECORDER` set globally means NO test — present or future —
  * can ever shell out to the real macOS `open` just by forgetting to opt in.
+ *
+ * Same reasoning again for the focuser port (ticket 11, `src/focus.ts`):
+ * `TENAZA_FOCUS_RECORDER` set globally means no test can ever shell out to
+ * a real `tmux switch-client`, `osascript`, or `open -b` just by forgetting
+ * to opt in — a human clicking "ir a terminal" is the only thing that
+ * should ever actually move a window.
  */
 process.env.TENAZA_NOTIFY_RECORDER = "1";
 process.env.TENAZA_OPEN_RECORDER = "1";
+process.env.TENAZA_FOCUS_RECORDER = "1";

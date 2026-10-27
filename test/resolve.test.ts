@@ -10,8 +10,10 @@ import { readNotificationRecorder } from "../src/notify";
 import {
   resolveInboxItem,
   runInboxItem,
+  startInboxItemRunStream,
   UnknownInboxItemError,
 } from "../src/resolve";
+import { parseRunOutput, RUN_FAILURE_MARKER } from "../src/runoutput";
 
 /** When `openItem` is the ONLY Event written for "sess-1", its `action.decided` lands on line 1. */
 const ID = inboxIdentityHash("sess-1", 1);
@@ -313,5 +315,182 @@ describe("runInboxItem", () => {
       expect(result).toEqual({ alreadyResolved: false });
       expect(deriveInbox(home)).toEqual([]);
     });
+  });
+});
+
+/** Read a `ReadableStream<Uint8Array>` to completion as text — the test's own oracle for "what the view would have rendered into the card." */
+async function readStreamText(stream: ReadableStream<Uint8Array>): Promise<string> {
+  return await new Response(stream).text();
+}
+
+describe("startInboxItemRunStream (the view's own `run`, decisions 05/06, ticket 09)", () => {
+  let home: string;
+  const previousShell = process.env.TENAZA_RUN_SHELL;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-run-stream-"));
+    // `/bin/sh` is fast and profile-free — pinned so this suite never pays
+    // for (or depends on) whatever startup files the DEVELOPER's own
+    // `$SHELL` happens to source. Production falls through to the real
+    // login shell; this is a test seam only (`resolve.ts`'s own doc
+    // comment on `loginShellPath`).
+    process.env.TENAZA_RUN_SHELL = "/bin/sh";
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    if (previousShell === undefined) delete process.env.TENAZA_RUN_SHELL;
+    else process.env.TENAZA_RUN_SHELL = previousShell;
+  });
+
+  test("a stored `true` streams to completion, closes the item as done, and carries NO failure trailer", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "true");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+    expect(result.kind).toBe("stream");
+    if (result.kind !== "stream") throw new Error("expected a stream");
+    const output = await readStreamText(result.stream);
+
+    expect(deriveInbox(home)).toEqual([]);
+    expect(readHumanEvents(home)[0]).toMatchObject({ data: { ref: ID_AFTER_START, outcome: "done" } });
+    expect(output).not.toContain(RUN_FAILURE_MARKER);
+    expect(parseRunOutput(output).error).toBeUndefined();
+  });
+
+  /**
+   * Review fix: "anything else stays open WITH THE ERROR" (spec) — `false`
+   * prints NOTHING of its own, so without an explicit trailer the stream
+   * would end silently and the card would read as a no-op, never a
+   * failure. The stream's own last bytes must carry that signal.
+   */
+  test("a stored `false` streams to completion, leaves the item open, and ends with the es-AR failure trailer naming the exit code", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "false");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+    if (result.kind !== "stream") throw new Error("expected a stream");
+    const output = await readStreamText(result.stream);
+
+    expect(deriveInbox(home)).toHaveLength(1); // still open
+    expect(readHumanEvents(home)).toEqual([]);
+    expect(output).toContain(`${RUN_FAILURE_MARKER}1`);
+    const parsed = parseRunOutput(output);
+    expect(parsed.body).toBe(""); // `false` itself printed nothing
+    expect(parsed.error).toBe(`${RUN_FAILURE_MARKER}1`);
+  });
+
+  test("a non-zero exit with real stdout/stderr output still appends the trailer AFTER the command's own output", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "echo falló; exit 3");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+    if (result.kind !== "stream") throw new Error("expected a stream");
+    const output = await readStreamText(result.stream);
+
+    const parsed = parseRunOutput(output);
+    expect(parsed.body).toBe("falló");
+    expect(parsed.error).toBe(`${RUN_FAILURE_MARKER}3`);
+  });
+
+  test("spawning the shell itself throws → reports spawn-failed, with no stream and no Event", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "true");
+    process.env.TENAZA_RUN_SHELL = path.join(tmpdir(), "tenaza-no-such-shell-binary-at-all");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+
+    expect(result.kind).toBe("spawn-failed");
+    if (result.kind !== "spawn-failed") throw new Error("expected spawn-failed");
+    expect(result.message.length).toBeGreaterThan(0);
+    expect(readHumanEvents(home)).toEqual([]);
+    expect(deriveInbox(home)).toHaveLength(1); // still open — nothing ran
+  });
+
+  test("runs in the REQUESTING Session's OWN cwd, through a LOGIN shell — never the Daemon's own current directory", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "tenaza-run-stream-cwd-"));
+    try {
+      startSession(home, "sess-1", cwd);
+      openItem(home, "sess-1", "pwd");
+
+      const result = startInboxItemRunStream(home, ID_AFTER_START);
+      if (result.kind !== "stream") throw new Error("expected a stream");
+      const output = await readStreamText(result.stream);
+
+      expect(realpathSync(output.trim())).toBe(realpathSync(cwd));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("the stream carries the command's combined stdout+stderr", async () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "echo out; echo err 1>&2");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+    if (result.kind !== "stream") throw new Error("expected a stream");
+    const output = await readStreamText(result.stream);
+
+    expect(output).toContain("out");
+    expect(output).toContain("err");
+  });
+
+  test("an already-resolved item refuses OUTRIGHT — no process spawned, same shape the CLI path reports", async () => {
+    startSession(home, "sess-1");
+    const marker = path.join(home, "marker");
+    openItem(home, "sess-1", `touch ${marker}`);
+    resolveInboxItem(home, ID_AFTER_START, "dismissed");
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+
+    expect(result).toEqual({ kind: "already-resolved" });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("an unblocked (YA CORRIÓ) item refuses — never a second execution", async () => {
+    const marker = path.join(home, "marker");
+    openUnblockedItem(home, "sess-1", `touch ${marker}`);
+
+    const result = startInboxItemRunStream(home, ID);
+
+    expect(result).toEqual({ kind: "unblockable" });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("an mcp item refuses as not-runnable — it has no stored shell command", async () => {
+    openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
+
+    const result = startInboxItemRunStream(home, ID);
+
+    expect(result).toEqual({ kind: "not-runnable" });
+  });
+
+  test("no session.started at all refuses as no-cwd, never runs anywhere", async () => {
+    const marker = path.join(home, "marker");
+    openItem(home, "sess-1", `touch ${marker}`);
+
+    const result = startInboxItemRunStream(home, ID);
+
+    expect(result).toMatchObject({ kind: "no-cwd", command: `touch ${marker}` });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("a cwd that no longer exists refuses as cwd-missing", async () => {
+    const removed = mkdtempSync(path.join(tmpdir(), "tenaza-run-stream-removed-"));
+    rmSync(removed, { recursive: true, force: true });
+    startSession(home, "sess-1", removed);
+    const marker = path.join(home, "marker");
+    openItem(home, "sess-1", `touch ${marker}`);
+
+    const result = startInboxItemRunStream(home, ID_AFTER_START);
+
+    expect(result).toMatchObject({ kind: "cwd-missing", cwd: removed, command: `touch ${marker}` });
+  });
+
+  test("an unknown id throws UnknownInboxItemError, same as the CLI path", () => {
+    startSession(home, "sess-1");
+    openItem(home, "sess-1", "true");
+
+    expect(() => startInboxItemRunStream(home, UNKNOWN_ID)).toThrow(UnknownInboxItemError);
   });
 });

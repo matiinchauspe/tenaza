@@ -6,7 +6,7 @@ import { decideAction } from "../src/decide";
 import { appendEvent } from "../src/log";
 import { renderStatus } from "../src/status";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { sessionStartedEvent } from "../src/contract/event";
+import { sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
 
 describe("renderStatus", () => {
   let home: string;
@@ -78,6 +78,29 @@ effect = "human"
     const inboxIndex = output.indexOf("Inbox:");
     expect(treeIndex).toBeGreaterThanOrEqual(0);
     expect(inboxIndex).toBeGreaterThan(treeIndex);
+    expect(output).toContain("#1  Bash: gh pr merge 58");
+  });
+
+  test("an ENDED Session reads ended in the tree; its open Inbox item still shows in the Inbox on its own (ticket 05, #1436's stale 'te espera' fix)", async () => {
+    // The real dogfood bug (2026-10-25, engram #1436: Session '55e06de1'):
+    // the Session triggers a human-Rule match (denied), then ends normally
+    // — but the tree kept reading "⏸ te espera" forever because the open
+    // Inbox item outranked `endedAt`. Fixed: the tree shows "cerró"; the
+    // Inbox block lists the item regardless, completely independently.
+    appendEvent(
+      home,
+      sessionStartedEvent("55e06de1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe", "block"] }),
+    );
+    await decideAction(home, "55e06de1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    appendEvent(home, sessionEndedEvent("55e06de1", "clear"));
+
+    const output = renderStatus(home);
+
+    const treeLine = output.split("\n").find((line) => line.includes("55e06de1"))!;
+    expect(treeLine).toContain("cerró");
+    expect(treeLine).not.toContain("te espera");
+    expect(treeLine).not.toContain("⏸");
+    expect(output).toContain("Inbox:");
     expect(output).toContain("#1  Bash: gh pr merge 58");
   });
 });

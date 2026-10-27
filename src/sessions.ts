@@ -86,12 +86,17 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
 }
 
 /**
- * This Session's OWN category — before any rollup from descendants. An open
- * Inbox item outranks everything else, even a Session that also ended (the
- * ticket's own priority order, applied here too, not just across the tree).
+ * This Session's OWN category — before any rollup from descendants. ENDED
+ * beats an open Inbox item (ticket 05, #1436's own fix — flipped from the
+ * priority ticket 03 originally gave this check): a Session that already
+ * finished is never shown "te espera" just because a `human`-Rule match it
+ * triggered before ending is still unresolved. That match stays visible in
+ * the Inbox on its own (`deriveInbox`), independent of this Session's row —
+ * an open Inbox item only promotes a STILL-RUNNING Session to "waits".
+ * (`rollupCategory`'s own waits > alive > done > ended priority, below, is
+ * unaffected: it ranks a PARENT against its descendants, never this check.)
  */
 export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): SessionCategory {
-  if (waiting.has(node.id)) return "waits";
   if (node.endedAt !== undefined) {
     // An ended Session WITH a parent is a subagent finishing its work ("done");
     // an ended Session with no parent is the top-level Session closing ("ended").
@@ -99,6 +104,7 @@ export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): S
     // `reason` — a build-time judgment call (ticket 03), not spec-mandated.
     return node.parent !== undefined ? "done" : "ended";
   }
+  if (waiting.has(node.id)) return "waits";
   return "alive";
 }
 
@@ -183,11 +189,45 @@ export function deriveProject(
   return resolveGitRoot(node.cwd) ?? node.cwd;
 }
 
+/**
+ * Claude Code's own internal side-agents (ticket 05 — #1436's "~85 phantom
+ * Sessions" measured on the human's real `tenaza status`, 2026-10-25): a
+ * Session whose ENTIRE observed log is its own end plus a Usage sample —
+ * no `session.started` even after `adapters/claude.ts`'s own M6 backfill
+ * (the triggering Events never carried a `cwd` to backfill FROM), no
+ * Policy match, no Label. There is nothing useful to show for it, so
+ * `renderSessionTree` hides it rather than rendering a permanent
+ * "(sin proyecto) sin datos cerró" row forever.
+ */
+export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>): boolean {
+  return eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled");
+}
+
+/** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. */
+function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
+  const map = new Map<string, Set<Event["type"]>>();
+  for (const event of events) {
+    const types = map.get(event.session) ?? new Set();
+    types.add(event.type);
+    map.set(event.session, types);
+  }
+  return map;
+}
+
 function byStartedThenId(a: SessionNode, b: SessionNode): number {
   return (a.startedAt ?? "").localeCompare(b.startedAt ?? "") || a.id.localeCompare(b.id);
 }
 
-/** Every Session that names `parent` as its own parent, sorted chronologically. */
+/**
+ * Every Session that names `parent` as its own parent, sorted
+ * chronologically — ALWAYS, regardless of project (spec: "a subagent
+ * renders once, under its parent, even across projects"). Project is never
+ * a reason to split a child from its parent; it only decides which group a
+ * Session with NO renderable parent becomes a root of (`groupRootsByProject`
+ * below). `nodes` has already dropped noise (`isNoiseSession`), so a child
+ * whose parent WAS noise, or was never observed at all, simply finds
+ * nothing here and surfaces as its own root there instead.
+ */
 function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
   const map = new Map<string, SessionNode[]>();
   for (const node of nodes) {
@@ -201,24 +241,27 @@ function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
 }
 
 /**
- * Group every Session under its derived project. A Session whose parent
- * lands in the SAME group is never a root there — it nests under that
- * parent in the walk instead. A Session whose parent is absent, unknown, or
- * in a DIFFERENT group becomes a root in its OWN group, so a cross-project
- * subagent is never lost.
+ * Group every Session under its derived project. A Session IS a root of
+ * its own project group exactly when it has no RENDERABLE parent — no
+ * `parent` at all, or a `parent` id that names no surviving node (never
+ * observed, or filtered out as noise). Project is deliberately NOT part of
+ * this test (ticket 05 fix — a previous version of this function made a
+ * cross-project child a root here too, which rendered it TWICE alongside
+ * `childrenIndex` nesting it under its parent; the spec's own line is
+ * explicit that a subagent nests under its parent "even across projects",
+ * so a known parent always wins). A Session with a renderable parent is
+ * never a root here — `childrenIndex` nests it instead.
  */
 function groupRootsByProject(
   nodes: SessionNode[],
-  resolveGitRoot?: (cwd: string) => string | undefined,
+  projectOf: ReadonlyMap<string, string>,
 ): Map<string, SessionNode[]> {
-  const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const projectOf = new Map(nodes.map((n) => [n.id, deriveProject(n, resolveGitRoot)] as const));
+  const ids = new Set(nodes.map((node) => node.id));
   const groups = new Map<string, SessionNode[]>();
 
   for (const node of nodes) {
     const project = projectOf.get(node.id) ?? UNKNOWN_PROJECT;
-    const parent = node.parent !== undefined ? byId.get(node.parent) : undefined;
-    const isRoot = parent === undefined || projectOf.get(parent.id) !== project;
+    const isRoot = node.parent === undefined || !ids.has(node.parent);
     if (!isRoot) continue;
 
     const roots = groups.get(project) ?? [];
@@ -310,8 +353,9 @@ function renderNode(
  * `tenaza status`'s Session tree, grouped per project — the spec's variant
  * D, now WITH the context bar (ticket 04, q9): 15 cells over 300k, a `┊`
  * mark at the Policy's threshold (default 200k), red past it, and the
- * number as `243k` / `⚑243k`. Empty when no Session has ever been observed,
- * so it adds nothing to a fresh `status` (ticket 01/02's own output stays
+ * number as `243k` / `⚑243k`. Empty when no Session has ever been observed
+ * — or when every observed Session was noise (ticket 05, `isNoiseSession`)
+ * — so it adds nothing to a fresh `status` (ticket 01/02's own output stays
  * unchanged).
  */
 export function renderSessionTree(home: string = tenazaHome(), now: Date = new Date()): string {
@@ -319,10 +363,17 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   if (events.length === 0) return "";
 
   const index = buildSessionIndex(events);
-  const nodes = [...index.values()];
+  const eventTypes = eventTypesBySession(events);
+  const nodes = [...index.values()].filter((node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()));
+  if (nodes.length === 0) return "";
+
+  // `projectOf` only feeds `groupRootsByProject` now — `childrenIndex`
+  // nests purely on `parent`, never on project (ticket 05 fix: a subagent
+  // nests under its parent even across projects, per spec).
+  const projectOf = new Map(nodes.map((node) => [node.id, deriveProject(node)] as const));
   const childrenOf = childrenIndex(nodes);
   const waiting = new Set(deriveInbox(home).map((row) => row.session));
-  const groups = groupRootsByProject(nodes);
+  const groups = groupRootsByProject(nodes, projectOf);
   const thresholdTokens = loadPolicy(home).thresholdTokens;
 
   const lines: string[] = [];

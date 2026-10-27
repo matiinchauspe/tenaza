@@ -8,6 +8,7 @@ import {
   buildSessionIndex,
   categoryWord,
   deriveProject,
+  isNoiseSession,
   isStalled,
   nodeCategory,
   renderSessionTree,
@@ -104,13 +105,26 @@ describe("nodeCategory and rollupCategory", () => {
     expect(nodeCategory(node, new Set())).toBe("alive");
   });
 
-  test("a Session with an open Inbox item waits for the human, even over ended", async () => {
+  test("a STILL-RUNNING Session with an open Inbox item waits for the human", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(nodeCategory(node, new Set(["sess-1"]))).toBe("waits");
+  });
+
+  test("an ENDED Session reads ended, even with an open Inbox item (ticket 05, #1436's stale 'te espera' fix)", async () => {
+    // The real dogfood bug (2026-10-25): a Session that triggered a
+    // `human`-Rule match, then ended normally, read "⏸ te espera" forever
+    // because the open Inbox item outranked `endedAt`. Ended now wins —
+    // the Inbox item itself still surfaces independently (`deriveInbox`,
+    // proven at the `renderStatus` seam in status.test.ts).
     const index = buildSessionIndex([
       sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
       sessionEndedEvent("sess-1", "clear"),
     ]);
     const node = index.get("sess-1")!;
-    expect(nodeCategory(node, new Set(["sess-1"]))).toBe("waits");
+    expect(nodeCategory(node, new Set(["sess-1"]))).toBe("ended");
   });
 
   test("an ended subagent (has a parent) reads as done; an ended top-level Session reads as ended", async () => {
@@ -242,6 +256,35 @@ describe("isStalled / categoryWord", () => {
     expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
     expect(categoryWord("done", true)).toBe(categoryWord("done", false));
     expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+  });
+});
+
+describe("isNoiseSession (ticket 05 — #1436's '~85 phantom Sessions' finding)", () => {
+  test("a Session whose ONLY Events are session.ended + usage.sampled is noise", () => {
+    expect(isNoiseSession(new Set(["session.ended", "usage.sampled"]))).toBe(true);
+  });
+
+  test("a Session that ended with NO usage sample at all is NOT noise — the literal shape needs BOTH", () => {
+    expect(isNoiseSession(new Set(["session.ended"]))).toBe(false);
+  });
+
+  test("a usage.sampled with no session.ended yet is never noise — the Session hasn't ended", () => {
+    expect(isNoiseSession(new Set(["usage.sampled"]))).toBe(false);
+    expect(isNoiseSession(new Set())).toBe(false);
+  });
+
+  test("a Session with a real session.started is never noise, even if it also ended", () => {
+    expect(isNoiseSession(new Set(["session.started", "session.ended", "usage.sampled"]))).toBe(false);
+  });
+
+  test("a Session with an action.decided (a real Policy match) is never noise, even with no session.started", () => {
+    // The ticket 01/02 "lifecycle-less fixture" case: a real Inbox item
+    // must never be hidden just because it also happens to have ended.
+    expect(isNoiseSession(new Set(["action.decided", "session.ended"]))).toBe(false);
+  });
+
+  test("a Session with a session.labeled announce is never noise", () => {
+    expect(isNoiseSession(new Set(["session.labeled", "session.ended", "usage.sampled"]))).toBe(false);
   });
 });
 
@@ -414,5 +457,63 @@ effect = "human"
     expect(line).not.toContain("⚑");
     expect(line).not.toContain("█");
     expect(line).not.toContain("░");
+  });
+
+  // Shaped after the human's real `tenaza status`, read 2026-10-25 against
+  // ~/.tenaza/state/sessions/ (engram #1436) — the actual Session ids,
+  // end reason and token count, with cwds swapped for temp-safe paths
+  // since we can't spawn against his real home.
+  test("a phantom internal side-agent (#1436: 'a41df3047775c4252', ~85 of these on the real status) never appears at all", async () => {
+    appendEvent(home, sessionEndedEvent("a41df3047775c4252", "subagent_stop"));
+    appendEvent(home, usageSampledEvent("a41df3047775c4252", { context_tokens: 185_775 }));
+    // One real Session too, so the tree isn't empty for an unrelated reason.
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }));
+
+    const out = renderSessionTree(home);
+
+    expect(out).not.toContain("a41df3047775c4252");
+    expect(out).toContain("sess-1");
+  });
+
+  test("a home where EVERY observed Session is a phantom side-agent renders no tree at all, same as truly empty", async () => {
+    appendEvent(home, sessionEndedEvent("a41df3047775c4252", "subagent_stop"));
+    appendEvent(home, usageSampledEvent("a41df3047775c4252", { context_tokens: 185_775 }));
+
+    expect(renderSessionTree(home)).toBe("");
+  });
+
+  test("a subagent with a known parent (#1436: '55e06de1' / 'a322c9c646287386a') nests under it ONCE, even across projects (spec: nesting beats project)", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), '\n[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+
+    // The parent ('55e06de1') is known only through a human-Rule match —
+    // no session.started, so it groups under "(sin proyecto)" exactly as
+    // ticket 01/02's own fixtures already do.
+    await decideAction(home, "55e06de1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    // The subagent DOES know its own cwd — a real, DIFFERENT project. Spec
+    // line 328: "a subagent renders once, under its parent, even across
+    // projects" — a known parent always wins over project.
+    appendEvent(
+      home,
+      sessionStartedEvent("a322c9c646287386a", {
+        parent: "55e06de1",
+        runtime: "claude",
+        cwd: "/tmp/scratch/oarfish",
+        capabilities: [],
+      }),
+    );
+
+    const out = renderSessionTree(home);
+
+    expect(out).toContain("(sin proyecto)");
+    // No SECOND top-level group for the subagent's own project — it never
+    // becomes a root there.
+    expect(out).not.toContain("/tmp/scratch/oarfish");
+    // Exactly one line carries the subagent's id — nested under its
+    // parent, never also a root elsewhere.
+    const lines = out.split("\n").filter((l) => l.includes("a322c9c646287386a"));
+    expect(lines).toHaveLength(1);
+    // Nested (not a root): the renderer's own non-root indentation marker.
+    expect(lines[0]).toContain("└");
   });
 });

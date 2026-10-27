@@ -11,7 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, approvalResolvedEvent, sessionStartedEvent } from "../src/contract/event";
+import { actionDecidedEvent, approvalResolvedEvent, sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+import { readFocusRecorder } from "../src/focus";
 import { isHeartbeatFresh, readDaemonToken, readOpenRecorder, DEFAULT_HEARTBEAT_STALE_MS } from "../src/daemon";
 import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
@@ -1023,5 +1024,338 @@ describe("write route — answer (ticket 10)", () => {
     } finally {
       await daemon.stop();
     }
+  });
+});
+
+/**
+ * `POST /sessions/<id>/focus` (decision 09, ticket 11): drives the SAME
+ * black-box seam every other write route is already tested through — a
+ * REAL `tenaza ui` process over real HTTP. The spawned process inherits
+ * `process.env` (`spawnDaemon`'s own default), which already carries
+ * `TENAZA_FOCUS_RECORDER=1` from this repo's `bunfig.toml` preload — so the
+ * Daemon's own focus route records its plan instead of ever touching a
+ * real `tmux`/`osascript`/`open`, and this test reads that recording back
+ * straight off disk (`readFocusRecorder`), the same convention
+ * `readOpenRecorder` already uses elsewhere in this file.
+ */
+describe("write route — focus (ticket 11)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-focus-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a captured locator's own exact command plus a Level-1 raise are recorded, token required", async () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: home,
+        capabilities: ["observe", "block"],
+        terminal: { termProgram: "Apple_Terminal", tty: "/dev/ttys003" },
+      }),
+    );
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const bare = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/focus`, { method: "POST" });
+      expect(bare.status).toBe(403);
+      expect(readFocusRecorder(home)).toEqual([]);
+
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/focus`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, level: "exact" });
+
+      // Apple Terminal's own `activate` already raises the window
+      // (`raisesWindow: true`, `terminals.ts`) — exactly ONE step, never a
+      // separate Level-1 `open -b` alongside it.
+      const steps = readFocusRecorder(home);
+      expect(steps).toHaveLength(1);
+      expect(steps[0]?.kind).toBe("osascript");
+      expect((steps[0] as { kind: "osascript"; script: string }).script).toContain('tty of t is "/dev/ttys003"');
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a subagent's focus resolves to its PARENT's terminal — never its own (it never captures one at all)", async () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: home,
+        capabilities: ["observe", "block"],
+        terminal: { bundleId: "com.stablyai.orca", orcaHandle: "term_parent" },
+      }),
+    );
+    appendEvent(
+      home,
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: home, capabilities: ["observe"] }),
+    );
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/agent-1/focus`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+
+      const steps = readFocusRecorder(home);
+      expect(steps[0]).toEqual({
+        kind: "spawn",
+        argv: ["/Applications/Orca.app/Contents/Resources/bin/orca", "terminal", "switch", "--terminal", "term_parent"],
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a Session with no terminal locator at all (legacy v0.1 data) still answers 200 with level unknown, recording nothing", async () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/focus`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, level: "unknown" });
+      expect(readFocusRecorder(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an unknown Session id 404s", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/no-such-session/focus`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("the built-in fence covers the focus route too — an agent targeting it is denied and lands in the Inbox", async () => {
+    // No Daemon spawned here at all (unlike the `answer` route's own fence
+    // test, which legitimately needs one up to prove the route itself) —
+    // the fence match is a plain TEXT pattern, independent of whether a
+    // real Daemon is running; with none up, `daemon.alive` is absent and
+    // the match denies AT ONCE, exactly like the plain `/items/` fence
+    // tests above. Spawning one here would send this match LIVE instead
+    // (a fresh heartbeat), holding for the default ~180s wait window with
+    // nobody ever answering it — the bug this comment exists to prevent
+    // from recurring.
+    const result = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-2",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: `curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-1/focus` },
+      }),
+    });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+});
+
+/**
+ * `POST /sessions/<id>/archive` (ticket 11, added 2026-10-27): "tested over
+ * HTTP and at the board" (ticket) — this suite covers both halves: the
+ * write route itself, AND (the last test) that an archived Session's card
+ * actually disappears from the very next `/events` push.
+ */
+describe("write route — archive (ticket 11)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-archive-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function endedSession(id: string): void {
+    appendEvent(home, sessionStartedEvent(id, { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    appendEvent(home, sessionEndedEvent(id, "clear"));
+  }
+
+  test("archives an ended Session, 200, token required", async () => {
+    endedSession("sess-1");
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const bare = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, { method: "POST" });
+      expect(bare.status).toBe(403);
+
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, alreadyArchived: false });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a Session that never ended refuses with 409 not-ended — x on any other card does nothing", async () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "not-ended" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("archiving twice is idempotent — 200 both times, only one Event ever written", async () => {
+    endedSession("sess-1");
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const first = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ ok: true, alreadyArchived: false });
+
+      const second = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(second.status).toBe(200);
+      expect(await second.json()).toEqual({ ok: true, alreadyArchived: true });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an unknown Session id 404s", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemon.port}/sessions/no-such-session/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("AT THE BOARD: an archived Session's card disappears from the very next /events push", async () => {
+    endedSession("sess-1");
+    const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_SSE_POLL_MS: "50" } });
+    try {
+      const before = await fetch(`http://127.0.0.1:${daemon.port}/events`);
+      const beforeReader = before.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const readOneFrame = async (): Promise<{ sessions: { id: string }[] }> => {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const idx = buffer.indexOf("\n\n");
+          if (idx !== -1) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+            if (dataLine) return JSON.parse(dataLine.slice("data: ".length));
+            continue;
+          }
+          const { value, done } = await beforeReader.read();
+          if (done) throw new Error("SSE stream closed early");
+          buffer += decoder.decode(value, { stream: true });
+        }
+      };
+
+      const initial = await readOneFrame();
+      expect(initial.sessions.map((s) => s.id)).toContain("sess-1");
+
+      const archiveRes = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(archiveRes.status).toBe(200);
+
+      const afterArchive = await readOneFrame();
+      expect(afterArchive.sessions.map((s) => s.id)).not.toContain("sess-1");
+
+      await beforeReader.cancel();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  /**
+   * Orchestrator review, 2026-10-27: `archivedSessionIds` + `buildBoardPayload`
+   * used to hide a Session FOREVER once a `session.archived` Event existed
+   * — but a Claude Code Session can be RESUMED (`claude --resume`/
+   * `--continue`) under the SAME `session_id`, firing SessionStart again.
+   * TIME IS STATE / "every failure visible": a real SessionStart hook call
+   * (never an artificial fixed timestamp — this is a genuinely LATER real
+   * Event, strictly after the archive above in actual wall-clock time, no
+   * gap-sizing needed) must bring the card back.
+   */
+  test("AT THE BOARD: a RESUMED Session (fresh SessionStart after being archived) comes back — never hidden forever", async () => {
+    endedSession("sess-1");
+    const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_SSE_POLL_MS: "50" } });
+    try {
+      const archiveRes = await fetch(`http://127.0.0.1:${daemon.port}/sessions/sess-1/archive`, {
+        method: "POST",
+        headers: { cookie: `tenaza_token=${daemon.token}` },
+      });
+      expect(archiveRes.status).toBe(200);
+
+      const sse = await connectEvents(daemon.port);
+      const hidden = await sse.nextEvent(2000);
+      expect((hidden.sessions as { id: string }[]).map((s) => s.id)).not.toContain("sess-1");
+
+      // The Session RESUMES under the SAME session_id — a real SessionStart
+      // hook call, strictly after the archive above.
+      const resumeResult = await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({ session_id: "sess-1", hook_event_name: "SessionStart", cwd: home }),
+      });
+      expect(resumeResult.exitCode).toBe(0);
+
+      const visibleAgain = await sse.nextEvent(3000);
+      expect((visibleAgain.sessions as { id: string }[]).map((s) => s.id)).toContain("sess-1");
+
+      await sse.cancel();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("the built-in fence covers the archive route too — an agent targeting it is denied and lands in the Inbox", async () => {
+    // Same reasoning as the focus route's own fence test above: no Daemon
+    // spawned, so the match denies at once rather than going live.
+    const result = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-2",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: `curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-1/archive` },
+      }),
+    });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });

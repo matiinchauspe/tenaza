@@ -1,7 +1,7 @@
-import type { Action, Capability, Event } from "./contract/event";
+import type { Action, Capability, Event, TerminalLocator } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
-import { readAllSessionEvents, readSessionEvents } from "./log";
+import { readAllSessionEvents, readHumanEvents, readSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 
@@ -44,6 +44,15 @@ export interface SessionNode {
   contextTokens?: number;
   /** The Action from the LATEST `action.decided` Event (ticket 08's "last signal" — what this Session most recently attempted, allowed or not). Last write wins, same convention as `contextTokens`; `undefined` means it has never attempted a matched or recorded Action. */
   lastAction?: Action;
+  /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
+  terminalLocator?: TerminalLocator;
+}
+
+/** Thrown by every Session-scoped operation (the focus and archive write routes, `daemon.ts`/`resolve.ts`, ticket 11) when an id names no observed Session at all. */
+export class UnknownSessionError extends Error {
+  constructor(public readonly id: string) {
+    super(`unknown session ${id}`);
+  }
 }
 
 function emptyNode(id: string): SessionNode {
@@ -72,6 +81,7 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.cwd = event.data.cwd;
       node.capabilities = event.data.capabilities;
       node.startedAt = event.ts;
+      node.terminalLocator = event.data.terminal;
     } else if (event.type === "session.ended") {
       node.endedAt = event.ts;
       node.endedReason = event.data.reason;
@@ -222,6 +232,56 @@ export function deriveProject(
  */
 export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>): boolean {
   return eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled");
+}
+
+/**
+ * Ticket 11's "archive a TERMINÓ card": every Session id's LATEST
+ * `session.archived` Event ts, read from the human log's own Events (ADR
+ * 0002 — no state beside the logs; the Daemon's write route appended one
+ * there, never a side file). Scanned fresh on every read, same convention
+ * as every other derived state in this project.
+ *
+ * Orchestrator review, 2026-10-27: a Claude Code Session can be RESUMED
+ * (`claude --resume`/`--continue`) under the SAME `session_id`, firing
+ * SessionStart/tool Events again long after it was archived — so a human
+ * may archive, resume, run, and eventually archive the SAME Session a
+ * SECOND time. Collapsing to the newest ts here (never a bare `Set`,
+ * which this function used to return) is what lets `isArchived` below
+ * tell "still archived" apart from "was archived once, but that's stale
+ * now" — an EARLIER archive Event is never deleted (ADR 0002 never
+ * rewrites a line), only superseded by comparing timestamps.
+ */
+export function latestArchiveTimestamps(home: string = tenazaHome()): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const event of readHumanEvents(home)) {
+    if (event.type !== "session.archived") continue;
+    const current = map.get(event.session);
+    if (!current || event.ts > current) map.set(event.session, event.ts);
+  }
+  return map;
+}
+
+/**
+ * TIME IS STATE (orchestrator review, 2026-10-27): an archive hides a
+ * Session's card from the board only while NOTHING of that Session
+ * happened AFTER it — never permanently. `archivedAt` is this Session's
+ * own latest archive ts (`latestArchiveTimestamps`, `undefined` when
+ * never archived at all); `lastEventTs` is the Session's own latest
+ * Event (`SessionNode.lastEventTs`, the same running max every other
+ * time-based check in this project already reads). A resumed Session —
+ * a fresh SessionStart or tool call landing AFTER the archive — makes
+ * `lastEventTs` newer than `archivedAt`, which is exactly what brings its
+ * card back, in whatever column its CURRENT state now puts it: visibility
+ * is re-evaluated fresh on every read, the same way `isStalled`/
+ * `sessionColumn` already re-evaluate against a ticking clock elsewhere —
+ * never a flag written once and trusted forever. Used ONLY by `daemon.ts`'s
+ * board payload and `resolve.ts`'s own re-archive check — never by
+ * `renderSessionTree` (`tenaza status`), since the spec scopes archiving
+ * to "hides that Session from the BOARD," not the CLI.
+ */
+export function isArchived(archivedAt: string | undefined, lastEventTs: string | undefined): boolean {
+  if (archivedAt === undefined) return false;
+  return lastEventTs === undefined || lastEventTs <= archivedAt;
 }
 
 /** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */

@@ -91,6 +91,24 @@ function buildWriteRoutePattern(port: number): RegExp {
 
 const WRITE_ROUTE_PATTERN = buildWriteRoutePattern(DEFAULT_DAEMON_PORT);
 
+/**
+ * Ticket 11's own write routes: `/sessions/<id>/focus` and
+ * `/sessions/<id>/archive` — neither nests under `/items/`, so (per this
+ * file's own `DAEMON_WRITE_ROUTE_ACTIONS` doc comment, which called this
+ * exact case out when ticket 09 wrote it) they get their OWN pattern here
+ * rather than widening `WRITE_ROUTE_PATTERN` above to a shape it was never
+ * meant to cover.
+ */
+export const DAEMON_SESSION_ROUTE_ACTIONS: readonly string[] = ["focus", "archive"];
+
+function buildSessionRoutePattern(port: number): RegExp {
+  const host = `(?:${DAEMON_HOSTS.join("|")})`;
+  const action = `(?:${DAEMON_SESSION_ROUTE_ACTIONS.join("|")})`;
+  return new RegExp(`(?:https?:\\/\\/)?${host}:${port}\\/sessions\\/[^\\s"'\`]+\\/${action}\\b`);
+}
+
+const SESSION_ROUTE_PATTERN = buildSessionRoutePattern(DEFAULT_DAEMON_PORT);
+
 /** The synthetic Rule a fence match logs onto `action.decided` — `match` names it as built-in so a skim of the Event log never mistakes it for a `policy.toml` entry. */
 export const BUILT_IN_FENCE_RULE: Rule = { match: "<built-in: daemon token/write-route fence>", effect: "human" };
 
@@ -105,5 +123,5 @@ export function matchesBuiltInFence(action: Action): boolean {
   if (action.kind !== "shell") return false;
   const { command } = action;
   if (command.includes(DAEMON_TOKEN_PATH_MARKER)) return true;
-  return WRITE_ROUTE_PATTERN.test(command);
+  return WRITE_ROUTE_PATTERN.test(command) || SESSION_ROUTE_PATTERN.test(command);
 }

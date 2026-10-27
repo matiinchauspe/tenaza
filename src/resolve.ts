@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import { liveItemPhase } from "./board";
-import { approvalResolvedEvent, liveAnsweredEvent, runFailedEvent } from "./contract/event";
+import { approvalResolvedEvent, liveAnsweredEvent, runFailedEvent, sessionArchivedEvent } from "./contract/event";
 import { findInboxRow, isResolved, type InboxRow } from "./inbox";
 import { LIVE_ANSWER_CUTOFF_MS } from "./live";
-import { appendHumanEvent } from "./log";
+import { appendHumanEvent, readSessionEvents } from "./log";
 import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import { runFailureTrailer } from "./runoutput";
-import { cwdForSession } from "./sessions";
+import { buildSessionIndex, cwdForSession, isArchived, latestArchiveTimestamps, UnknownSessionError } from "./sessions";
 
 /** Thrown by every resolution path when the id names no Inbox row at all. */
 export class UnknownInboxItemError extends Error {
@@ -304,4 +304,53 @@ export function postLiveAnswer(
 
   appendHumanEvent(home, liveAnsweredEvent(row.session, id, answer, message));
   return { kind: "accepted" };
+}
+
+// ---------------------------------------------------------------------------
+// Archive a TERMINÓ card (ticket 11, added 2026-10-27): a human Event in
+// the log (ADR 0002), through a token-protected write route.
+// ---------------------------------------------------------------------------
+
+/** Every reason the Daemon's `/sessions/<id>/archive` route refuses OUTRIGHT — nothing is ever appended. `"not-ended"` is the server-side half of "x on any other Session card does nothing" (spec): the UI only ever shows the control on a TERMINÓ card, but a stale card (an agent that resumed between the human's last render and their click) must not let the archive through regardless. Archiving an ALREADY-archived Session is never a refusal — see `ArchiveResult`'s own doc on why it's folded into `"accepted"` instead, same convention `resolveInboxItem`'s `alreadyResolved` already uses. */
+export type ArchiveRefusal = { kind: "not-ended" };
+
+/**
+ * `alreadyArchived` tells a repeat archive apart from the first — same
+ * shape `resolveInboxItem`'s `ResolveResult` already gives for `done`/
+ * `dismiss`: idempotent and harmless (a double click, a race between two
+ * tabs), never an error a human needs to see.
+ *
+ * Orchestrator review, 2026-10-27: `alreadyArchived` means "archived AND
+ * nothing of this Session happened since" (`sessions.ts`'s `isArchived`)
+ * — NEVER merely "an archive Event exists somewhere in this Session's
+ * past." A resumed Session (`claude --resume`/`--continue` under the same
+ * `session_id`) that ran and ended again is no longer archived by its OLD
+ * Event; archiving it now is a FRESH archive, appending a new one.
+ */
+export type ArchiveResult = ArchiveRefusal | { kind: "accepted"; alreadyArchived: boolean };
+
+/**
+ * Archive Session `sessionId` — hides its card from the board (ADR 0002:
+ * recorded as a human Event in the log, never a side file). Idempotent
+ * ONLY while nothing has happened since the Session's own latest archive —
+ * `isArchived` (`sessions.ts`) judges that against this Session's own
+ * `lastEventTs`, so a resumed-then-reended Session always gets a FRESH
+ * archive Event here rather than being silently treated as already done.
+ * Reading just THIS Session's own log is enough to know whether it has
+ * ended and when it last did anything at all — `session.ended` (and every
+ * resumed Session's later Events) are written there, not the human log —
+ * so this never needs the full cross-Session index `buildBoardPayload`
+ * builds; only the human log's own archive Events (`latestArchiveTimestamps`)
+ * come from elsewhere.
+ */
+export function archiveSession(home: string, sessionId: string): ArchiveResult {
+  const node = buildSessionIndex(readSessionEvents(sessionId, home)).get(sessionId);
+  if (!node) throw new UnknownSessionError(sessionId);
+  if (node.endedAt === undefined) return { kind: "not-ended" };
+
+  const archivedAt = latestArchiveTimestamps(home).get(sessionId);
+  if (isArchived(archivedAt, node.lastEventTs)) return { kind: "accepted", alreadyArchived: true };
+
+  appendHumanEvent(home, sessionArchivedEvent(sessionId));
+  return { kind: "accepted", alreadyArchived: false };
 }

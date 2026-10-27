@@ -57,6 +57,19 @@ export type SessionRole = z.infer<typeof SessionRoleSchema>;
  * as one shared shape so a renderer only needs ONE "tool: command, or just
  * tool" formatter (`viewModel.ts`'s `toolLabelFor`) for both.
  */
+/**
+ * Ticket 11 (decision 09): the STATIC, pre-click reach a card's own "ir a
+ * terminal ↗" / "abrir App ↗" / "terminal desconocida" label is built
+ * from — `src/terminals.ts`'s `reachFor`, computed server-side from the
+ * owning Session's (or, for a subagent, its PARENT's) captured terminal
+ * locator. Never the outcome of an actual click — that only ever happens
+ * live, inside the Daemon's own focus route, and is never reported back
+ * over this payload at all (fire-and-forget, same as every other write
+ * this board makes).
+ */
+export const TerminalReachSchema = z.enum(["exact", "app", "unknown"]);
+export type TerminalReach = z.infer<typeof TerminalReachSchema>;
+
 export const ActionSummarySchema = z.object({
   kind: z.enum(["shell", "mcp"]),
   /** The runtime's own tool name (e.g. "Bash", or an MCP tool's fully-qualified name). */
@@ -112,6 +125,12 @@ export const BoardSessionSchema = z.object({
   lastSignal: ActionSummarySchema.optional(),
   /** Ticket 10: every past resolution of a request THIS Session raised, newest first — empty when it never raised one. Always present (never `undefined`) so the client never special-cases its absence. */
   resolutions: z.array(ResolutionTraceEntrySchema),
+  /** Ticket 11: this Session's own static focus reach — `"unknown"` for legacy v0.1 data, or any environment the capture recognized nothing in. */
+  terminalReach: TerminalReachSchema,
+  /** Set whenever `terminalReach` is "exact" or "app" — the terminal app's own display name for the "abrir <App> ↗" label. `undefined` only for "unknown". */
+  terminalAppLabel: z.string().optional(),
+  /** True for a row behind a macOS Automation (TCC) prompt (Terminal.app, iTerm2, Ghostty) — the card's own "macOS va a pedir permiso" note. */
+  terminalNeedsTcc: z.boolean(),
 });
 export type BoardSession = z.infer<typeof BoardSessionSchema>;
 
@@ -136,6 +155,10 @@ export const BoardInboxItemSchema = z.object({
    * which `contract/live.ts`'s own doc comment rules out for this payload.
    */
   decision: z.enum(["allow", "deny", "held"]),
+  /** Ticket 11: "from any card" (spec) — a pending request's own card gets the same terminal button, resolved from its OWNING Session (`sessionId`) exactly like `project`/`ticket` already are. */
+  terminalReach: TerminalReachSchema,
+  terminalAppLabel: z.string().optional(),
+  terminalNeedsTcc: z.boolean(),
 });
 export type BoardInboxItem = z.infer<typeof BoardInboxItemSchema>;
 

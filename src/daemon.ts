@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Action } from "./contract/event";
-import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession, ResolutionTraceEntry } from "./contract/live";
+import type { Action, TerminalLocator } from "./contract/event";
+import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession, ResolutionTraceEntry, TerminalReach } from "./contract/live";
 import {
   buildDaemonUrl,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -14,6 +14,7 @@ import {
   writeAlive,
   writeDaemonToken,
 } from "./daemonlink";
+import { runFocusPlan } from "./focus";
 import { type InboxItem, deriveInbox, deriveResolutionTraceBySession } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import {
@@ -27,10 +28,12 @@ import {
 } from "./paths";
 import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import {
+  archiveSession,
   postLiveAnswer,
   resolveInboxItem,
   startInboxItemRunStream,
   UnknownInboxItemError,
+  type ArchiveRefusal,
   type ResolutionOutcome,
   type RunRefusal,
 } from "./resolve";
@@ -39,9 +42,13 @@ import {
   buildSessionIndex,
   deriveProject,
   eventTypesBySession,
+  isArchived,
   isNoiseSession,
+  latestArchiveTimestamps,
+  UnknownSessionError,
   type SessionNode,
 } from "./sessions";
+import { detectRow, planFocus, reachFor, resolveTmuxOuterLive, type LiveFacts } from "./terminals";
 import { TENAZA_VERSION } from "./version";
 import index from "./ui/index.html";
 
@@ -167,7 +174,31 @@ function toActionSummary(action: Action): ActionSummary {
   };
 }
 
-function toBoardSession(node: SessionNode, resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>): BoardSession {
+/**
+ * Ticket 11: this Session's own static terminal reach — "a subagent's card
+ * focuses its PARENT's terminal" (spec) resolved HERE, against the FULL
+ * (unfiltered) index, since a subagent's own `session.started` never
+ * carries a `terminal` field at all (`adapters/claude.ts`'s
+ * `handleSubagentStart`). `fullIndex` is the SAME index `buildBoardPayload`
+ * already built for `toBoardInboxItem`'s own project/ticket lookup — never
+ * a second rebuild.
+ */
+function terminalInfoFor(
+  node: SessionNode,
+  fullIndex: ReadonlyMap<string, SessionNode>,
+): { reach: TerminalReach; appLabel: string | undefined; needsTcc: boolean } {
+  const parent = node.parent !== undefined ? fullIndex.get(node.parent) : undefined;
+  const locator = (parent ?? node).terminalLocator;
+  const { level, appLabel, needsTcc } = reachFor(locator);
+  return { reach: level, appLabel, needsTcc };
+}
+
+function toBoardSession(
+  node: SessionNode,
+  resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>,
+  fullIndex: ReadonlyMap<string, SessionNode>,
+): BoardSession {
+  const terminal = terminalInfoFor(node, fullIndex);
   return {
     id: node.id,
     parentId: node.parent,
@@ -182,12 +213,21 @@ function toBoardSession(node: SessionNode, resolutions: ReadonlyMap<string, Reso
     lastSignal: node.lastAction ? toActionSummary(node.lastAction) : undefined,
     // Ticket 10: newest-first, already derived (`deriveResolutionTraceBySession`) — never re-sorted or re-filtered here.
     resolutions: resolutions.get(node.id) ?? [],
+    terminalReach: terminal.reach,
+    terminalAppLabel: terminal.appLabel,
+    terminalNeedsTcc: terminal.needsTcc,
   };
 }
 
 /** One pending Inbox item's board row — the owning Session's `project`/`ticket` resolved the SAME way a Session row's are, from the FULL (unfiltered) index: an Inbox item's own Session is never noise (it carries an `action.decided` Event, which `isNoiseSession` never matches), but resolving against the full index rather than the already-filtered list costs nothing and never depends on that happening to stay true. */
 function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, SessionNode>): BoardInboxItem {
   const session = fullIndex.get(row.session);
+  // Ticket 11: "from any card" (spec) — resolved from the OWNING Session,
+  // same convention `project`/`ticket` already use on this row. A Session
+  // this payload has never observed at all (should not happen — an Inbox
+  // item's own Session always carries at least its `action.decided` Event)
+  // degrades to "unknown," never a crash.
+  const terminal = session ? terminalInfoFor(session, fullIndex) : { reach: "unknown" as const, appLabel: undefined, needsTcc: false };
   return {
     id: row.id,
     sessionId: row.session,
@@ -197,6 +237,9 @@ function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, Session
     action: toActionSummary(row.action),
     blocked: row.blocked,
     decision: row.decision,
+    terminalReach: terminal.reach,
+    terminalAppLabel: terminal.appLabel,
+    terminalNeedsTcc: terminal.needsTcc,
   };
 }
 
@@ -215,8 +258,22 @@ export function buildBoardPayload(home: string): BoardPayload {
   const events = readAllSessionEvents(home);
   const fullIndex = buildSessionIndex(events);
   const eventTypes = eventTypesBySession(events);
+  // Ticket 11: an archived Session's card is hidden from the BOARD alone
+  // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered
+  // the SAME way noise already is, so a card that was both noise AND
+  // somehow archived (should never happen — noise carries no
+  // `action.decided` match, let alone an ended state to archive) is still
+  // dropped exactly once.
+  //
+  // Orchestrator review, 2026-10-27: NEVER a permanent Set of ever-archived
+  // ids — `isArchived` re-judges each node's OWN `lastEventTs` against its
+  // latest archive ts on every read, so a Session resumed after being
+  // archived (a fresh SessionStart/tool Event landing later) comes straight
+  // back the next time this is computed, exactly like every other
+  // time-based classification here (TIME IS STATE).
+  const archivedAt = latestArchiveTimestamps(home);
   const visibleSessions = [...fullIndex.values()].filter(
-    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()),
+    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()) && !isArchived(archivedAt.get(node.id), node.lastEventTs),
   );
   const policy = loadPolicy(home);
   const resolutions = deriveResolutionTraceBySession(home);
@@ -228,7 +285,7 @@ export function buildBoardPayload(home: string): BoardPayload {
       contextThresholdTokens: policy.thresholdTokens,
       waitSeconds: effectiveWaitSeconds(policy),
     },
-    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions)),
+    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions, fullIndex)),
     inbox: deriveInbox(home).map((row) => toBoardInboxItem(row, fullIndex)),
   };
 }
@@ -550,6 +607,90 @@ async function itemActionResponse(ctx: DaemonContext, pathname: string, req: Req
   return resolveItemResponse(ctx, id, action === "done" ? "done" : "dismissed");
 }
 
+// ---------------------------------------------------------------------------
+// Write routes (ticket 11): go to the agent's terminal + archive a card.
+// Neither shares `ITEM_ACTION_PATTERN`'s `/items/<id>/…` shape (`fence.ts`'s
+// own doc comment on why), so they get their own pattern and dispatcher.
+// ---------------------------------------------------------------------------
+
+/** `id` here is a SESSION id (Claude Code's own `session_id`/`agent_id`) — never an Inbox item's hash, and never constrained to a hex shape the way `ITEM_ACTION_PATTERN` is, since a runtime's own session ids are opaque strings this project does not define. */
+const SESSION_ACTION_PATTERN = /^\/sessions\/([^/]+)\/(focus|archive)$/;
+
+/**
+ * This Session's own locator (or, for a subagent, its PARENT's — "a
+ * subagent's card focuses its parent's terminal," spec) — resolved against
+ * the FULL cross-Session index, exactly like `toBoardSession`'s own
+ * `terminalInfoFor` does for the board payload, so a click and the card's
+ * own pre-click label can never resolve to two different terminals.
+ */
+function resolveFocusLocator(home: string, id: string): TerminalLocator | undefined {
+  const fullIndex = buildSessionIndex(readAllSessionEvents(home));
+  const node = fullIndex.get(id);
+  if (!node) throw new UnknownSessionError(id);
+  const parent = node.parent !== undefined ? fullIndex.get(node.parent) : undefined;
+  return (parent ?? node).terminalLocator;
+}
+
+/**
+ * `POST /sessions/<id>/focus` (decision 09, ticket 11): the Daemon runs the
+ * focus command ONLY on this click — never on its own (spec's own
+ * "never," ADR 0007's whole "Tenaza running any command on its own
+ * initiative" being out of scope). Resolves the live tmux outer app HERE,
+ * server-side, the one place a real process can be spawned — `planFocus`
+ * itself stays pure and never does. Fire-and-forget past that point, same
+ * shape every other port in this project already has: a failing or
+ * partial focus (the exact step failed, only the app raised) is never
+ * worse than before this ticket existed, so this always answers `{ ok:
+ * true }` once a plan was built at all; `level` rides along for the
+ * human's own curiosity, never asserted on by the view.
+ */
+function focusSessionResponse(ctx: DaemonContext, id: string): Response {
+  let locator: TerminalLocator | undefined;
+  try {
+    locator = resolveFocusLocator(ctx.home, id);
+  } catch (error) {
+    if (error instanceof UnknownSessionError) return new Response("not found\n", { status: 404 });
+    throw error;
+  }
+
+  const row = locator ? detectRow(locator) : undefined;
+  const liveFacts: LiveFacts = {};
+  if (row?.id === "tmux" && locator?.tmuxSocket) {
+    liveFacts.tmuxOuter = resolveTmuxOuterLive(locator.tmuxSocket);
+  }
+
+  const plan = planFocus(locator, liveFacts);
+  runFocusPlan(ctx.home, plan.steps);
+  return Response.json({ ok: true, level: plan.level });
+}
+
+/** A refusal `archiveSession` reported WITHOUT appending anything — "this Session's own state forbids it" (409), the same shape `runRefusalResponse`/`resolveItemResponse` already use for an Inbox item. */
+function archiveRefusalResponse(refusal: ArchiveRefusal): Response {
+  return Response.json({ error: refusal.kind }, { status: 409 });
+}
+
+/** `POST /sessions/<id>/archive` (ticket 11, added 2026-10-27): the human's `x`/archivar click on a TERMINÓ card. Idempotent — a repeat archive still 200s (`alreadyArchived: true`), same convention `/items/<id>/done` already follows. */
+function archiveSessionResponse(ctx: DaemonContext, id: string): Response {
+  try {
+    const result = archiveSession(ctx.home, id);
+    if (result.kind === "accepted") return Response.json({ ok: true, alreadyArchived: result.alreadyArchived });
+    return archiveRefusalResponse(result);
+  } catch (error) {
+    if (error instanceof UnknownSessionError) return new Response("not found\n", { status: 404 });
+    throw error;
+  }
+}
+
+/** Dispatch one `/sessions/<id>/<action>` write — same `undefined`-falls-through shape `itemActionResponse` already gives. */
+function sessionActionResponse(ctx: DaemonContext, pathname: string): Response | undefined {
+  const match = SESSION_ACTION_PATTERN.exec(pathname);
+  if (!match) return undefined;
+  const [, id, action] = match as unknown as [string, string, "focus" | "archive"];
+
+  if (action === "focus") return focusSessionResponse(ctx, id);
+  return archiveSessionResponse(ctx, id);
+}
+
 /**
  * The Daemon's routing table for everything `routes` (below) doesn't claim
  * (ticket 07, narrowed by ticket 08, extended by ticket 09). `GET /` moved
@@ -563,11 +704,12 @@ async function itemActionResponse(ctx: DaemonContext, pathname: string, req: Req
  * HERE — `/auth` validates the token itself, so it cannot sit behind the
  * token gate below. Everything else — any other path, any non-GET method,
  * including every write route ticket 09 (`run`, `done`, `dismiss`), ticket
- * 10 (`answer`) and ticket 11 (`focus`, if it shares this exact shape) add
- * — is DENIED BY DEFAULT unless it carries the token: `itemActionResponse`
- * is called only AFTER that gate, never wrapped around any route
- * individually, so there is no path to "write" here that could ever be
- * written without it.
+ * 10 (`answer`) and ticket 11 (`/sessions/<id>/focus`, `/sessions/<id>/archive`
+ * — their own pattern, never nested under `/items/`) add — is DENIED BY
+ * DEFAULT unless it carries the token: `itemActionResponse` and
+ * `sessionActionResponse` are called only AFTER that gate, never wrapped
+ * around any route individually, so there is no path to "write" here that
+ * could ever be written without it.
  */
 export function createFetchHandler(ctx: DaemonContext): (req: Request) => Response | Promise<Response> {
   return async (req: Request): Promise<Response> => {
@@ -582,7 +724,7 @@ export function createFetchHandler(ctx: DaemonContext): (req: Request) => Respon
     }
 
     if (req.method === "POST") {
-      const handled = await itemActionResponse(ctx, url.pathname, req);
+      const handled = (await itemActionResponse(ctx, url.pathname, req)) ?? sessionActionResponse(ctx, url.pathname);
       if (handled) return handled;
     }
 

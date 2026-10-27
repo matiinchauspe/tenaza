@@ -18,6 +18,8 @@ export function makeSession(overrides: Partial<BoardSession> = {}): BoardSession
     role: "sesión",
     hasMeasureCapability: true,
     resolutions: [],
+    terminalReach: "unknown",
+    terminalNeedsTcc: false,
     ...overrides,
   };
 }
@@ -35,6 +37,8 @@ export function makeInboxItem(
     action: { kind: "shell", tool: "Bash", command: "gh pr merge 58", ...action },
     blocked: true,
     decision: "deny",
+    terminalReach: "unknown",
+    terminalNeedsTcc: false,
     ...rest,
   };
 }

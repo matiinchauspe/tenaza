@@ -3,13 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
-import { appendEvent } from "../src/log";
+import { appendEvent, appendHumanEvent } from "../src/log";
 import {
   buildSessionIndex,
   categoryWord,
   deriveProject,
+  isArchived,
   isNoiseSession,
   isStalled,
+  latestArchiveTimestamps,
   nodeCategory,
   renderSessionTree,
   roleOf,
@@ -17,6 +19,7 @@ import {
 } from "../src/sessions";
 import {
   actionDecidedEvent,
+  sessionArchivedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
@@ -42,6 +45,39 @@ describe("buildSessionIndex", () => {
       cwd: "/repo",
       capabilities: ["observe", "block"],
     });
+  });
+
+  test("ticket 11: captures the terminal locator from session.started when one was recorded", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: ["observe"],
+        terminal: { termProgram: "Apple_Terminal", tty: "/dev/ttys003" },
+      }),
+    ]);
+    expect(index.get("sess-1")?.terminalLocator).toEqual({ termProgram: "Apple_Terminal", tty: "/dev/ttys003" });
+  });
+
+  test("ticket 11: no terminal field at all (legacy v0.1 data, or a backfilled session.started) leaves terminalLocator undefined — never a crash", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: ["observe"] }),
+    ]);
+    expect(index.get("sess-1")?.terminalLocator).toBeUndefined();
+  });
+
+  test("ticket 11: a subagent's session.started never carries a terminal field (adapters/claude.ts never captures one for SubagentStart) — resolving its PARENT's is the core's own job, not this index's", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: ["observe"],
+        terminal: { termProgram: "iTerm.app", tty: "/dev/ttys007" },
+      }),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    expect(index.get("agent-1")?.terminalLocator).toBeUndefined();
+    expect(index.get("sess-1")?.terminalLocator).toEqual({ termProgram: "iTerm.app", tty: "/dev/ttys007" });
   });
 
   test("a Session with no session.started still gets a node (ticket 01/02's lifecycle-less fixtures)", async () => {
@@ -544,5 +580,75 @@ effect = "human"
     expect(lines).toHaveLength(1);
     // Nested (not a root): the renderer's own non-root indentation marker.
     expect(lines[0]).toContain("└");
+  });
+});
+
+describe("latestArchiveTimestamps (ticket 11's 'archive a TERMINÓ card' — ADR 0002, a human Event in the log)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-archived-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("empty when nothing was ever archived", () => {
+    expect(latestArchiveTimestamps(home)).toEqual(new Map());
+  });
+
+  test("names every Session's own archive ts, from the human log", () => {
+    const a = { ...sessionArchivedEvent("sess-1"), ts: "2026-01-01T00:00:00.000Z" };
+    const b = { ...sessionArchivedEvent("sess-2"), ts: "2026-01-02T00:00:00.000Z" };
+    appendHumanEvent(home, a);
+    appendHumanEvent(home, b);
+    expect(latestArchiveTimestamps(home)).toEqual(
+      new Map([
+        ["sess-1", "2026-01-01T00:00:00.000Z"],
+        ["sess-2", "2026-01-02T00:00:00.000Z"],
+      ]),
+    );
+  });
+
+  test("orchestrator review: TWO archive Events for the SAME Session (archived, resumed, archived again) collapse to the NEWEST — the older one is never deleted, only superseded", () => {
+    appendHumanEvent(home, { ...sessionArchivedEvent("sess-1"), ts: "2026-01-01T00:00:00.000Z" });
+    appendHumanEvent(home, { ...sessionArchivedEvent("sess-1"), ts: "2026-01-03T00:00:00.000Z" });
+    expect(latestArchiveTimestamps(home)).toEqual(new Map([["sess-1", "2026-01-03T00:00:00.000Z"]]));
+  });
+
+  test("never scans a Session's OWN log — only the human log (archiving is a human Event, never written beside a Session's single-writer file)", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }));
+    expect(latestArchiveTimestamps(home)).toEqual(new Map());
+  });
+});
+
+/**
+ * Orchestrator review, 2026-10-27: an archive must never hide a Session
+ * FOREVER — a Claude Code Session can be RESUMED (`claude --resume`/
+ * `--continue`) under the same `session_id`, firing SessionStart/tool
+ * Events again long after it was archived. `isArchived` is the ONE place
+ * that judges whether an archive still holds, TIME IS STATE: re-evaluated
+ * fresh against each Session's own `lastEventTs` every time, never a flag
+ * written once and trusted forever.
+ */
+describe("isArchived — TIME IS STATE: an archive holds only while nothing happened since (ticket 11 fix)", () => {
+  test("never archived at all (archivedAt undefined) — never hidden", () => {
+    expect(isArchived(undefined, "2026-01-01T00:00:00.000Z")).toBe(false);
+  });
+
+  test("archived, nothing since (lastEventTs at or before the archive) — hidden", () => {
+    expect(isArchived("2026-01-02T00:00:00.000Z", "2026-01-01T00:00:00.000Z")).toBe(true);
+    // The boundary itself (the archive's own ts IS the Session's last
+    // known activity at the moment it was archived) still counts as hidden.
+    expect(isArchived("2026-01-02T00:00:00.000Z", "2026-01-02T00:00:00.000Z")).toBe(true);
+  });
+
+  test("resumed — a lastEventTs AFTER the archive brings the card back", () => {
+    expect(isArchived("2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z")).toBe(false);
+  });
+
+  test("a Session with no lastEventTs at all (should not arise for a real archived Session, which must have ended) still degrades to hidden rather than crashing", () => {
+    expect(isArchived("2026-01-01T00:00:00.000Z", undefined)).toBe(true);
   });
 });

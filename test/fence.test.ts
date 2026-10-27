@@ -51,6 +51,24 @@ describe("matchesBuiltInFence (decision 05, ticket 09) — pure, POSITIVE cases"
       matchesBuiltInFence(shell(`curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/items/abc/answer`)),
     ).toBe(true);
   });
+
+  test("ticket 11: a session write route — focus", () => {
+    expect(
+      matchesBuiltInFence(shell(`curl -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-1/focus`)),
+    ).toBe(true);
+  });
+
+  test("ticket 11: a session write route — archive", () => {
+    expect(
+      matchesBuiltInFence(shell(`curl localhost:${DEFAULT_DAEMON_PORT}/sessions/sess-1/archive`)),
+    ).toBe(true);
+  });
+
+  test("ticket 11: a session write route — the IPv6 loopback bracket form", () => {
+    expect(
+      matchesBuiltInFence(shell(`curl http://[::1]:${DEFAULT_DAEMON_PORT}/sessions/sess-1/focus`)),
+    ).toBe(true);
+  });
 });
 
 describe("matchesBuiltInFence — NEGATIVE cases (must NOT match — ordinary work, never fenced)", () => {
@@ -83,6 +101,28 @@ describe("matchesBuiltInFence — NEGATIVE cases (must NOT match — ordinary wo
     expect(
       matchesBuiltInFence({ kind: "mcp", tool: "mcp__neon__run_sql", args: { q: "daemon.token" } }),
     ).toBe(false);
+  });
+
+  test("ticket 11: listing an unrelated src/sessions/ directory", () => {
+    expect(matchesBuiltInFence(shell("ls src/sessions/"))).toBe(false);
+  });
+
+  test("ticket 11: curl against a third-party REST API with its own /sessions/ path", () => {
+    expect(matchesBuiltInFence(shell("curl https://api.example.com/sessions/42/focus"))).toBe(false);
+  });
+
+  test("ticket 11: curl against the Daemon's host but a DIFFERENT port — same documented, accepted miss as /items/", () => {
+    expect(matchesBuiltInFence(shell("curl http://127.0.0.1:3000/sessions/sess-1/focus"))).toBe(false);
+  });
+
+  test("ticket 11: a session route action this fence never names (e.g. a future /sessions/<id>/rename) does not match", () => {
+    expect(matchesBuiltInFence(shell(`curl http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-1/rename`))).toBe(
+      false,
+    );
+  });
+
+  test("ticket 11: grepping sessions.ts while developing Tenaza itself", () => {
+    expect(matchesBuiltInFence(shell("rg -n archivedSessionIds src/sessions.ts"))).toBe(false);
   });
 });
 
@@ -120,6 +160,23 @@ describe("the built-in fence through decideAction (ticket 09) — ALWAYS on, ind
     expect(deriveInbox(home)).toHaveLength(1);
   });
 
+  test("ticket 11: hitting the focus/archive session routes on the Daemon's own port is denied too", async () => {
+    const focusResult = await decideAction(
+      home,
+      "sess-1",
+      shell(`curl -s -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-2/focus`),
+    );
+    expect(focusResult.decision).toBe("deny");
+
+    const archiveResult = await decideAction(
+      home,
+      "sess-1",
+      shell(`curl -s -X POST http://127.0.0.1:${DEFAULT_DAEMON_PORT}/sessions/sess-2/archive`),
+    );
+    expect(archiveResult.decision).toBe("deny");
+    expect(deriveInbox(home)).toHaveLength(2);
+  });
+
   test("an unrelated command matches nothing and is never logged", async () => {
     const result = await decideAction(home, "sess-1", shell("ls -la"));
 
@@ -135,6 +192,9 @@ describe("the built-in fence through decideAction (ticket 09) — ALWAYS on, ind
       "curl http://127.0.0.1:3000/items/1/run",
       "rg -n daemon.token src/",
       "bat src/daemon.ts",
+      "ls src/sessions/",
+      "curl https://api.example.com/sessions/42/focus",
+      "curl http://127.0.0.1:3000/sessions/sess-1/focus",
     ]) {
       const result = await decideAction(home, "sess-1", shell(command));
       expect(result.decision).toBe("allow");

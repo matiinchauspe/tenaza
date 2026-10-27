@@ -392,7 +392,17 @@ describe("useEventSource", () => {
     const payloadAfterReconnect = JSON.stringify({
       v: 1,
       policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
-      sessions: [{ id: "s1", project: "tenaza", role: "sesión", hasMeasureCapability: false, resolutions: [] }],
+      sessions: [
+        {
+          id: "s1",
+          project: "tenaza",
+          role: "sesión",
+          hasMeasureCapability: false,
+          resolutions: [],
+          terminalReach: "unknown",
+          terminalNeedsTcc: false,
+        },
+      ],
       inbox: [],
     });
     act(() => source.emitMessage(payloadAfterReconnect));

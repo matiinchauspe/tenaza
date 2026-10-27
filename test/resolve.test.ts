@@ -2,18 +2,20 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, sessionStartedEvent } from "../src/contract/event";
+import { actionDecidedEvent, sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
 import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
 import { appendEvent, readHumanEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import {
+  archiveSession,
   resolveInboxItem,
   runInboxItem,
   startInboxItemRunStream,
   UnknownInboxItemError,
 } from "../src/resolve";
 import { parseRunOutput, RUN_FAILURE_MARKER } from "../src/runoutput";
+import { UnknownSessionError } from "../src/sessions";
 
 /** When `openItem` is the ONLY Event written for "sess-1", its `action.decided` lands on line 1. */
 const ID = inboxIdentityHash("sess-1", 1);
@@ -511,5 +513,123 @@ describe("startInboxItemRunStream (the view's own `run`, decisions 05/06, ticket
     openItem(home, "sess-1", "true");
 
     expect(() => startInboxItemRunStream(home, UNKNOWN_ID)).toThrow(UnknownInboxItemError);
+  });
+});
+
+/**
+ * `archiveSession` (ticket 11, added 2026-10-27): "x on a selected TERMINÓ
+ * Session card... hides that Session from the board," recorded as a human
+ * Event in the log (ADR 0002) through this one function — the Daemon's
+ * `/sessions/<id>/archive` route (tested over HTTP in `test/daemon.test.ts`)
+ * is a thin wrapper around it.
+ */
+describe("archiveSession", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-archive-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("an ended Session archives cleanly — a session.archived Event in the human log", () => {
+    startSession(home, "sess-1");
+    appendEvent(home, sessionEndedEvent("sess-1", "clear"));
+
+    const result = archiveSession(home, "sess-1");
+
+    expect(result).toEqual({ kind: "accepted", alreadyArchived: false });
+    const events = readHumanEvents(home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "session.archived", session: "sess-1" });
+  });
+
+  test("a Session that never ended refuses with not-ended — the server-side half of 'x on any other card does nothing'", () => {
+    startSession(home, "sess-1");
+
+    const result = archiveSession(home, "sess-1");
+
+    expect(result).toEqual({ kind: "not-ended" });
+    expect(readHumanEvents(home)).toEqual([]);
+  });
+
+  test("archiving twice is idempotent — no second Event, the second call reports alreadyArchived", () => {
+    startSession(home, "sess-1");
+    appendEvent(home, sessionEndedEvent("sess-1", "clear"));
+
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: true });
+    expect(readHumanEvents(home)).toHaveLength(1);
+  });
+
+  test("an unknown Session id throws UnknownSessionError, same shape the focus route relies on for its own 404", () => {
+    expect(() => archiveSession(home, "no-such-session")).toThrow(UnknownSessionError);
+  });
+
+  test("archiving a subagent Session works the same way — no special-casing on parent/role", () => {
+    startSession(home, "agent-1");
+    appendEvent(home, sessionEndedEvent("agent-1", "subagent_stop"));
+
+    expect(archiveSession(home, "agent-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+  });
+
+  /**
+   * Orchestrator review, 2026-10-27: a Claude Code Session can be RESUMED
+   * (`claude --resume`/`--continue`) under the SAME `session_id`, firing
+   * SessionStart/tool Events again — an archive must not hide it forever.
+   *
+   * `archiveSession`'s own new Event always stamps the REAL current wall
+   * clock (`sessionArchivedEvent`'s own `new Date().toISOString()`, not
+   * injectable) — so the resumed activity's `ts` is read back from the
+   * FIRST archive's own real ts plus a few ms, rather than a fixed
+   * calendar date: a fixed FAR-FUTURE date would never be "caught up to"
+   * by any later REAL archive call, which would make every archive after
+   * the first look like a false "still archived forever" bug of the
+   * TEST's own making, not the code's. The short real sleep before the
+   * second archive call is what guarantees ITS OWN new ts lands safely
+   * past the resumed activity too — otherwise a third call could still
+   * see this Session's latest activity as newer than the second archive.
+   */
+  test("archived, then resumed (new activity after the archive) → no longer archived; archiving it again (once it ends again) appends a FRESH Event; repeating THAT with nothing since stays idempotent", async () => {
+    appendEvent(
+      home,
+      {
+        ...sessionStartedEvent("sess-1", { runtime: "fake", cwd: home, capabilities: ["observe", "block"] }),
+        ts: new Date(Date.now() - 86_400_000).toISOString(),
+      },
+    );
+    appendEvent(home, { ...sessionEndedEvent("sess-1", "clear"), ts: new Date(Date.now() - 86_400_000 + 1000).toISOString() });
+
+    // First archive: clean, nothing since — hidden.
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+    const firstArchiveEvents = readHumanEvents(home);
+    expect(firstArchiveEvents).toHaveLength(1);
+    const firstArchiveTs = (firstArchiveEvents[0] as { ts: string }).ts;
+
+    // The Session RESUMES — a fresh SessionStart lands shortly after the
+    // first archive's own real ts — and ends again.
+    const resumedTs = new Date(new Date(firstArchiveTs).getTime() + 5).toISOString();
+    appendEvent(
+      home,
+      { ...sessionStartedEvent("sess-1", { runtime: "fake", cwd: home, capabilities: ["observe", "block"] }), ts: resumedTs },
+    );
+    appendEvent(home, { ...sessionEndedEvent("sess-1", "clear"), ts: resumedTs });
+
+    // A short real delay so the SECOND archive's own (real) ts lands
+    // safely past `resumedTs` too.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // It is no longer "already archived" — the OLD archive Event is stale
+    // against this Session's now-newer activity — so archiving again
+    // appends a SECOND, fresh Event rather than being silently skipped.
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+    expect(readHumanEvents(home)).toHaveLength(2);
+
+    // Archiving it a THIRD time immediately after, with nothing new since
+    // THIS latest archive, is idempotent again — no third Event.
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: true });
+    expect(readHumanEvents(home)).toHaveLength(2);
   });
 });

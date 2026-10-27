@@ -40,7 +40,8 @@ export function SessionCard({ card, tone, statusLabel, selected, onSelect }: Ses
         <span className="session-card__age">{card.age}</span>
       </div>
       <div className="session-card__l2">
-        {card.role} · {card.id}
+        {card.role}
+        {card.worktree ? ` · ${card.worktree}` : ""} · {card.id}
         {card.parentLabel ? ` · ${card.parentLabel}` : ""}
       </div>
       <div className="session-card__signal" title={card.lastSignal}>

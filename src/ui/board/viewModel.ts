@@ -11,7 +11,7 @@
  */
 
 import { computeContextTrack, formatContextNumber, type ContextTrack } from "../../contextbar";
-import { formatAge, projectLabel, sessionColumn, type SessionColumn } from "../../board";
+import { formatAge, projectLabel, sessionColumn, worktreeLabel, type SessionColumn } from "../../board";
 import type { ActionSummary, BoardInboxItem, BoardPayload, BoardSession, SessionRole } from "../../contract/live";
 
 /** `label` reuses `formatContextNumber` (`contextbar.ts`) — the SAME "243k" / "⚑243k" / "—" the CLI's `status` tree already shows, so a Session never reads two different numbers in two different places. */
@@ -39,6 +39,8 @@ export interface InboxCardViewModel {
 export interface SessionCardViewModel {
   id: string;
   project: string;
+  /** The worktree this Session runs in (`worktreeLabel`, `src/board.ts`), or `undefined` outside a known worktree layout. */
+  worktree: string | undefined;
   /** The `ticket` Label verbatim, or `undefined` when none was ever announced — a card renders NOTHING for it then (human fix round), never a stray "— ". */
   ticket: string | undefined;
   role: SessionRole;
@@ -123,6 +125,7 @@ function toSessionCard(
   return {
     id: session.id,
     project: projectLabel(session.project),
+    worktree: worktreeLabel(session.project),
     ticket: session.ticket,
     role: session.role,
     parentLabel: parentLabelFor(session, byId),

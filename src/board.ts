@@ -103,9 +103,43 @@ export function formatAge(ts: string | undefined, now: Date): string {
 export function projectLabel(project: string): string {
   if (!project.includes("/")) return project;
   const segments = project.split("/").filter((segment) => segment.length > 0);
-  const worktreesAt = segments.findIndex((segment) => segment === ".worktrees" || segment === "worktrees");
-  if (worktreesAt !== -1 && segments.length > worktreesAt + 1) return segments[worktreesAt + 1] as string;
+  const layout = worktreeLayout(segments);
+  if (layout) return layout.repo;
   return segments[segments.length - 1] ?? project;
+}
+
+/**
+ * The worktree a card's Session runs in, when its path follows a known
+ * worktree layout — shown as a secondary detail so two Sessions on one
+ * repo stay distinguishable. `undefined` for a plain git root, a Label, or
+ * an unrecognized path: there the project name already says it all.
+ */
+export function worktreeLabel(project: string): string | undefined {
+  if (!project.includes("/")) return undefined;
+  const segments = project.split("/").filter((segment) => segment.length > 0);
+  return worktreeLayout(segments)?.worktree;
+}
+
+/**
+ * The two worktree layouts the human works in (the human's report,
+ * 2026-10-27: this very Session showed as "oarfish", the name Orca gave its
+ * worktree, instead of its repo):
+ *   - Yunque: `.worktrees/<repo>/<task...>` — the repo right after
+ *     `.worktrees` (or `worktrees`); the leaf directory is the worktree.
+ *   - Orca: `orca/workspaces/<repo>/<worktree>` — the repo right after
+ *     `workspaces`; the next segment is Orca's own name for the worktree.
+ */
+function worktreeLayout(segments: readonly string[]): { repo: string; worktree: string | undefined } | undefined {
+  const worktreesAt = segments.findIndex((segment) => segment === ".worktrees" || segment === "worktrees");
+  if (worktreesAt !== -1 && segments.length > worktreesAt + 1) {
+    const worktree = segments.length > worktreesAt + 2 ? segments[segments.length - 1] : undefined;
+    return { repo: segments[worktreesAt + 1] as string, worktree };
+  }
+  const orcaAt = segments.findIndex((segment, i) => segment === "orca" && segments[i + 1] === "workspaces");
+  if (orcaAt !== -1 && segments.length > orcaAt + 2) {
+    return { repo: segments[orcaAt + 2] as string, worktree: segments[orcaAt + 3] };
+  }
+  return undefined;
 }
 
 /**

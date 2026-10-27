@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { formatAge, isSessionStalled, moveSelection, projectLabel, sessionColumn, TERMINO_WINDOW_MS } from "../src/board";
+import {
+  formatAge,
+  isSessionStalled,
+  moveSelection,
+  projectLabel,
+  sessionColumn,
+  TERMINO_WINDOW_MS,
+  worktreeLabel,
+} from "../src/board";
 
 const STALL_MINUTES = 15;
 
@@ -21,8 +29,16 @@ describe("projectLabel", () => {
     expect(projectLabel("/home/mati/ws/worktrees/reservee/aw/fix-12")).toBe("reservee");
   });
 
+  test("an Orca worktree returns the REPO, never Orca's own name for the worktree", () => {
+    expect(projectLabel("/Users/mati/orca/workspaces/agentic-workspace/oarfish")).toBe("agentic-workspace");
+  });
+
   test("a plain git root with no worktree segment returns the path's own basename", () => {
-    expect(projectLabel("/Users/mati/orca/workspaces/agentic-workspace/oarfish")).toBe("oarfish");
+    expect(projectLabel("/Users/mati/projects/reservee")).toBe("reservee");
+  });
+
+  test("a 'workspaces' directory not under 'orca' is not mistaken for Orca's layout", () => {
+    expect(projectLabel("/Users/mati/workspaces/acme/api")).toBe("api");
   });
 
   test("a trailing slash never leaves an empty basename", () => {
@@ -35,6 +51,22 @@ describe("projectLabel", () => {
 
   test("a .worktrees path with nothing after the repo segment falls back to the repo itself as the basename", () => {
     expect(projectLabel("/Users/mati/ws/.worktrees/tenaza")).toBe("tenaza");
+  });
+});
+
+describe("worktreeLabel", () => {
+  test("an Orca worktree returns Orca's name for it", () => {
+    expect(worktreeLabel("/Users/mati/orca/workspaces/agentic-workspace/oarfish")).toBe("oarfish");
+  });
+
+  test("a Yunque worktree returns its leaf task directory", () => {
+    expect(worktreeLabel("/Users/mati/ws/.worktrees/tenaza/aw/tenaza-v0-2/09-80c2ba")).toBe("09-80c2ba");
+  });
+
+  test("a plain git root, a Label, or a bare repo segment has no worktree", () => {
+    expect(worktreeLabel("/Users/mati/projects/reservee")).toBeUndefined();
+    expect(worktreeLabel("reservee")).toBeUndefined();
+    expect(worktreeLabel("/Users/mati/ws/.worktrees/tenaza")).toBeUndefined();
   });
 });
 

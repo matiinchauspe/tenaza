@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sessionStartedEvent } from "../src/contract/event";
+import { readOpenRecorder } from "../src/daemon";
+import { writeAlive, writeDaemonToken } from "../src/daemonlink";
 import { MIN_SHORT_HASH_LENGTH, inboxIdentityHash } from "../src/identity";
 import { shortIdIndex } from "../src/inbox";
 import { STATUSLINE_PASTE_LINE } from "../src/init";
@@ -1223,5 +1225,62 @@ describe("tenaza init (black box, temporary TENAZA_HOME + fake Claude settings)"
     expect(second.exitCode).toBe(0);
     expect(readFileSync(policyPath(home), "utf8")).toBe(policyAfterFirst);
     expect(readFileSync(settingsPath, "utf8")).toBe(settingsAfterFirst);
+  });
+});
+
+/**
+ * `tenaza open` (ticket 12): the CLI half of the plugin's `/tenaza`
+ * command. Drives the opener through `TENAZA_OPEN_RECORDER` (`daemon.ts`'s
+ * own test seam, ticket 07) rather than ever touching the OS's real
+ * `open` — the same seam `tenaza ui`'s own tests already use.
+ */
+describe("tenaza open (black box, temporary TENAZA_HOME)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-open-cli-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("no heartbeat at all — never opens anything, prints how to start the Daemon, exits 0", async () => {
+    const result = await runCli(["open"], { home, env: { TENAZA_OPEN_RECORDER: "1" } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("brew services start tenaza");
+    expect(result.stdout).toContain("tenaza ui");
+    expect(readOpenRecorder(home)).toEqual([]);
+  });
+
+  test("a STALE heartbeat (same rule the live-answering hold reads, never a second threshold) — same refusal as no heartbeat at all", async () => {
+    writeAlive(home, new Date(Date.now() - 60_000));
+
+    const result = await runCli(["open"], { home, env: { TENAZA_OPEN_RECORDER: "1" } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("brew services start tenaza");
+    expect(readOpenRecorder(home)).toEqual([]);
+  });
+
+  test("a fresh heartbeat with a token — opens the view at its token URL, on the default port", async () => {
+    writeAlive(home);
+    writeDaemonToken(home, "tok-abc123");
+
+    const result = await runCli(["open"], { home, env: { TENAZA_OPEN_RECORDER: "1" } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("http://127.0.0.1:4747/auth?token=tok-abc123");
+    expect(readOpenRecorder(home)).toEqual(["http://127.0.0.1:4747/auth?token=tok-abc123"]);
+  });
+
+  test("a fresh heartbeat with no token file yet opens the plain page rather than throwing", async () => {
+    writeAlive(home);
+
+    const result = await runCli(["open"], { home, env: { TENAZA_OPEN_RECORDER: "1" } });
+
+    expect(result.exitCode).toBe(0);
+    expect(readOpenRecorder(home)).toEqual(["http://127.0.0.1:4747/"]);
   });
 });

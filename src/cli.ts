@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import { runClaudeHookSafely } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
-import { runUi } from "./daemon";
+import { buildDaemonUrl, isHeartbeatFresh, readAlive, readDaemonToken } from "./daemonlink";
+import { openBrowser, runUi } from "./daemon";
 import { readHealth, recordDegraded, recordHealthy } from "./health";
 import { MIN_SHORT_HASH_LENGTH, resolvePrefix } from "./identity";
 import { runInit } from "./init";
 import { allInboxIdentityHashes, shortIdIndex } from "./inbox";
 import { notifyGraveFault } from "./notify";
-import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
+import { claudeSettingsPath, DEFAULT_DAEMON_PORT, policyPath, tenazaHome } from "./paths";
 import {
   type ResolutionOutcome,
   resolveInboxItem,
@@ -308,10 +309,65 @@ function runInitCommand(): number {
   return 0;
 }
 
-/** `tenaza ui --port <n>` (ticket 07): the only flag this command takes. An invalid or dangling `--port` is a clear argument error, never a silent fallback to the default. */
-function parseUiArgs(args: string[]): { port?: number } | { error: string } {
+/**
+ * `tenaza open` (ticket 12, decision 05's own "entry from a session"): the
+ * CLI half of the plugin's `/tenaza` command — its own markdown command
+ * file is a thin wrapper that just runs this and relays its output
+ * verbatim, so the actual logic stays testable in bun (ticket's own
+ * preference) rather than living in the markdown prompt.
+ *
+ * Reuses the EXACT SAME heartbeat-freshness rule the live-answering hold
+ * already reads (`isHeartbeatFresh`/`DEFAULT_HEARTBEAT_STALE_MS`,
+ * `daemonlink.ts`) — never a second threshold for "is the Daemon up"
+ * (review lesson: don't invent a second one). Daemon up → opens the view
+ * with its token URL, same `buildDaemonUrl`/`openBrowser` `tenaza ui`
+ * itself uses when it hands off to an already-running instance. Down →
+ * starts nothing at all (ADR 0007's own "never on its own initiative")
+ * and prints how to start it, exactly as the spec's own wording: `brew
+ * services start tenaza`, or `tenaza ui` by hand. Always exits 0 — a
+ * Daemon that happens to be down is an ordinary, expected outcome here,
+ * never a CLI error.
+ */
+async function runOpen(): Promise<number> {
+  const home = tenazaHome();
+  const alive = readAlive(home);
+  if (!isHeartbeatFresh(alive, new Date())) {
+    process.stdout.write(
+      "tenaza: el Daemon no está corriendo — arrancalo con `brew services start tenaza` " +
+        "(si lo instalaste con Homebrew) o con `tenaza ui`\n",
+    );
+    return 0;
+  }
+
+  const token = readDaemonToken(home);
+  const url = buildDaemonUrl(DEFAULT_DAEMON_PORT, token);
+  openBrowser(home, url);
+  process.stdout.write(`tenaza: abriendo ${url}\n`);
+  return 0;
+}
+
+/**
+ * `tenaza ui --port <n> [--no-open]` (ticket 07's `--port`; `--no-open`
+ * added ticket 12). An invalid or dangling `--port` is a clear argument
+ * error, never a silent fallback to the default.
+ *
+ * `--no-open` is what the Homebrew `service` block's own `run` command
+ * passes: a LaunchAgent that pops a browser window on every
+ * (re)start — a machine reboot, a KeepAlive restart after a crash, not
+ * just the one `brew services start tenaza` the human actually typed —
+ * would be Tenaza acting "on its own initiative" the same way an
+ * auto-started Daemon would (ADR 0007, spec's own "nothing starts on its
+ * own"). A human running `tenaza ui` by hand never passes this, so the
+ * browser still opens for them, unchanged.
+ */
+function parseUiArgs(args: string[]): { port?: number; open: boolean } | { error: string } {
   let port: number | undefined;
+  let open = true;
   for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--no-open") {
+      open = false;
+      continue;
+    }
     if (args[i] !== "--port") continue;
     const raw = args[i + 1];
     const parsed = raw !== undefined ? Number(raw) : Number.NaN;
@@ -321,7 +377,7 @@ function parseUiArgs(args: string[]): { port?: number } | { error: string } {
     port = parsed;
     i++;
   }
-  return { port };
+  return { port, open };
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -362,7 +418,11 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`tenaza: ${parsed.error}\n`);
       return 1;
     }
-    return await runUi({ port: parsed.port });
+    return await runUi({ port: parsed.port, open: parsed.open });
+  }
+
+  if (command === "open") {
+    return await runOpen();
   }
 
   if (command === "run") {

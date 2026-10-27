@@ -8,7 +8,8 @@ import {
   sessionStartedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
-import { RED, RESET } from "../src/contextbar";
+import { GREEN, RED, RESET } from "../src/contextbar";
+import { writeAlive } from "../src/daemonlink";
 import { recordDegraded, recordHealthy } from "../src/health";
 import { inboxIdentityHash } from "../src/identity";
 import { shortIdIndex } from "../src/inbox";
@@ -215,5 +216,36 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
 
     expect(formatStatusline(home)).not.toContain("degradado");
     expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+  });
+
+  describe("ticket 12: the Daemon's live dot", () => {
+    test("no heartbeat at all — never shown", () => {
+      expect(formatStatusline(home)).not.toContain("daemon");
+      expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("a fresh heartbeat shows the green dot, trailing the line", () => {
+      writeAlive(home);
+
+      expect(formatStatusline(home)).toBe(
+        `tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0 · ${GREEN}●${RESET} daemon`,
+      );
+    });
+
+    test("a STALE heartbeat (same rule the live-answering hold reads, never a second threshold) reads the same as none at all", () => {
+      writeAlive(home, new Date(Date.now() - 60_000));
+
+      expect(formatStatusline(home)).not.toContain("daemon");
+      expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("the live dot composes with the degradado mark — a broken Tenaza is still visible even if the Daemon is up", () => {
+      writeAlive(home);
+      recordDegraded(home, "policy.toml is invalid", true);
+
+      expect(formatStatusline(home)).toBe(
+        `tenaza │ ${RED}degradado${RESET} · ● 0 vivas · ⚑ 0 · ✉ 0 · ${GREEN}●${RESET} daemon`,
+      );
+    });
   });
 });

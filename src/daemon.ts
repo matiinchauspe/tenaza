@@ -902,6 +902,14 @@ function describeBindError(error: unknown): string {
 export interface RunUiOptions {
   port?: number;
   home?: string;
+  /**
+   * Ticket 12: `false` for the Homebrew `service` block's own launch
+   * (`tenaza ui --no-open`) — never pop a browser window on a LaunchAgent
+   * (re)start nobody just asked for (`cli.ts`'s `parseUiArgs` own doc
+   * comment has the full reasoning). Defaults to `true`: a human running
+   * `tenaza ui` by hand is unaffected.
+   */
+  open?: boolean;
 }
 
 /** Writes straight to process.stdout/stderr, same as every other command in `cli.ts` — tests observe this at the real black-box seam (spawn the CLI, read its stdout), never by importing this module's internals. */
@@ -923,6 +931,7 @@ function printErr(line: string): void {
 export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const home = options.home ?? tenazaHome();
   const port = options.port ?? DEFAULT_DAEMON_PORT;
+  const shouldOpen = options.open ?? true;
 
   /**
    * Register SIGINT/SIGTERM as the very FIRST thing this function does —
@@ -960,7 +969,7 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
     const existingToken = readDaemonToken(home);
     const url = buildDaemonUrl(port, existingToken);
     print(`tenaza: a Tenaza is already serving on port ${port} (v${probe.version}) — opening it`);
-    openBrowser(home, url);
+    if (shouldOpen) openBrowser(home, url);
     return 0;
   }
   if (probe.kind === "other") {
@@ -1020,7 +1029,7 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   };
 
   print(`tenaza: serving on ${url}`);
-  openBrowser(home, url);
+  if (shouldOpen) openBrowser(home, url);
 
   await shutdownRequested;
   return 0;

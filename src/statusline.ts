@@ -1,4 +1,5 @@
-import { RED, RESET } from "./contextbar";
+import { GREEN, RED, RESET } from "./contextbar";
+import { isHeartbeatFresh, readAlive } from "./daemonlink";
 import { readHealth } from "./health";
 import { type InboxItem, deriveInbox, shortIdIndex } from "./inbox";
 import { readAllSessionEvents } from "./log";
@@ -123,6 +124,20 @@ function formatHealthMark(home: string): string {
 }
 
 /**
+ * Ticket 12: "the statusline shows a live dot while the heartbeat is
+ * fresh" — the SAME freshness rule the live-answering hold and `tenaza
+ * ui`'s own single-instance probe already read (`isHeartbeatFresh`,
+ * `daemonlink.ts`'s `DEFAULT_HEARTBEAT_STALE_MS`), never a second
+ * threshold for "is the Daemon up" (review lesson). Empty string, never a
+ * bare space or a "daemon off" placeholder, while the Daemon is down —
+ * it's opt-in (decision 05: "nothing starts on its own"), so its ordinary
+ * state is absent, not a fault to announce the way `degradado` is.
+ */
+function formatDaemonMark(home: string): string {
+  return isHeartbeatFresh(readAlive(home), new Date()) ? `· ${GREEN}●${RESET} daemon` : "";
+}
+
+/**
  * `tenaza │ ● <n> vivas · ⚑ <n> >200k · ✉ <n> → #<id> <first words>` — the
  * spec's own format (q19), calm when `⚑` and `✉` are both 0 (no `>Nk`
  * suffix, no arrow). The `>Nk` suffix reflects the Policy's ACTUAL threshold
@@ -136,6 +151,7 @@ export function formatStatusline(home: string = tenazaHome()): string {
   const top = mostUrgentInboxItem(home);
   const shortId = top ? shortIdIndex(home).get(top.id) : undefined;
   const healthMark = formatHealthMark(home);
+  const daemonMark = formatDaemonMark(home);
 
   return [
     "tenaza │",
@@ -143,5 +159,6 @@ export function formatStatusline(home: string = tenazaHome()): string {
     `● ${counts.live} vivas ·`,
     `${formatFlagged(counts.flagged, thresholdTokens)} ·`,
     formatInbox(counts.inbox, top, shortId),
+    ...(daemonMark ? [daemonMark] : []),
   ].join(" ");
 }

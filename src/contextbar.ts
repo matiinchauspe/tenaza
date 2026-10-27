@@ -20,6 +20,9 @@ export const TOKENS_PER_CELL = 20_000;
 export const RED = "\x1b[31m";
 export const RESET = "\x1b[0m";
 
+/** The one "this is live" green — reused by `statusline.ts`'s own Daemon-heartbeat dot (ticket 12) so the statusline has exactly one color for "up and reachable," same convention `RED` already follows for "needs you." */
+export const GREEN = "\x1b[32m";
+
 function clampCell(cell: number): number {
   return Math.max(0, Math.min(BAR_CELLS, cell));
 }

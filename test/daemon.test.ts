@@ -284,6 +284,47 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
     }
   });
 
+  /**
+   * Ticket 12: the Homebrew `service` block's own launch command
+   * (`tenaza ui --no-open`) must never pop a browser on a LaunchAgent
+   * (re)start — proven here the same way "the launcher opens" above
+   * proves the DEFAULT does: a real spawned process, the SAME opener
+   * recorder, this time asserting it STAYS empty through the startup
+   * window (not just "has not opened yet" — `Bun.sleep` gives the opener
+   * every chance it would have had).
+   */
+  test("--no-open never touches the opener, even on the DEFAULT launch path (not the already-serving handoff)", async () => {
+    const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home });
+    try {
+      await Bun.sleep(200);
+      expect(readOpenRecorder(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("--no-open also suppresses the already-serving handoff path — a second launch finds the first and opens nothing", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      let firstOpen = readOpenRecorder(home);
+      for (let i = 0; firstOpen.length === 0 && i < 40; i++) {
+        await Bun.sleep(50);
+        firstOpen = readOpenRecorder(home);
+      }
+      expect(firstOpen.length).toBeGreaterThan(0);
+
+      const second = await runCli(["ui", "--port", String(daemon.port), "--no-open"], { home });
+      expect(second.exitCode).toBe(0);
+      expect(second.stdout).toContain("already serving");
+
+      // Still exactly what the FIRST launch opened — the second's own
+      // handoff added nothing.
+      expect(readOpenRecorder(home)).toEqual(firstOpen);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   test("reads stay open: GET /, /health and /events never require the token", async () => {
     const daemon = await spawnDaemon(["--port", "0"], { home });
     try {

@@ -38,11 +38,14 @@ const STALE_TOKEN_MESSAGE =
  *
  * `d`/`x` only ever dispatch against an id this render actually knows is
  * an Inbox card (`inboxIds`, below); `a` only ever dispatches against a
- * Session card that actually carries a `liveRequest` right now
- * (`liveRequestSessionIds`) — `useBoardKeyboard` itself stays ignorant of
- * card kinds, so every one of these gates is this container's to draw,
- * never the hook's. `r` carries no gate at all: it only ever focuses a
- * message input that may or may not exist (see that hook's own doc).
+ * Session card that actually carries a `liveRequest` right now, and
+ * against THAT request's own item id — never the Session's
+ * (`liveRequestItemIdBySessionId`, below; ticket 12 follow-up fixed a bug
+ * where this forwarded the Session's id instead) — `useBoardKeyboard`
+ * itself stays ignorant of card kinds, so every one of these gates is
+ * this container's to draw, never the hook's. `r` carries no gate at
+ * all: it only ever focuses a message input that may or may not exist
+ * (see that hook's own doc).
  */
 export function BoardApp() {
   const { payload, connectionState } = useEventSource(EVENTS_URL);
@@ -52,10 +55,16 @@ export function BoardApp() {
   const actions = useInboxActions();
 
   const inboxIds = new Set(viewModel?.teNecesita.cards.map((card) => card.id) ?? []);
-  const liveRequestSessionIds = new Set(
+  // Ticket 12 follow-up (verified bug): keyed by the SESSION's own id
+  // (what `useBoardKeyboard`'s `selectedId` carries for a Session card),
+  // valued by the live item's OWN identity hash — the id `/items/<id>/answer`
+  // actually expects. A plain Set of session ids (this file's own prior
+  // shape) let a correctly-GATED keyboard `a` still POST the wrong id;
+  // `SessionCard.tsx`'s own mouse buttons never had this bug — they call
+  // `onApprove(liveRequest.id, draft)` directly, never through this map.
+  const liveRequestItemIdBySessionId = new Map(
     [...(viewModel?.corriendo.cards ?? []), ...(viewModel?.trabada.cards ?? []), ...(viewModel?.termino.cards ?? [])]
-      .filter((card) => card.liveRequest)
-      .map((card) => card.id),
+      .flatMap((card) => (card.liveRequest ? [[card.id, card.liveRequest.id] as const] : [])),
   );
   // Ticket 11: `x` archives ONLY a TERMINÓ Session card — "x on any other
   // Session card does nothing" (ticket), enforced here the SAME way
@@ -70,7 +79,8 @@ export function BoardApp() {
       if (inboxIds.has(id)) actions.dismiss(id);
     },
     onApprove: (id, message) => {
-      if (liveRequestSessionIds.has(id)) actions.approve(id, message);
+      const itemId = liveRequestItemIdBySessionId.get(id);
+      if (itemId) actions.approve(itemId, message);
     },
     onFocusTerminal: (id) => {
       if (!viewModel) return;

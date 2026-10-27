@@ -96,3 +96,43 @@ export function policyLkgPath(home: string = tenazaHome()): string {
 export function healthPath(home: string = tenazaHome()): string {
   return path.join(home, "state", "health.json");
 }
+
+/**
+ * The Daemon's heartbeat (ticket 07, ADR 0004, decision 05): rewritten every
+ * ~2s while `tenaza ui` runs. This file — not a socket, not shared memory —
+ * is the ONLY signal a hook could ever read to learn a Daemon is up; hooks
+ * never talk to the Daemon directly (decision 05's own rule), and no hook
+ * reads this one yet (ticket 10 wires that up). Expressed here regardless,
+ * one place, so a later reader and `tenaza ui`'s own writer can never
+ * disagree on where it lives.
+ */
+export function daemonAlivePath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "daemon.alive");
+}
+
+/**
+ * The Daemon's per-launch write token (ticket 07, decision 05): random,
+ * mode 0600, required by every write route; reads (`/health`, the page, the
+ * SSE stream) never check it. A SECOND `tenaza ui` that finds a Tenaza
+ * already serving (via a live `GET /health`, never this file's mere
+ * presence — a stale token from a crashed Daemon must not block a new
+ * launch) reads the RUNNING instance's token back out of this file to open
+ * its URL, rather than minting a new one that the already-open browser
+ * tab's cookie would not match.
+ */
+export function daemonTokenPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "daemon.token");
+}
+
+/**
+ * Where the Daemon's browser-opener test seam records "what URL would have
+ * been opened" (ticket 07) when `TENAZA_OPEN_RECORDER` swaps the real `open`
+ * spawn for it — the same shape `notifyRecorderPath` already gives the
+ * notifier port: a plain JSONL-of-URLs file, never an Event (nothing reads
+ * it back as domain state; it is the test oracle for the opener port
+ * alone), so a test can assert what `tenaza ui` tried to open without ever
+ * launching a real browser.
+ */
+export function openRecorderPath(home: string = tenazaHome()): string {
+  return path.join(home, "state", "open-recorder.jsonl");
+}

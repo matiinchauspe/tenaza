@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { runClaudeHookSafely } from "./adapters/claude";
 import { handleFakeHook } from "./adapters/fake";
+import { runUi } from "./daemon";
 import { readHealth, recordDegraded, recordHealthy } from "./health";
 import { MIN_SHORT_HASH_LENGTH, resolvePrefix } from "./identity";
 import { runInit } from "./init";
@@ -307,6 +308,22 @@ function runInitCommand(): number {
   return 0;
 }
 
+/** `tenaza ui --port <n>` (ticket 07): the only flag this command takes. An invalid or dangling `--port` is a clear argument error, never a silent fallback to the default. */
+function parseUiArgs(args: string[]): { port?: number } | { error: string } {
+  let port: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== "--port") continue;
+    const raw = args[i + 1];
+    const parsed = raw !== undefined ? Number(raw) : Number.NaN;
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return { error: `invalid --port value: "${raw ?? ""}"` };
+    }
+    port = parsed;
+    i++;
+  }
+  return { port };
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, subcommand] = argv;
 
@@ -337,6 +354,15 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === "statusline") {
     return await runStatusline();
+  }
+
+  if (command === "ui") {
+    const parsed = parseUiArgs(argv.slice(1));
+    if ("error" in parsed) {
+      process.stderr.write(`tenaza: ${parsed.error}\n`);
+      return 1;
+    }
+    return await runUi({ port: parsed.port });
   }
 
   if (command === "run") {

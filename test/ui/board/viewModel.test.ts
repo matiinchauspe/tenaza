@@ -202,24 +202,60 @@ describe("buildBoardViewModel — Session card fields", () => {
     expect(child?.parentLabel).toBe("↳ TEN-08");
   });
 
-  test("a child whose parent has no ticket label falls back to the parent's structural role", () => {
+  test("a child whose parent has no ticket names the parent by its short id, never by its role", () => {
     const payload = makeBoardPayload({
       sessions: [
-        makeSession({ id: "parent", ticket: undefined, role: "sesión", lastEventTs: NOW.toISOString() }),
-        makeSession({ id: "child", parentId: "parent", role: "subagente", lastEventTs: NOW.toISOString() }),
+        makeSession({ id: "9b8fa51d-1844-4475", ticket: undefined, role: "sesión", lastEventTs: NOW.toISOString() }),
+        makeSession({ id: "child", parentId: "9b8fa51d-1844-4475", role: "subagente", lastEventTs: NOW.toISOString() }),
       ],
     });
     const model = buildBoardViewModel(payload, NOW);
     const child = model.corriendo.cards.find((c) => c.id === "child");
-    expect(child?.parentLabel).toBe("↳ sesión");
+    expect(child?.parentLabel).toBe("↳ 9b8fa51d");
   });
 
-  test("a child whose parent is missing from this payload falls back to the raw parent id", () => {
+  test("a child whose parent is missing from this payload still names it by its short id", () => {
     const payload = makeBoardPayload({
-      sessions: [makeSession({ id: "child", parentId: "ghost", role: "subagente", lastEventTs: NOW.toISOString() })],
+      sessions: [makeSession({ id: "child", parentId: "ghost-parent-id", role: "subagente", lastEventTs: NOW.toISOString() })],
     });
     const model = buildBoardViewModel(payload, NOW);
-    expect(model.corriendo.cards[0]?.parentLabel).toBe("↳ ghost");
+    expect(model.corriendo.cards[0]?.parentLabel).toBe("↳ ghost-pa");
+  });
+
+  test("a card shows a short id but keeps the full id for selection", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "9b8fa51d-1844-4475-8be0", lastEventTs: NOW.toISOString() })],
+    });
+    const card = buildBoardViewModel(payload, NOW).corriendo.cards[0];
+    expect(card?.shortId).toBe("9b8fa51d");
+    expect(card?.id).toBe("9b8fa51d-1844-4475-8be0");
+  });
+
+  test("a subagent renders right under its parent, nested, even when another Session is more recent", () => {
+    const at = (minutesAgo: number): string => new Date(NOW.getTime() - minutesAgo * 60_000).toISOString();
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({ id: "parent", lastEventTs: at(1) }),
+        makeSession({ id: "other", lastEventTs: at(2) }),
+        makeSession({ id: "child", parentId: "parent", role: "subagente", lastEventTs: at(5) }),
+      ],
+    });
+    const cards = buildBoardViewModel(payload, NOW).corriendo.cards;
+    expect(cards.map((c) => c.id)).toEqual(["parent", "child", "other"]);
+    expect(cards.map((c) => c.nested)).toEqual([false, true, false]);
+  });
+
+  test("a subagent whose parent sits in another column is not nested and keeps the column's order", () => {
+    const at = (minutesAgo: number): string => new Date(NOW.getTime() - minutesAgo * 60_000).toISOString();
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({ id: "parent", lastEventTs: at(30) }), // silent past stall_minutes → TRABADA
+        makeSession({ id: "child", parentId: "parent", role: "subagente", lastEventTs: at(1) }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards.map((c) => [c.id, c.nested])).toEqual([["child", false]]);
+    expect(model.corriendo.cards[0]?.parentLabel).toBe("↳ parent");
   });
 
   test("a top-level Session (no parentId) has no parentLabel", () => {

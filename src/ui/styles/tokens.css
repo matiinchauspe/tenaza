@@ -373,6 +373,12 @@ kbd {
   transition: border-color 0.2s;
 }
 
+/* A subagent rendered right under its parent (spec: "under its parent") — indented, with a thin rail on the left tying it to the card above. */
+.session-card--nested {
+  margin-left: 16px;
+  border-left: 2px solid var(--line2);
+}
+
 .session-card:hover {
   border-color: var(--line2);
 }

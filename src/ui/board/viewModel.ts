@@ -44,8 +44,12 @@ export interface SessionCardViewModel {
   /** The `ticket` Label verbatim, or `undefined` when none was ever announced — a card renders NOTHING for it then (human fix round), never a stray "— ". */
   ticket: string | undefined;
   role: SessionRole;
+  /** The Session id cut for display (`SHORT_ID_LENGTH`); `id` stays whole for keys, selection and DOM ids. */
+  shortId: string;
   /** Ready-to-render "↳ <label>", or `undefined` when this Session has no parent. */
   parentLabel: string | undefined;
+  /** True when this card renders right under its parent in the same column (indented). */
+  nested: boolean;
   context: ContextDisplay;
   /** "Last signal" (spec's own field): what this Session most recently attempted, or "—" when it never has. */
   lastSignal: string;
@@ -109,26 +113,69 @@ function toInboxCard(item: BoardInboxItem, now: Date): InboxCardViewModel {
   };
 }
 
+/** Display length of a Session id — enough to tell this human's Sessions apart at a glance (the prototype shows short ids); the full id stays in `id`. */
+export const SHORT_ID_LENGTH = 8;
+
+function shortSessionId(id: string): string {
+  return id.slice(0, SHORT_ID_LENGTH);
+}
+
+/**
+ * "↳ <parent>": the parent's ticket when it has one, else its short id —
+ * never its role (the human's report, 2026-10-27: "↳ sesión" named nothing,
+ * since every top-level Session's role reads "sesión").
+ */
 function parentLabelFor(session: BoardSession, byId: ReadonlyMap<string, BoardSession>): string | undefined {
   if (session.parentId === undefined) return undefined;
   const parent = byId.get(session.parentId);
-  const label = parent ? parent.ticket ?? parent.role : session.parentId;
-  return `↳ ${label}`;
+  return `↳ ${parent?.ticket ?? shortSessionId(session.parentId)}`;
+}
+
+/**
+ * A column's Sessions with each subagent right under its parent (spec: "a
+ * subagent renders once, under its parent"). Parents keep the column's own
+ * order; their children follow in that same order. A child whose parent is
+ * not in this column (the parent ended, or stalled while it runs) stays
+ * where the column's order puts it, un-nested — its `↳` still names the
+ * parent.
+ */
+function nestUnderParents(list: readonly BoardSession[]): { session: BoardSession; nested: boolean }[] {
+  const inColumn = new Set(list.map((session) => session.id));
+  const childrenOf = new Map<string, BoardSession[]>();
+  for (const session of list) {
+    if (session.parentId !== undefined && inColumn.has(session.parentId)) {
+      const siblings = childrenOf.get(session.parentId) ?? [];
+      siblings.push(session);
+      childrenOf.set(session.parentId, siblings);
+    }
+  }
+  const out: { session: BoardSession; nested: boolean }[] = [];
+  const emit = (session: BoardSession, nested: boolean): void => {
+    out.push({ session, nested });
+    for (const child of childrenOf.get(session.id) ?? []) emit(child, true);
+  };
+  for (const session of list) {
+    if (session.parentId === undefined || !inColumn.has(session.parentId)) emit(session, false);
+  }
+  return out;
 }
 
 function toSessionCard(
   session: BoardSession,
+  nested: boolean,
   now: Date,
   contextThresholdTokens: number,
   byId: ReadonlyMap<string, BoardSession>,
 ): SessionCardViewModel {
   return {
     id: session.id,
+    shortId: shortSessionId(session.id),
     project: projectLabel(session.project),
     worktree: worktreeLabel(session.project),
     ticket: session.ticket,
     role: session.role,
     parentLabel: parentLabelFor(session, byId),
+    nested,
     context: contextDisplayFor(session, contextThresholdTokens),
     lastSignal: session.lastSignal ? toolLabelFor(session.lastSignal) : "—",
     age: formatAge(session.lastEventTs, now),
@@ -165,12 +212,14 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
   }
   for (const list of Object.values(sessionsByColumn)) list.sort(byMostRecentEventFirst);
 
-  const toCard = (session: BoardSession): SessionCardViewModel =>
-    toSessionCard(session, now, payload.policy.contextThresholdTokens, byId);
+  const toCards = (list: readonly BoardSession[]): SessionCardViewModel[] =>
+    nestUnderParents(list).map(({ session, nested }) =>
+      toSessionCard(session, nested, now, payload.policy.contextThresholdTokens, byId),
+    );
 
-  const corriendoCards = sessionsByColumn.corriendo.map(toCard);
-  const trabadaCards = sessionsByColumn.trabada.map(toCard);
-  const terminoCards = sessionsByColumn.termino.map(toCard);
+  const corriendoCards = toCards(sessionsByColumn.corriendo);
+  const trabadaCards = toCards(sessionsByColumn.trabada);
+  const terminoCards = toCards(sessionsByColumn.termino);
 
   const isFlagged = (card: SessionCardViewModel): boolean => card.context.kind === "track" && card.context.track.flagged;
   const over200k = corriendoCards.filter(isFlagged).length + trabadaCards.filter(isFlagged).length;

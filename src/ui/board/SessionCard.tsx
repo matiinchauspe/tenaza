@@ -26,7 +26,7 @@ export function SessionCard({ card, tone, statusLabel, selected, onSelect }: Ses
   return (
     <li
       id={boardCardElementId(card.id)}
-      className={`card session-card session-card--${tone}${selected ? " card--selected" : ""}`}
+      className={`card session-card session-card--${tone}${card.nested ? " session-card--nested" : ""}${selected ? " card--selected" : ""}`}
       role="option"
       aria-selected={selected}
       aria-label={ariaLabel}
@@ -41,7 +41,7 @@ export function SessionCard({ card, tone, statusLabel, selected, onSelect }: Ses
       </div>
       <div className="session-card__l2">
         {card.role}
-        {card.worktree ? ` · ${card.worktree}` : ""} · {card.id}
+        {card.worktree ? ` · ${card.worktree}` : ""} · <span title={card.id}>{card.shortId}</span>
         {card.parentLabel ? ` · ${card.parentLabel}` : ""}
       </div>
       <div className="session-card__signal" title={card.lastSignal}>

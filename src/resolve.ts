@@ -40,7 +40,8 @@ export type RunOutcome =
   | { kind: "closed" }
   | { kind: "stays-open"; exitCode: number }
   | { kind: "already-resolved" }
-  | { kind: "unblockable" };
+  | { kind: "unblockable" }
+  | { kind: "not-runnable" };
 
 /**
  * `tenaza run <id>`: execute the Inbox item's stored command AT THE HUMAN'S
@@ -55,6 +56,13 @@ export type RunOutcome =
  * ONCE, unblocked. Running it again here would execute it a SECOND time
  * (a merge, a prod write, …), so `run` refuses outright: no spawn, no
  * Event, the item stays open for `done`/`dismiss` to close by hand.
+ *
+ * An `mcp` item (ticket 04, decision 07) carries no stored shell command at
+ * all — it is answered live, or closed by hand (`done`/`dismiss`), never
+ * executed from here. `run` refuses it the SAME way: a clean outcome the
+ * CLI reports, never a thrown error — this is an ordinary, expected
+ * outcome of asking `run` for the wrong kind of item, not a programming
+ * fault.
  */
 export async function runInboxItem(home: string, id: number): Promise<RunOutcome> {
   const row = findInboxRow(home, id);
@@ -64,9 +72,7 @@ export async function runInboxItem(home: string, id: number): Promise<RunOutcome
 
   if (!row.blocked) return { kind: "unblockable" };
 
-  if (row.action.kind !== "shell") {
-    throw new Error(`tenaza: inbox #${id} has no runnable command`);
-  }
+  if (row.action.kind !== "shell") return { kind: "not-runnable" };
 
   const proc = Bun.spawn(["sh", "-c", row.action.command], {
     stdout: "inherit",

@@ -172,6 +172,15 @@ async function runRun(idArg: string | undefined): Promise<number> {
       );
       return 1;
     }
+    if (outcome.kind === "not-runnable") {
+      // Decision 07, ticket 04: an `mcp` item has no stored shell command at
+      // all. Human-facing CLI copy, es-AR, same tone as the unblockable case.
+      process.stderr.write(
+        `tenaza: inbox #${id} es una llamada MCP y no tiene comando para correr. ` +
+          `Cerralo con \`tenaza done ${id}\` o \`tenaza dismiss ${id}\`.\n`,
+      );
+      return 1;
+    }
     process.stderr.write(
       `tenaza: inbox #${id} stays open — command exited ${outcome.exitCode}\n`,
     );

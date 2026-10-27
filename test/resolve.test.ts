@@ -37,6 +37,17 @@ function openUnblockedItem(home: string, session: string, command: string): void
   );
 }
 
+/** An open Inbox item for an `mcp` Action (ticket 04, decision 07) — no stored shell command at all. */
+function openMcpItem(home: string, session: string, tool: string, args: Record<string, unknown>): void {
+  appendEvent(
+    home,
+    actionDecidedEvent(session, { kind: "mcp", tool, args }, "deny", {
+      tool: `mcp__*`,
+      effect: "human",
+    }),
+  );
+}
+
 describe("resolveInboxItem (done / dismiss)", () => {
   let home: string;
 
@@ -193,6 +204,37 @@ describe("runInboxItem", () => {
 
     test("dismiss still closes it, exactly as for a blocked item", () => {
       openUnblockedItem(home, "sess-1", "gh pr merge 58");
+
+      const result = resolveInboxItem(home, 1, "dismissed");
+
+      expect(result).toEqual({ alreadyResolved: false });
+      expect(deriveInbox(home)).toEqual([]);
+    });
+  });
+
+  describe("an mcp item (ticket 04, decision 07: no stored shell command at all)", () => {
+    test("run refuses CLEANLY — reports 'not-runnable', never throws", async () => {
+      openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const outcome = await runInboxItem(home, 1);
+
+      expect(outcome).toEqual({ kind: "not-runnable" });
+      expect(readHumanEvents(home)).toEqual([]);
+      // still open — refusing to run is not a resolution
+      expect(deriveInbox(home)).toHaveLength(1);
+    });
+
+    test("done closes it, exactly as for a shell item", () => {
+      openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
+
+      const result = resolveInboxItem(home, 1, "done");
+
+      expect(result).toEqual({ alreadyResolved: false });
+      expect(deriveInbox(home)).toEqual([]);
+    });
+
+    test("dismiss closes it, exactly as for a shell item", () => {
+      openMcpItem(home, "sess-1", "mcp__neon__run_sql", { branch_id: "br-prod" });
 
       const result = resolveInboxItem(home, 1, "dismissed");
 

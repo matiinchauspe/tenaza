@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Action, Capability } from "../contract/event";
 import {
   sessionEndedEvent,
@@ -106,10 +107,20 @@ export interface ClaudeStopPayload {
 export interface ClaudePostToolUsePayload {
   session_id: string;
   hook_event_name: "PostToolUse";
-  /** The PARENT session's transcript when `agent_id` is present (ticket 05, M3's own recurrence here) — never read for a subagent's own sample; see `handlePostToolUse`. */
+  /**
+   * The PARENT session's transcript when `agent_id` is present (ticket 05,
+   * M3's own recurrence here) — never sampled DIRECTLY for a subagent's own
+   * sample; see `resolveSampleTranscriptPath`. Claude Code's real PostToolUse
+   * payload inside a subagent never carries `agent_transcript_path` at all
+   * (that field is SubagentStop-only) — leaving every mid-run sample
+   * silently skipped (found 2026-10-27). This field is now also the
+   * DERIVATION SOURCE for the subagent's own transcript path in that case
+   * (never read as the sample itself — M3's rule holds, only its NEIGHBOUR
+   * directory is).
+   */
   transcript_path?: string;
   agent_id?: string;
-  /** The SUBAGENT's own transcript — the only one `handlePostToolUse` ever samples from when `agent_id` is present. */
+  /** The SUBAGENT's own transcript, when Claude Code's payload actually carries it (SubagentStop's own case) — wins over any derivation when present; see `resolveSampleTranscriptPath`. */
   agent_transcript_path?: string;
   /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
   cwd?: string;
@@ -463,6 +474,49 @@ export function handleStop(home: string, payload: ClaudeStopPayload): void {
 }
 
 /**
+ * Found 2026-10-27, evidence against the real `~/.tenaza/state`
+ * (subagents with 60/198/293 counted tool calls, zero mid-run samples):
+ * Claude Code's real PostToolUse payload INSIDE a subagent never carries
+ * `agent_transcript_path` at all — that field is SubagentStop's own, not
+ * PostToolUse's — so every 25th-call sample was silently skipped for the
+ * entire life of a subagent, with only ITS OWN final SubagentStop sample
+ * ever landing. Verified against the real on-disk shape: a parent
+ * transcript at `<dir>/<id>.jsonl` has its running subagents' own
+ * transcripts at `<dir>/<id>/subagents/agent-<agent_id>.jsonl` — a SIBLING
+ * directory named after the parent transcript's own basename (minus
+ * `.jsonl`), never the parent's transcript itself (M3's rule holds — this
+ * computes a DIFFERENT file entirely, never read as the subagent's own
+ * usage source).
+ */
+function deriveSubagentTranscriptPath(parentTranscriptPath: string, agentId: string): string {
+  const dir = path.dirname(parentTranscriptPath);
+  const base = path.basename(parentTranscriptPath, ".jsonl");
+  return path.join(dir, base, "subagents", `agent-${agentId}.jsonl`);
+}
+
+/**
+ * Which transcript `handlePostToolUse` samples usage from — ticket 05's M3
+ * rule (never the PARENT's transcript for a subagent's own sample) PLUS the
+ * derivation above: `agent_transcript_path` wins when Claude
+ * Code's payload actually carries it; absent, INSIDE a subagent, DERIVE it
+ * from the parent's own `transcript_path` instead of giving up on every
+ * mid-run sample — never falling back to sampling the parent's transcript
+ * directly, which would silently attribute the PARENT's tokens to this
+ * subagent (M3's exact bug). A missing or unreadable derived file degrades
+ * exactly like any other transcript `sampleUsage` already handles: no
+ * sample, never a wrong number, never a throw. A main-agent call (no
+ * `agent_id`) is UNCHANGED by this fix — it always samples `transcript_path`
+ * directly.
+ */
+function resolveSampleTranscriptPath(payload: ClaudePostToolUsePayload): string | undefined {
+  if (!payload.agent_id) return payload.transcript_path;
+  if (payload.agent_transcript_path) return payload.agent_transcript_path;
+  return payload.transcript_path
+    ? deriveSubagentTranscriptPath(payload.transcript_path, payload.agent_id)
+    : undefined;
+}
+
+/**
  * PostToolUse: count one tool call for the resolved Session, sampling
  * usage on exactly the 25th (and every 25th after) — AC2's own boundary.
  * Keyed by `agent_id ?? session_id` (ticket 05, M2), exactly like
@@ -474,12 +528,7 @@ export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayloa
   backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
   const count = countToolCall(home, session);
   if (!shouldSampleOnToolCall(count)) return;
-  // Inside a subagent, `transcript_path` names the PARENT's transcript —
-  // the exact M3 bug, recurring here (ticket 05 fix). Never fall back to
-  // it: no `agent_transcript_path` means no sample at all for this call,
-  // never someone else's tokens recorded under this Session.
-  const transcriptPath = payload.agent_id ? payload.agent_transcript_path : payload.transcript_path;
-  sampleUsage(home, session, transcriptPath);
+  sampleUsage(home, session, resolveSampleTranscriptPath(payload));
 }
 
 /**

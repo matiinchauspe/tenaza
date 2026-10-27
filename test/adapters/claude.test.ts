@@ -149,6 +149,44 @@ effect = "flag"
     expect((events[0] as { data: { parent?: string } }).data.parent).toBeUndefined();
   });
 
+  /**
+   * Ticket 11 (decision 09): `handleSessionStart` actually wires up
+   * `captureTerminalLocator()` — unit-tested on its own in
+   * `test/terminallocator.test.ts` (with an injected `psWalk`); this
+   * confirms the END-TO-END integration, by temporarily setting
+   * `process.env` to a known fixture (saved and restored either way) —
+   * legitimate here, unlike a flaky assumption about whatever this
+   * process's own real environment happens to carry.
+   */
+  test("SessionStart also captures and stores the terminal locator from its own env (decision 09, ticket 11)", async () => {
+    const saved = { TERM_PROGRAM: process.env.TERM_PROGRAM, ORCA_TERMINAL_HANDLE: process.env.ORCA_TERMINAL_HANDLE };
+    process.env.TERM_PROGRAM = "Orca";
+    process.env.ORCA_TERMINAL_HANDLE = "term_fixture123";
+    try {
+      await handleClaudeHook(home, { session_id: "sess-2", hook_event_name: "SessionStart", cwd: "/repo" });
+    } finally {
+      process.env.TERM_PROGRAM = saved.TERM_PROGRAM;
+      process.env.ORCA_TERMINAL_HANDLE = saved.ORCA_TERMINAL_HANDLE;
+    }
+
+    const events = readSessionEvents("sess-2", home);
+    expect(events[0]).toMatchObject({
+      type: "session.started",
+      data: { terminal: { termProgram: "Orca", orcaHandle: "term_fixture123" } },
+    });
+  });
+
+  test("SubagentStart never captures a terminal locator — resolving its PARENT's is the core's own job (ticket 11)", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+    const events = readSessionEvents("agent-1", home);
+    expect((events[0] as { data: { terminal?: unknown } }).data.terminal).toBeUndefined();
+  });
+
   test("SubagentStart writes session.started keyed by agent_id, parented to session_id", async () => {
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",

@@ -10,6 +10,7 @@ import { runSelfCheck } from "../health";
 import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { loadPolicy, policyWarning } from "../policy";
+import { captureTerminalLocator } from "../terminallocator";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
 
@@ -387,7 +388,19 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
  * state dir) must never crash the whole hook call and skip the self-check
  * that `runClaudeHookSafely` runs right after. A Session left without its
  * own `session.started` still gets one backfilled from a later Event's
- * `cwd` (ticket 05, M6).
+ * `cwd` (ticket 05, M6) — never WITH a terminal locator, since the backfill
+ * never runs at SessionStart (see `backfillSessionStartedIfMissing`'s own
+ * doc).
+ *
+ * Ticket 11 (decision 09): also captures the runtime-neutral terminal
+ * locator from this hook's own env and process table
+ * (`captureTerminalLocator`) — `undefined` (never an empty `{}`) folds
+ * away to nothing on `sessionStartedEvent`'s own `terminal` field when
+ * nothing was captured at all (an SSH session, an unrecognized terminal, a
+ * sandboxed test environment). Never called for a SUBAGENT
+ * (`handleSubagentStart`, below) — "a subagent's card focuses its parent's
+ * terminal" is resolved from the PARENT's own node at click time, so a
+ * subagent's `session.started` carries no `terminal` field at all.
  */
 export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
   try {
@@ -397,6 +410,7 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
         runtime: "claude",
         cwd: payload.cwd,
         capabilities: CLAUDE_CAPABILITIES,
+        terminal: captureTerminalLocator(),
       }),
     );
   } catch {

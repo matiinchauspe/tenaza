@@ -83,11 +83,63 @@ type DecidedRule =
   | { match: string; effect: Effect }
   | { tool: string; unless?: Record<string, unknown[]>; when?: Record<string, unknown>; effect: Effect };
 
+/**
+ * Ticket 11 (decision 09): a runtime-neutral TERMINAL LOCATOR, captured once
+ * at SessionStart from the hook's own env and process table — never
+ * re-queried later, and never carried by a subagent's own `session.started`
+ * at all (`adapters/claude.ts`'s `handleSubagentStart` never calls the
+ * capture function): "a subagent's card focuses its PARENT's terminal"
+ * (spec) is a RESOLUTION-time rule the core applies by walking to the
+ * parent's own node, not something every Session needs its own copy of.
+ * Every field is optional and independently absent — a locator with none of
+ * them set is never written at all (`sessionStartedEvent`'s own doc), and a
+ * v0.1 Session (or one started over SSH, or any environment this capture
+ * recognizes nothing in) simply has no `terminal` key, which the terminal
+ * table (`terminals.ts`) reads as "unknown" — greyed, never a crash.
+ *
+ * `tty` and `outerApp` come from the hook's own PID walk (research
+ * `docs/research/tenaza-focus-agent-terminal.md` §2), never from a
+ * per-terminal env var — they are the GENERIC fallback this ticket's own
+ * app-level row (Warp, Alacritty, VS Code, Cursor, an unrecognized
+ * terminal) resolves against. The per-terminal keys below are the SPECIFIC
+ * ones a known terminal's own row (`terminals.ts`) detects on: multiplexer
+ * keys (`tmuxPane`/`zellijPane`) are checked FIRST at resolution time
+ * ("multiplexer vars win" — the outer vars above are stale once a
+ * multiplexer server is running, §1.2's own reproduced gotcha), independent
+ * of the ORDER these fields are declared here.
+ */
+const TerminalLocatorSchema = z.object({
+  termProgram: z.string().optional(),
+  /** `__CFBundleIdentifier` — undocumented, but the strongest single app hint this capture has (research §2). */
+  bundleId: z.string().optional(),
+  /** The hook's own controlling tty (`ps -o tty= -p $PPID`) — the join key Terminal.app and iTerm2 match a tab/session by. */
+  tty: z.string().optional(),
+  /** The outermost `.app` on the parent-PID walk — the generic Level-1 fallback's own raise target when no `bundleId` was captured either. */
+  outerApp: z.string().optional(),
+  /** `PWD` — Ghostty's own cwd/title heuristic match key (no per-surface id exists to capture instead). */
+  pwd: z.string().optional(),
+  orcaHandle: z.string().optional(),
+  /** The first comma-field of `$TMUX` (the socket path) — `tmux -S <socket>` is how every live call reaches this session's own server. */
+  tmuxSocket: z.string().optional(),
+  tmuxPane: z.string().optional(),
+  itermSessionId: z.string().optional(),
+  weztermPane: z.string().optional(),
+  weztermSocket: z.string().optional(),
+  kittyWindowId: z.string().optional(),
+  /** Present only when kitty's remote control is configured (`allow_remote_control` + `listen_on`) — absent means Level 1 only for this row, by design (research §1.5). */
+  kittyListenOn: z.string().optional(),
+  zellijSession: z.string().optional(),
+  zellijPane: z.string().optional(),
+});
+export type TerminalLocator = z.infer<typeof TerminalLocatorSchema>;
+
 const SessionStartedData = z.object({
   parent: z.string().optional(),
   runtime: z.string(),
   cwd: z.string(),
   capabilities: z.array(CapabilitySchema),
+  /** Ticket 11 — omitted entirely (never an empty `{}`) when the capture yielded nothing, same convention every other optional Event field in this file already follows. */
+  terminal: TerminalLocatorSchema.optional(),
 });
 
 const SessionLabeledData = z.object({
@@ -158,6 +210,18 @@ const RunFailedData = z.object({
   exitCode: z.number(),
 });
 
+/**
+ * Ticket 11's "archive a TERMINÓ card" — a human Event in the log (ADR
+ * 0002: no state beside the logs), carried in the human log alongside
+ * `approval.resolved`/`live.answered`/`run.failed` (same multi-writer
+ * convention those already use: the Daemon writes this one on the human's
+ * `x`/archivar click, never the Session's own single-writer log). No
+ * payload beyond the envelope's own `session` — unlike a Resolution, there
+ * is nothing else to record: archiving names no command, carries no
+ * outcome, and is never reversed in v0.2 (no "unarchive").
+ */
+const SessionArchivedData = z.object({});
+
 const envelope = <Type extends string, Data extends z.ZodType>(
   type: Type,
   data: Data,
@@ -179,6 +243,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   envelope("approval.resolved", ApprovalResolvedData),
   envelope("live.answered", LiveAnsweredData),
   envelope("run.failed", RunFailedData),
+  envelope("session.archived", SessionArchivedData),
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
@@ -189,6 +254,7 @@ export type UsageSampledEvent = Extract<Event, { type: "usage.sampled" }>;
 export type ApprovalResolvedEvent = Extract<Event, { type: "approval.resolved" }>;
 export type LiveAnsweredEvent = Extract<Event, { type: "live.answered" }>;
 export type RunFailedEvent = Extract<Event, { type: "run.failed" }>;
+export type SessionArchivedEvent = Extract<Event, { type: "session.archived" }>;
 
 /**
  * Build an `action.decided` Event envelope with the current timestamp.
@@ -222,7 +288,7 @@ export function actionDecidedEvent(
  */
 export function sessionStartedEvent(
   session: string,
-  data: { parent?: string; runtime: string; cwd: string; capabilities: Capability[] },
+  data: { parent?: string; runtime: string; cwd: string; capabilities: Capability[]; terminal?: TerminalLocator },
 ): SessionStartedEvent {
   return EventSchema.parse({
     v: 1,
@@ -353,4 +419,22 @@ export function runFailedEvent(session: string, ref: string, exitCode: number): 
     type: "run.failed",
     data: { ref, exitCode },
   }) as RunFailedEvent;
+}
+
+/**
+ * Build a `session.archived` Event envelope with the current timestamp
+ * (ticket 11) — appended to the human log by the Daemon's
+ * `/sessions/<id>/archive` write route the instant the human's `x`/archivar
+ * click reaches it (`resolve.ts`'s `archiveSession`). `session` is the
+ * archived Session's own id — same envelope convention every other
+ * human-log Event already carries it under.
+ */
+export function sessionArchivedEvent(session: string): SessionArchivedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "session.archived",
+    data: {},
+  }) as SessionArchivedEvent;
 }

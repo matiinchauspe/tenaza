@@ -1,3 +1,4 @@
+import type { Action } from "./contract/event";
 import { deriveInbox, type InboxItem } from "./inbox";
 import { tenazaHome } from "./paths";
 import { renderSessionTree } from "./sessions";
@@ -11,18 +12,47 @@ import { renderSessionTree } from "./sessions";
  */
 export const UNBLOCKED_MARKER = "(ya corrió — no se pudo bloquear)";
 
+/** How much of an `mcp` Action's argument summary to show before truncating — one noisy argument (a long SQL string, say) must never dominate the line. */
+const MAX_MCP_ARGS_SUMMARY_LENGTH = 80;
+
 /**
- * `#id  Tool: command` — the Inbox's per-item line, from the spec's
- * Visibility section. v1 only normalizes `shell` Actions, each carrying the
- * originating tool's name (e.g. "Bash") for this display. Kept BYTE-FOR-BYTE
- * for a blocked item (tickets 01/02/03's own choice) — only an unblocked one
- * (ticket 06, ADR 0001: a `human` match a Capability-lacking caller could not
- * actually deny) appends the es-AR marker, since that command already ran
- * and `tenaza run` would run it a SECOND time.
+ * A short, single-line summary of an `mcp` Action's arguments (ticket 04):
+ * primitive `key=value` pairs, space-separated. Display only — the Policy
+ * itself never inspects argument content (SQL text and the like), and
+ * neither does this: it just stringifies whatever is there.
+ */
+function summarizeMcpArgs(args: Record<string, unknown>): string {
+  const summary = Object.entries(args)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+  return summary.length > MAX_MCP_ARGS_SUMMARY_LENGTH
+    ? `${summary.slice(0, MAX_MCP_ARGS_SUMMARY_LENGTH)}…`
+    : summary;
+}
+
+/**
+ * One Action, described for a human (ticket 04): `Tool: command` for
+ * `shell` (unchanged, byte-for-byte, from tickets 01-03), or the MCP tool's
+ * own name plus a short argument summary for `mcp`. The same words both
+ * `formatInboxLine` below and the 🟡 notification (`notify.ts`) use, so the
+ * one piece of copy a human reads twice never disagrees with itself.
+ */
+export function describeAction(action: Action): string {
+  if (action.kind === "shell") return `${action.tool}: ${action.command}`;
+  const summary = summarizeMcpArgs(action.args);
+  return summary ? `${action.tool}  ${summary}` : action.tool;
+}
+
+/**
+ * `#id  <described Action>` — the Inbox's per-item line, from the spec's
+ * Visibility section. Kept BYTE-FOR-BYTE for a blocked `shell` item
+ * (tickets 01/02/03's own choice) — only an unblocked one (ticket 06, ADR
+ * 0001: a `human` match a Capability-lacking caller could not actually
+ * deny) appends the es-AR marker, since that command already ran and
+ * `tenaza run` would run it a SECOND time.
  */
 export function formatInboxLine(item: InboxItem): string {
-  const { action } = item;
-  const base = `#${item.id}  ${action.tool}: ${action.command}`;
+  const base = `#${item.id}  ${describeAction(item.action)}`;
   return item.blocked ? base : `${base}  ${UNBLOCKED_MARKER}`;
 }
 

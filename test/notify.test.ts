@@ -110,6 +110,21 @@ describe("buildInboxOpenedNotification (🟡)", () => {
     expect(notification.message).not.toContain("tenaza run");
   });
 
+  test("an mcp Action (ticket 04) describes as the tool name plus a short args summary, never blank", () => {
+    const notification = buildInboxOpenedNotification(
+      {
+        id: 9,
+        session: "sess-1",
+        ts: "2026-01-01T00:00:00.000Z",
+        action: { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod" } },
+        blocked: true,
+      },
+      { project: "reservee", role: "RES-131" },
+    );
+
+    expect(notification.message).toBe("mcp__neon__run_sql  branch_id=br-prod · tenaza run 9");
+  });
+
   test("the tag is a stable, deterministic function of the Inbox id — never random, never time-based", () => {
     const row = {
       id: 7,

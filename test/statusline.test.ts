@@ -149,6 +149,18 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
     expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → #1 gh pr merge");
   });
 
+  test("an mcp Inbox item (ticket 04) as the most urgent one never crashes — `action.command` doesn't exist on it", () => {
+    appendEvent(
+      home,
+      actionDecidedEvent("sess-1", { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod" } }, "deny", {
+        tool: "mcp__*neon*__run_sql*",
+        effect: "human",
+      }),
+    );
+
+    expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → #1 mcp__neon__run_sql  branch_id=br-prod");
+  });
+
   test("a resolved Inbox item drops out of ✉, same as it drops out of tenaza status", () => {
     const { approvalResolvedEvent } = require("../src/contract/event");
     const { appendHumanEvent } = require("../src/log");

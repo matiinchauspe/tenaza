@@ -5,7 +5,7 @@ import { findInboxRow, type InboxRow } from "./inbox";
 import { readSessionEvents } from "./log";
 import { notifyRecorderPath, notifySoundStatePath, tenazaHome } from "./paths";
 import { buildSessionIndex, categoryWord, deriveProject, roleOf, type SessionNode } from "./sessions";
-import { UNBLOCKED_MARKER } from "./status";
+import { describeAction, UNBLOCKED_MARKER } from "./status";
 
 /**
  * The single notifier port (ticket 08): everything upstream builds one of
@@ -84,19 +84,21 @@ export function maxUsageSample(events: Event[]): number | undefined {
 /**
  * 🟡 — a new Inbox item (ticket 08, q19's own worked example):
  * `🟡 Tenaza · te espera · inbox #14` / `reservee / RES-131 / sesión b71` /
- * `Bash: gh pr merge 58 --merge · tenaza run 14`. An UNBLOCKED item (ticket
- * 06, ADR 0001) still notifies — the human still needs to know it happened —
- * but the message never says `tenaza run <id>`, which would be wrong:
- * `run` REFUSES on an unblocked item (`resolve.ts`). It gets the SAME
- * es-AR marker `status`'s own Inbox line already uses for it instead, so
- * the one piece of copy a human reads twice (notification, then `status`)
- * never disagrees with itself.
+ * `Bash: gh pr merge 58 --merge · tenaza run 14`. An `mcp` Action (ticket 04)
+ * describes the same way `status`'s Inbox line does (`describeAction`): the
+ * tool's own name plus a short argument summary, never blank. An UNBLOCKED
+ * item (ticket 06, ADR 0001) still notifies — the human still needs to know
+ * it happened — but the message never says `tenaza run <id>`, which would
+ * be wrong: `run` REFUSES on an unblocked item (`resolve.ts`). It gets the
+ * SAME es-AR marker `status`'s own Inbox line already uses for it instead,
+ * so the one piece of copy a human reads twice (notification, then
+ * `status`) never disagrees with itself.
  */
 export function buildInboxOpenedNotification(
   row: InboxRow,
   context: { project: string; role: string },
 ): Notification {
-  const commandLine = row.action.kind === "shell" ? `${row.action.tool}: ${row.action.command}` : "";
+  const commandLine = describeAction(row.action);
   const message = row.blocked
     ? `${commandLine} · tenaza run ${row.id}`
     : `${commandLine}  ${UNBLOCKED_MARKER}`;

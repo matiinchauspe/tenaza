@@ -5,6 +5,7 @@ import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 import { buildSessionIndex, nodeCategory } from "./sessions";
+import { describeAction } from "./status";
 
 /**
  * `tenaza statusline`'s own three counts — the same derived state `tenaza
@@ -91,9 +92,20 @@ function formatFlagged(flagged: number, thresholdTokens: number): string {
   return `⚑ ${flagged} >${k}k`;
 }
 
+/**
+ * The "most urgent" slot's own summary of `action` — `firstWords` of the
+ * command for `shell` (unchanged, byte-for-byte, from ticket 07), or the
+ * same tool-plus-args description `status`'s Inbox line uses for `mcp`
+ * (ticket 04) — `top.action.command` simply doesn't exist on an `mcp`
+ * Action, so this never falls back to a blind property read.
+ */
+function formatInboxSummary(action: InboxItem["action"]): string {
+  return action.kind === "shell" ? firstWords(action.command) : describeAction(action);
+}
+
 function formatInbox(count: number, top: InboxItem | undefined): string {
   if (count === 0 || top === undefined) return "✉ 0";
-  return `✉ ${count} → #${top.id} ${firstWords(top.action.command)}`;
+  return `✉ ${count} → #${top.id} ${formatInboxSummary(top.action)}`;
 }
 
 /**

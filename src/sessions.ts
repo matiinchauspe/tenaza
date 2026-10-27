@@ -268,9 +268,26 @@ export function createCachingGitRootResolver(
  * Policy match, no Label. There is nothing useful to show for it, so
  * `renderSessionTree` hides it rather than rendering a permanent
  * "(sin proyecto) sin datos cerró" row forever.
+ *
+ * Widened 2026-10-27 for a NARROWER legacy shape the
+ * same side-agents also leave behind — a log whose ENTIRE content is a
+ * single `session.ended` with reason `"subagent_stop"` (no usage sample at
+ * all, e.g. an unreadable or absent transcript). `adapters/claude.ts`'s own
+ * `handleSubagentStop` now refuses to WRITE this shape going forward (it
+ * never appends anything for an `agent_id` with no existing log), but a
+ * log that already landed on disk before that fix shipped is never
+ * deleted (ADR 0002) — this is what still hides it from a render. Gated on
+ * `endedReason` specifically (never on the type-set alone, unlike the
+ * two-Event case above): a GENUINE top-level Session that happens to have
+ * ended with no `session.started` at all (its own end carried no `cwd` to
+ * backfill from either) is a real, if sparse, Session — never silently
+ * dropped just because its log happens to be short. `endedReason` is
+ * `undefined` for every pre-ticket-14 caller, which keeps this branch
+ * permanently false and the original two-Event rule untouched for them.
  */
-export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>): boolean {
-  return eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled");
+export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>, endedReason?: string): boolean {
+  if (eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled")) return true;
+  return eventTypes.size === 1 && eventTypes.has("session.ended") && endedReason === "subagent_stop";
 }
 
 /**
@@ -484,7 +501,9 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
 
   const index = buildSessionIndex(events);
   const eventTypes = eventTypesBySession(events);
-  const nodes = [...index.values()].filter((node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()));
+  const nodes = [...index.values()].filter(
+    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason),
+  );
   if (nodes.length === 0) return "";
 
   // `projectOf` only feeds `groupRootsByProject` now — `childrenIndex`

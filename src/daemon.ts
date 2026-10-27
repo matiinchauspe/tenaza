@@ -298,7 +298,9 @@ export function buildBoardPayload(
   // time-based classification here (TIME IS STATE).
   const archivedAt = latestArchiveTimestamps(home);
   const visibleSessions = [...fullIndex.values()].filter(
-    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set()) && !isArchived(archivedAt.get(node.id), node.lastEventTs),
+    (node) =>
+      !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason) &&
+      !isArchived(archivedAt.get(node.id), node.lastEventTs),
   );
   const policy = loadPolicy(home);
   const resolutions = deriveResolutionTraceBySession(home);

@@ -3,11 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
-import { liveAnsweredEvent } from "../../src/contract/event";
+import { liveAnsweredEvent, sessionEndedEvent } from "../../src/contract/event";
 import { writeAlive } from "../../src/daemonlink";
 import { decideAction } from "../../src/decide";
 import { inboxIdentityHash } from "../../src/identity";
-import { appendHumanEvent, readSessionEvents } from "../../src/log";
+import { appendEvent, appendHumanEvent, readSessionEvents } from "../../src/log";
 import { readNotificationRecorder } from "../../src/notify";
 import { renderSessionTree } from "../../src/sessions";
 
@@ -207,6 +207,16 @@ effect = "flag"
   });
 
   test("SubagentStop writes session.ended for the agent_id Session, never the parent", async () => {
+    // A REAL subagent — as of 2026-10-27, SubagentStop writes nothing at
+    // all for an agent_id with no prior log, so the SubagentStart that
+    // actually happens for a real subagent comes first.
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
@@ -216,8 +226,8 @@ effect = "flag"
     expect(response).toBeUndefined();
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
     const events = readSessionEvents("agent-1", home);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ session: "agent-1", type: "session.ended" });
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ session: "agent-1", type: "session.ended" });
   });
 
   test("SessionEnd writes session.ended for session_id, carrying the runtime's reason", async () => {
@@ -251,6 +261,13 @@ effect = "flag"
   });
 
   test("SubagentStop with an agent_transcript_path ALSO samples usage for agent_id, not session_id", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
@@ -261,7 +278,7 @@ effect = "flag"
     expect(response).toBeUndefined();
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
     const events = readSessionEvents("agent-1", home);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
     expect(events).toContainEqual(
       expect.objectContaining({ type: "usage.sampled", data: { context_tokens: 242170 } }),
     );
@@ -273,6 +290,13 @@ effect = "flag"
     // SAME huge token count as their parent. Give the two fields
     // DIFFERENT fixtures and assert the subagent's own (smaller) number
     // wins — proof `transcript_path` here is read by nobody.
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
@@ -289,6 +313,13 @@ effect = "flag"
   });
 
   test("SubagentStop with only a (parent) transcript_path and no agent_transcript_path samples nothing — never falls back to the wrong transcript", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repo",
+    });
+
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
@@ -298,8 +329,8 @@ effect = "flag"
 
     expect(response).toBeUndefined();
     const events = readSessionEvents("agent-1", home);
-    expect(events).toHaveLength(1);
-    expect(events[0]?.type).toBe("session.ended");
+    expect(events.map((e) => e.type)).toEqual(["session.started", "session.ended"]);
+    expect(events.some((e) => e.type === "usage.sampled")).toBe(false);
   });
 
   test("Stop samples usage for session_id, without ending the Session", async () => {
@@ -614,6 +645,13 @@ effect = "human"
     test("SubagentStop samples and notifies for agent_id, never the parent session_id", async () => {
       await handleClaudeHook(home, {
         session_id: "sess-1",
+        hook_event_name: "SubagentStart",
+        agent_id: "agent-1",
+        cwd: "/repo",
+      });
+
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
         hook_event_name: "SubagentStop",
         agent_id: "agent-1",
         agent_transcript_path: fixture("above-threshold.jsonl"),
@@ -839,8 +877,18 @@ describe("SubagentStop deliberately never backfills (ticket 05 fix — would def
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("SubagentStop with cwd + agent_transcript_path and NOTHING else stays hidden from status — exactly the side-agent signature isNoiseSession hides", async () => {
-    await handleClaudeHook(home, {
+  /**
+   * As of 2026-10-27: this scenario — a bare SubagentStop with
+   * NO prior SubagentStart or backfill — is Claude Code's own INTERNAL
+   * side-agent signature (216 such logs measured in 24h on the real
+   * `~/.tenaza/state`). It used to write `session.ended` + a usage sample
+   * anyway and rely on `isNoiseSession` to hide the result (this test's
+   * own former title/assertions); it now writes NOTHING at all — no log
+   * is ever born for it, superseding the old "write it, then hide it"
+   * shape rather than merely relying on the board-side filter.
+   */
+  test("a NEVER-STARTED agent_id (no prior SubagentStart, no backfill) gets nothing written at all — no log is ever born for it", async () => {
+    const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStop",
       agent_id: "agent-1",
@@ -848,10 +896,107 @@ describe("SubagentStop deliberately never backfills (ticket 05 fix — would def
       agent_transcript_path: fixture("below-threshold.jsonl"),
     });
 
-    const events = readSessionEvents("agent-1", home);
-    expect(events.map((e) => e.type).sort()).toEqual(["session.ended", "usage.sampled"]);
-    expect(events.some((e) => e.type === "session.started")).toBe(false);
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("agent-1", home)).toHaveLength(0);
     expect(renderSessionTree(home)).not.toContain("agent-1");
+  });
+
+  test("a REAL subagent (SubagentStart fired first) still gets its session.ended + usage sample, unaffected", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repos/some-project",
+    });
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events.map((e) => e.type)).toEqual(["session.started", "session.ended", "usage.sampled"]);
+  });
+
+  test("a subagent backfilled by an earlier PostToolUse (real work, no explicit SubagentStart) still gets its session.ended + usage sample", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      agent_id: "agent-1",
+      cwd: "/repos/some-project",
+    });
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events.some((e) => e.type === "session.started")).toBe(true);
+    expect(events.some((e) => e.type === "session.ended")).toBe(true);
+  });
+
+  test("a RESUMED subagent (SubagentStart fires again under the same agent_id, ticket 13's own revival) keeps working through a second SubagentStop", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repos/some-project",
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+    // SendMessage re-fires SubagentStart under the SAME agent_id.
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-1",
+      cwd: "/repos/some-project",
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-1",
+      agent_transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    const events = readSessionEvents("agent-1", home);
+    expect(events.filter((e) => e.type === "session.started")).toHaveLength(2);
+    expect(events.filter((e) => e.type === "session.ended")).toHaveLength(2);
+  });
+
+  test("a parse error on the SubagentStop payload fails safe: no new block, no throw, exit clean", async () => {
+    await expect(
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "SubagentStop",
+        // Malformed: agent_id missing entirely — must never throw.
+      } as never),
+    ).resolves.toBeUndefined();
+  });
+
+  /**
+   * Board seam: a log ALREADY on disk from before the
+   * hook fix shipped — session.ended{subagent_stop} as its ONLY Event, no
+   * usage sample at all (an absent/unreadable transcript) — is never
+   * deleted (ADR 0002), but must still never show as a phantom TERMINÓ
+   * card.
+   */
+  test("a legacy log (pre-fix shape: only session.ended{subagent_stop}, no usage sample) stays hidden from status — never deleted, never shown", () => {
+    appendEvent(home, sessionEndedEvent("agent-legacy", "subagent_stop"));
+    expect(renderSessionTree(home)).not.toContain("agent-legacy");
+  });
+
+  test("a legacy top-level Session that ended with no session.started AND a DIFFERENT reason is never mistaken for the phantom shape", () => {
+    appendEvent(home, sessionEndedEvent("sess-legacy-real", "prompt_input_exit"));
+    expect(renderSessionTree(home)).toContain("sess-legacy-real");
   });
 });
 

@@ -454,8 +454,27 @@ export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPa
  * Deliberately does NOT call `backfillSessionStartedIfMissing` (ticket 05
  * fix — see that function's own doc comment): this is the ONE lifecycle
  * event where backfilling would defeat `isNoiseSession`'s hide.
+ *
+ * Found 2026-10-27, measured on the real `~/.tenaza/state`
+ * (216 such logs in 24h, 89% inside a `run_in_background` window, not
+ * tied to tool-call volume): Claude Code's own INTERNAL side-agents fire
+ * SubagentStop WITHOUT ever firing SubagentStart — no `session.started`,
+ * no cwd, no parent, nothing observed for this `agent_id` at all before
+ * this call. Appending unconditionally used to BORN a brand-new log
+ * holding only this one Event (or that plus a usage sample), which the
+ * board then rendered as a "(sin proyecto) · sin datos · terminal
+ * desconocida" phantom TERMINÓ card — one new log per side-agent, forever.
+ * Fixed at the source: an `agent_id` with NO existing log at all (never
+ * started by a real SubagentStart, never backfilled by an earlier
+ * PreToolUse/PostToolUse doing real work — exactly the signature the doc
+ * comment above already names) gets NOTHING written for it here — no file
+ * is ever created. A REAL subagent (its log already exists either way) is
+ * completely unaffected, resumed subagents (ticket 13's own revival)
+ * included — both already guarantee a non-empty log by the time this
+ * fires.
  */
 export function handleSubagentStop(home: string, payload: ClaudeSubagentStopPayload): void {
+  if (readSessionEvents(payload.agent_id, home).length === 0) return;
   appendEvent(home, sessionEndedEvent(payload.agent_id, "subagent_stop"));
   sampleUsage(home, payload.agent_id, payload.agent_transcript_path);
 }

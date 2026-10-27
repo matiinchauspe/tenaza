@@ -2,7 +2,9 @@ import type { Action, Decision, Event } from "./contract/event";
 import { FULL_HASH_LENGTH, inboxIdentityHash, shortHashIndex } from "./identity";
 import {
   type LoggedEvent,
+  type SessionLogCache,
   readAllSessionEventsWithLinesTolerant,
+  readAllSessionLogsCached,
   readHumanEvents,
   readHumanEventsTolerant,
 } from "./log";
@@ -174,9 +176,20 @@ function resolvedRefsFromEvents(events: Event[], chronological: readonly InboxRo
  * dropped, so a caller that needs it (`deriveInboxReport` below) gets it
  * from the SAME read, never a second, independent rescan of every
  * Session's log.
+ *
+ * `cache` (ticket 13, criterion 3) is the Daemon's own per-process log
+ * cache, passed through ONLY by `deriveInbox` below — every other caller
+ * (the CLI, the hook path, `deriveInboxReport`) stays on the uncached read,
+ * exactly as before this ticket: a one-shot process gains nothing from a
+ * memoization that dies with it.
  */
-function allHumanMatchRowsReport(home: string): { rows: InboxRow[]; skipped: number } {
-  const { rows: logged, skipped } = readAllSessionEventsWithLinesTolerant(home);
+function allHumanMatchRowsReport(
+  home: string,
+  cache?: SessionLogCache,
+): { rows: InboxRow[]; skipped: number } {
+  const { rows: logged, skipped } = cache
+    ? readAllSessionLogsCached(home, cache)
+    : readAllSessionEventsWithLinesTolerant(home);
   const matches: HumanMatchLine[] = logged
     .filter((row): row is { event: Extract<Event, { type: "action.decided" }>; line: number } =>
       row.event.type === "action.decided" && row.event.data.rule.effect === "human",
@@ -224,9 +237,14 @@ function resolvedRefs(home: string): Set<string> {
  * closed is removed (`dedupOutstanding`) — so the id a denied agent was
  * told matches what `status` shows afterwards, and closing one item never
  * changes another's.
+ *
+ * `cache` (ticket 13): the Daemon's own per-process log cache, passed
+ * through to `allHumanMatchRowsReport` — `daemon.ts`'s `buildBoardPayload`
+ * is the one caller that has one. Omitted, this is byte-for-byte the same
+ * derivation every other caller already got.
  */
-export function deriveInbox(home: string = tenazaHome()): InboxItem[] {
-  const chronological = allHumanMatchRows(home);
+export function deriveInbox(home: string = tenazaHome(), cache?: SessionLogCache): InboxItem[] {
+  const chronological = allHumanMatchRowsReport(home, cache).rows;
   return dedupOutstanding(chronological, resolvedRefsReport(home, chronological).refs);
 }
 

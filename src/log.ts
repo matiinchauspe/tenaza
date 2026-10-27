@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { type Event, EventSchema } from "./contract/event";
 import { humanLogPath, sessionLogPath, sessionsDir, tenazaHome } from "./paths";
@@ -292,6 +292,109 @@ export function readAllSessionEventsWithLinesTolerant(
  */
 export function readAllSessionEvents(home: string = tenazaHome()): Event[] {
   return readAllSessionEventsTolerant(home).events;
+}
+
+// ---------------------------------------------------------------------------
+// The Daemon's per-process log cache (ticket 13, criterion 3): memoize ONE
+// Session log's own parse by its (mtime, size) so a poll tick that finds a
+// SINGLE Session's log changed never pays to re-read-and-reparse the
+// thousand others that didn't. Not where ticket 13's measured ~440 ms went
+// (that was `deriveProject`'s per-Session `git` spawn — `sessions.ts`'s
+// `createCachingGitRootResolver`): re-reading every log measured ~3 ms at
+// 1165 Sessions. It stays because that read still grows with total history,
+// never with how much actually changed. In memory only, scoped to ONE Daemon process
+// (`daemon.ts`'s `DaemonContext`) — never written to disk, never a second
+// source of truth: ADR 0002's "no state beside the logs" governs what a
+// READER trusts across RESTARTS, and a process-local memoization of a PURE
+// function of the files' own (mtime, size, bytes) is neither — a fresh
+// Daemon launch starts cold and reparses everything once, byte-for-byte the
+// same result `readLogWithLinesTolerant` always gave. `tenaza status`, the
+// hook path and every other one-shot caller keep reading fresh every time
+// (no cache instance to pass), exactly as before this ticket.
+// ---------------------------------------------------------------------------
+
+interface CachedSessionLog {
+  mtimeMs: number;
+  size: number;
+  rows: LoggedEvent[];
+  skipped: number;
+}
+
+/**
+ * One Daemon's own memoization table, keyed by Session log FILE NAME (every
+ * entry already lives under the same `sessionsDir`, so the name alone is
+ * unambiguous). `createSessionLogCache` is the only constructor — nothing
+ * else builds one by hand, and nothing persists it past the process that
+ * created it.
+ */
+export interface SessionLogCache {
+  readonly files: Map<string, CachedSessionLog>;
+}
+
+/** A fresh, empty cache — one per Daemon launch (never shared across a different `TENAZA_HOME`, never reused across a restart). */
+export function createSessionLogCache(): SessionLogCache {
+  return { files: new Map() };
+}
+
+/**
+ * Every Session's log, parsed WITH its own per-event line number (the
+ * strictly more informative shape `readLogWithLinesTolerant` already gives
+ * — `readAllSessionEventsCached` below derives the plain `Event[]` view from
+ * this SAME pass, never a second one over the files), reusing a cached parse
+ * for any file whose (mtime, size) hasn't moved since `cache` last saw it.
+ * Same directory listing, in the SAME (unsorted) order, as
+ * `readAllSessionEventsWithLinesTolerant` — ticket 13's own differential
+ * test holds this to byte-identical output against the uncached path over
+ * one fixture home, so the enumeration order can never drift between the
+ * two paths.
+ *
+ * A (mtime, size) match is treated as "unchanged" — the SAME cheap signal
+ * `daemon.ts`'s own `computeStateSignature` already keys its "did anything
+ * change at all" check on, not a new assumption introduced here. A Session
+ * log that disappeared since the last read (hand-deleted) drops out of the
+ * cache in the SAME pass, so a later file that happens to reuse that exact
+ * name can never resurrect a stale parse.
+ */
+export function readAllSessionLogsCached(
+  home: string,
+  cache: SessionLogCache,
+): { rows: LoggedEvent[]; skipped: number } {
+  const dir = sessionsDir(home);
+  if (!existsSync(dir)) return { rows: [], skipped: 0 };
+
+  const names = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+  const seen = new Set<string>();
+  let rows: LoggedEvent[] = [];
+  let skipped = 0;
+
+  for (const name of names) {
+    seen.add(name);
+    const file = path.join(dir, name);
+    const stat = statSync(file);
+    const cached = cache.files.get(name);
+    const hit = cached !== undefined && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size;
+    const result = hit ? cached : readLogWithLinesTolerant(file);
+    if (!hit) {
+      cache.files.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, rows: result.rows, skipped: result.skipped });
+    }
+    rows = rows.concat(result.rows);
+    skipped += result.skipped;
+  }
+
+  for (const name of cache.files.keys()) {
+    if (!seen.has(name)) cache.files.delete(name);
+  }
+
+  return { rows, skipped };
+}
+
+/** The plain `Event[]` view of `readAllSessionLogsCached` — what `buildSessionIndex`/`eventTypesBySession` need, derived from the SAME cached pass rather than a second, independent read. */
+export function readAllSessionEventsCached(
+  home: string,
+  cache: SessionLogCache,
+): { events: Event[]; skipped: number } {
+  const { rows, skipped } = readAllSessionLogsCached(home, cache);
+  return { events: rows.map((row) => row.event), skipped };
 }
 
 /** The human log's Events, plus how many of its lines could not be read — the human-log counterpart to `readAllSessionEventsTolerant`. */

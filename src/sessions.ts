@@ -227,6 +227,39 @@ export function deriveProject(
 }
 
 /**
+ * Ticket 13, criterion 3 — the ACTUAL measured cause, found by profiling
+ * `buildBoardPayload` once the log-read cache (`log.ts`'s `SessionLogCache`)
+ * turned out NOT to be where the ~440 ms at real scale went: every Session
+ * with no `project` Label spawns its OWN `git … rev-parse` process in
+ * `defaultGitRootFor`, and the real-scale fixture (1165 Sessions, 197 of
+ * them visible) has only 8 DISTINCT `cwd`s among them — one spawn per
+ * Session instead of one per distinct `cwd` is what actually cost
+ * ~450 ms, confirmed by isolating this one call from the rest of
+ * `buildBoardPayload` and timing it alone.
+ *
+ * A `git` worktree's root for a given `cwd` cannot change within the
+ * lifetime of ONE Daemon process (the worktree would have to move or be
+ * deleted and recreated elsewhere while the Daemon keeps running) — so,
+ * unlike the log cache, this one never needs an invalidation key at all:
+ * once resolved, a `cwd`'s root is memoized for good. `tenaza status` and
+ * `statusline` (one-shot processes) have no reason to pay for a cache that
+ * dies with them — `deriveProject`'s own default stays exactly as it was;
+ * only `daemon.ts` builds ONE resolver via this and passes it down for the
+ * life of the Daemon.
+ */
+export function createCachingGitRootResolver(
+  resolveGitRoot: (cwd: string) => string | undefined = defaultGitRootFor,
+): (cwd: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (cwd: string): string | undefined => {
+    if (cache.has(cwd)) return cache.get(cwd);
+    const root = resolveGitRoot(cwd);
+    cache.set(cwd, root);
+    return root;
+  };
+}
+
+/**
  * Claude Code's own internal side-agents (ticket 05 — #1436's "~85 phantom
  * Sessions" measured on the human's real `tenaza status`, 2026-10-25): a
  * Session whose ENTIRE observed log is its own end plus a Usage sample —

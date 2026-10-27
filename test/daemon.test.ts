@@ -11,16 +11,30 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { actionDecidedEvent, approvalResolvedEvent, sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+import {
+  actionDecidedEvent,
+  approvalResolvedEvent,
+  sessionArchivedEvent,
+  sessionEndedEvent,
+  sessionStartedEvent,
+  usageSampledEvent,
+} from "../src/contract/event";
 import { readFocusRecorder } from "../src/focus";
-import { isHeartbeatFresh, readDaemonToken, readOpenRecorder, DEFAULT_HEARTBEAT_STALE_MS } from "../src/daemon";
+import {
+  buildBoardPayload,
+  isHeartbeatFresh,
+  readDaemonToken,
+  readOpenRecorder,
+  DEFAULT_HEARTBEAT_STALE_MS,
+} from "../src/daemon";
 import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
 import { LIVE_ANSWER_CUTOFF_MS } from "../src/live";
 import { postLiveAnswer } from "../src/resolve";
-import { appendEvent, appendHumanEvent, readHumanEvents } from "../src/log";
-import { daemonAlivePath, daemonTokenPath, DEFAULT_DAEMON_PORT } from "../src/paths";
+import { appendEvent, appendHumanEvent, createSessionLogCache, readHumanEvents } from "../src/log";
+import { daemonAlivePath, daemonTokenPath, sessionLogPath, DEFAULT_DAEMON_PORT } from "../src/paths";
 import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES, DEFAULT_WAIT_SECONDS } from "../src/policy";
+import { createCachingGitRootResolver } from "../src/sessions";
 import { RUN_FAILURE_MARKER } from "../src/runoutput";
 import { TENAZA_VERSION } from "../src/version";
 
@@ -1360,6 +1374,10 @@ describe("write route — archive (ticket 11)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Ticket 13 — realtime parity, the Daemon side (criteria 2 and 3)
+// ---------------------------------------------------------------------------
+
 /**
  * Ticket 13, criterion 2: `Bun.serve`'s own idle timeout (documented default
  * 10 s; measured drop at ~10–12 s against the installed Bun version, 1.4.3)
@@ -1421,4 +1439,172 @@ describe("tenaza ui — the /events idle-timeout override (ticket 13, criterion 
       await daemon.stop();
     }
   }, 20000);
+});
+
+/**
+ * Ticket 13, criterion 3: `buildBoardPayload` reading EVERY Session log on
+ * every changed tick (a cost that grows with history; the measured ~440 ms
+ * was the `git` spawns, covered further below) is now OPTIONALLY backed by
+ * a per-process `SessionLogCache` (`log.ts`) keyed on each file's own
+ * (mtime, size). This is a PERFORMANCE change, never a behaviour one —
+ * the differential test below is the ticket's own acceptance bar: the
+ * cached path's JSON output must be byte-identical to the uncached one,
+ * over the SAME fixture home, cold AND after an incremental change.
+ */
+describe("buildBoardPayload — cached vs uncached (ticket 13, criterion 3)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-cache-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * A deliberately varied fixture — alive top-level Session with a
+   * `flag`-effect last signal, a nested subagent, a plain ended ("TERMINÓ")
+   * Session, an ended-AND-archived one (ticket 11, hidden from the board),
+   * one OPEN Inbox item and one RESOLVED one (so the resolution trace is
+   * non-empty too) — so the differential test below exercises every shape
+   * `buildBoardPayload` folds together, not just the empty-home case.
+   */
+  function seedFixture(): void {
+    appendEvent(
+      home,
+      sessionStartedEvent("parent-1", { runtime: "claude", cwd: home, capabilities: ["observe", "measure"] }),
+    );
+    appendEvent(home, usageSampledEvent("parent-1", { context_tokens: 12000 }));
+    appendEvent(
+      home,
+      actionDecidedEvent("parent-1", { kind: "shell", command: "echo hi", tool: "Bash" }, "allow", {
+        match: "echo",
+        effect: "flag",
+      }),
+    );
+
+    appendEvent(
+      home,
+      sessionStartedEvent("child-1", { parent: "parent-1", runtime: "claude", cwd: home, capabilities: ["observe"] }),
+    );
+
+    appendEvent(home, sessionStartedEvent("ended-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    appendEvent(home, sessionEndedEvent("ended-1", "clear"));
+
+    appendEvent(home, sessionStartedEvent("archived-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    appendEvent(home, sessionEndedEvent("archived-1", "clear"));
+    appendHumanEvent(home, sessionArchivedEvent("archived-1"));
+
+    appendEvent(
+      home,
+      actionDecidedEvent("parent-1", { kind: "shell", command: "gh pr merge", tool: "Bash" }, "deny", {
+        match: "gh pr merge",
+        effect: "human",
+      }),
+    );
+
+    appendEvent(home, sessionStartedEvent("resolved-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+    appendEvent(
+      home,
+      actionDecidedEvent(
+        "resolved-1",
+        { kind: "shell", command: "git worktree remove x", tool: "Bash" },
+        "deny",
+        { match: "git worktree remove", effect: "human" },
+      ),
+    );
+    appendHumanEvent(home, approvalResolvedEvent("resolved-1", inboxIdentityHash("resolved-1", 1), "done", "run"));
+  }
+
+  test("a cold cached read is byte-identical to the uncached read, and stays identical on a warm re-read with nothing changed", () => {
+    seedFixture();
+
+    const uncached = JSON.stringify(buildBoardPayload(home));
+
+    const cache = createSessionLogCache();
+    const cachedCold = JSON.stringify(buildBoardPayload(home, cache));
+    expect(cachedCold).toBe(uncached);
+
+    const cachedWarm = JSON.stringify(buildBoardPayload(home, cache));
+    expect(cachedWarm).toBe(uncached);
+  });
+
+  test("after ONE Session's log changes, a warm cached read is byte-identical to a fresh uncached read of the SAME updated state", () => {
+    seedFixture();
+
+    const cache = createSessionLogCache();
+    buildBoardPayload(home, cache); // warm it, same as the Daemon's own connect-time push
+
+    // One more real Event lands on ONE Session — the realistic shape of a
+    // single hook call between two watcher ticks.
+    appendEvent(home, usageSampledEvent("parent-1", { context_tokens: 45000 }));
+
+    const freshUncached = JSON.stringify(buildBoardPayload(home));
+    const cachedAfterChange = JSON.stringify(buildBoardPayload(home, cache));
+    expect(cachedAfterChange).toBe(freshUncached);
+  });
+
+  test("a Session log hand-deleted since the last warm read drops out of a cached read too — never served stale from the cache", () => {
+    seedFixture();
+    const cache = createSessionLogCache();
+    buildBoardPayload(home, cache); // warms the cache with every fixture file, including "ended-1"
+
+    rmSync(sessionLogPath("ended-1", home), { force: true });
+
+    const freshUncached = JSON.stringify(buildBoardPayload(home));
+    const cachedAfterDelete = JSON.stringify(buildBoardPayload(home, cache));
+    expect(cachedAfterDelete).toBe(freshUncached);
+    expect(JSON.parse(cachedAfterDelete).sessions.map((s: { id: string }) => s.id)).not.toContain("ended-1");
+  });
+
+  test("a brand-new Session's log, written after the cache was warmed, is picked up alongside every already-cached file", () => {
+    seedFixture();
+    const cache = createSessionLogCache();
+    buildBoardPayload(home, cache);
+
+    appendEvent(home, sessionStartedEvent("new-1", { runtime: "claude", cwd: home, capabilities: ["observe"] }));
+
+    const freshUncached = JSON.stringify(buildBoardPayload(home));
+    const cachedAfterChange = JSON.stringify(buildBoardPayload(home, cache));
+    expect(cachedAfterChange).toBe(freshUncached);
+    expect(JSON.parse(cachedAfterChange).sessions.map((s: { id: string }) => s.id)).toContain("new-1");
+  });
+
+  /**
+   * Criterion 3's ACTUAL measured cause (found by profiling, not the
+   * framing's own guess): `deriveProject`'s `git` spawn, once per Session
+   * lacking a `project` Label — `createCachingGitRootResolver`
+   * (`sessions.ts`) memoizes it by `cwd`. A FAKE resolver (never a real
+   * `git` spawn — deterministic and CI-safe) proves two things: the
+   * memoized resolver is called once per DISTINCT `cwd`, never once per
+   * Session, and — same bar as every other cache in this ticket — it never
+   * changes the resolved VALUE.
+   */
+  test("the git-root resolver cache is called once per DISTINCT cwd, never once per Session, and never changes the resolved project", () => {
+    appendEvent(home, sessionStartedEvent("a-1", { runtime: "claude", cwd: "/repo/one", capabilities: ["observe"] }));
+    appendEvent(home, sessionStartedEvent("a-2", { runtime: "claude", cwd: "/repo/one", capabilities: ["observe"] }));
+    appendEvent(home, sessionStartedEvent("b-1", { runtime: "claude", cwd: "/repo/two", capabilities: ["observe"] }));
+
+    let calls = 0;
+    const fakeResolveGitRoot = (cwd: string): string | undefined => {
+      calls += 1;
+      return `/git-root-for${cwd}`;
+    };
+
+    const withoutMemo = JSON.stringify(buildBoardPayload(home, undefined, fakeResolveGitRoot));
+    expect(calls).toBe(3); // one spawn per SESSION — the pre-ticket-13 shape, reproduced here with a fake
+
+    calls = 0;
+    const memoized = createCachingGitRootResolver(fakeResolveGitRoot);
+    const withMemo = JSON.stringify(buildBoardPayload(home, undefined, memoized));
+    expect(calls).toBe(2); // one spawn per DISTINCT cwd — "/repo/one" and "/repo/two"
+    expect(withMemo).toBe(withoutMemo);
+
+    // A second call through the SAME memoized resolver spawns nothing further.
+    calls = 0;
+    const secondCall = JSON.stringify(buildBoardPayload(home, undefined, memoized));
+    expect(calls).toBe(0);
+    expect(secondCall).toBe(withoutMemo);
+  });
 });

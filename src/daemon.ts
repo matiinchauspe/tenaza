@@ -16,7 +16,7 @@ import {
 } from "./daemonlink";
 import { runFocusPlan } from "./focus";
 import { type InboxItem, deriveInbox, deriveResolutionTraceBySession } from "./inbox";
-import { readAllSessionEvents } from "./log";
+import { createSessionLogCache, readAllSessionEvents, readAllSessionEventsCached, type SessionLogCache } from "./log";
 import {
   daemonAlivePath,
   daemonTokenPath,
@@ -40,6 +40,7 @@ import {
 import {
   UNKNOWN_PROJECT,
   buildSessionIndex,
+  createCachingGitRootResolver,
   deriveProject,
   eventTypesBySession,
   isArchived,
@@ -197,12 +198,13 @@ function toBoardSession(
   node: SessionNode,
   resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>,
   fullIndex: ReadonlyMap<string, SessionNode>,
+  resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardSession {
   const terminal = terminalInfoFor(node, fullIndex);
   return {
     id: node.id,
     parentId: node.parent,
-    project: deriveProject(node),
+    project: deriveProject(node, resolveGitRoot),
     ticket: node.labels.ticket,
     role: node.parent !== undefined ? "subagente" : "sesión",
     startedAt: node.startedAt,
@@ -220,7 +222,11 @@ function toBoardSession(
 }
 
 /** One pending Inbox item's board row — the owning Session's `project`/`ticket` resolved the SAME way a Session row's are, from the FULL (unfiltered) index: an Inbox item's own Session is never noise (it carries an `action.decided` Event, which `isNoiseSession` never matches), but resolving against the full index rather than the already-filtered list costs nothing and never depends on that happening to stay true. */
-function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, SessionNode>): BoardInboxItem {
+function toBoardInboxItem(
+  row: InboxItem,
+  fullIndex: ReadonlyMap<string, SessionNode>,
+  resolveGitRoot?: (cwd: string) => string | undefined,
+): BoardInboxItem {
   const session = fullIndex.get(row.session);
   // Ticket 11: "from any card" (spec) — resolved from the OWNING Session,
   // same convention `project`/`ticket` already use on this row. A Session
@@ -231,7 +237,7 @@ function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, Session
   return {
     id: row.id,
     sessionId: row.session,
-    project: session ? deriveProject(session) : UNKNOWN_PROJECT,
+    project: session ? deriveProject(session, resolveGitRoot) : UNKNOWN_PROJECT,
     ticket: session?.labels.ticket,
     ts: row.ts,
     action: toActionSummary(row.action),
@@ -253,9 +259,28 @@ function toBoardInboxItem(row: InboxItem, fullIndex: ReadonlyMap<string, Session
  * a different Session count for the same logs), plus the Policy numbers
  * (`stallMinutes`, `contextThresholdTokens`) the client's pure functions
  * need and must never hardcode a second copy of.
+ *
+ * `cache` and `resolveGitRoot` (ticket 13, criterion 3) are BOTH OPTIONAL
+ * and change nothing about the VALUE returned — only how cheaply it gets
+ * there. Omitted (every caller before this ticket, and every test that
+ * calls this directly), every Session log is read and parsed fresh and
+ * every Session's project is resolved with its own fresh `git` spawn,
+ * exactly as before. Passed (only `startStateWatcher`'s own tick and
+ * `eventsResponse`'s connect-time push, both via `DaemonContext`), a
+ * Session log whose (mtime, size) hasn't moved since `cache` last saw it is
+ * never re-read, and a `cwd` `resolveGitRoot` has already resolved is never
+ * spawned twice — proven byte-identical to the fully-uncached path by this
+ * ticket's own differential tests (`test/daemon.test.ts`). `resolveGitRoot`
+ * turned out to be where the MEASURED ~440 ms at real scale actually came
+ * from (not the log reads `cache` alone addresses — see
+ * `createCachingGitRootResolver`'s own doc comment in `sessions.ts`).
  */
-export function buildBoardPayload(home: string): BoardPayload {
-  const events = readAllSessionEvents(home);
+export function buildBoardPayload(
+  home: string,
+  cache?: SessionLogCache,
+  resolveGitRoot?: (cwd: string) => string | undefined,
+): BoardPayload {
+  const events = cache ? readAllSessionEventsCached(home, cache).events : readAllSessionEvents(home);
   const fullIndex = buildSessionIndex(events);
   const eventTypes = eventTypesBySession(events);
   // Ticket 11: an archived Session's card is hidden from the BOARD alone
@@ -285,8 +310,8 @@ export function buildBoardPayload(home: string): BoardPayload {
       contextThresholdTokens: policy.thresholdTokens,
       waitSeconds: effectiveWaitSeconds(policy),
     },
-    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions, fullIndex)),
-    inbox: deriveInbox(home).map((row) => toBoardInboxItem(row, fullIndex)),
+    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions, fullIndex, resolveGitRoot)),
+    inbox: deriveInbox(home, cache).map((row) => toBoardInboxItem(row, fullIndex, resolveGitRoot)),
   };
 }
 
@@ -358,8 +383,25 @@ function encodeSseEvent(data: unknown): Uint8Array {
  * The one-time cost: up to one poll interval of latency between a write and
  * the SSE push. `TENAZA_SSE_POLL_MS` shortens that for tests; production
  * keeps the default.
+ *
+ * `cache` and `resolveGitRoot` (ticket 13, criterion 3): the Daemon's own
+ * per-process log cache and git-root memoization (`DaemonContext.logCache`
+ * / `.resolveGitRoot`), both threaded into `buildBoardPayload` so a tick
+ * never pays to re-read-and-reparse a Session log that didn't change, or
+ * re-spawn `git` for a `cwd` it already resolved — the measured ~440 ms
+ * cost at 1165 Sessions (profiling found the SECOND one, not the first,
+ * was where almost all of it actually went — see `buildBoardPayload`'s own
+ * doc comment) that grew with total history regardless of how little
+ * actually changed. Both optional only so a caller without them still gets
+ * the pre-ticket-13 behavior byte-for-byte; `runUi` below always has both
+ * to pass.
  */
-export function startStateWatcher(home: string, clients: Set<SseController>): { stop(): void } {
+export function startStateWatcher(
+  home: string,
+  clients: Set<SseController>,
+  cache?: SessionLogCache,
+  resolveGitRoot?: (cwd: string) => string | undefined,
+): { stop(): void } {
   let lastSignature: string | undefined;
   let lastPayload: string | undefined;
 
@@ -376,7 +418,7 @@ export function startStateWatcher(home: string, clients: Set<SseController>): { 
       // ever see. Comparing the actual serialized payload — not just the
       // stat signature — is what makes this push on "a change your client
       // could observe," never on "a tick where some file's mtime moved."
-      const payload = JSON.stringify(buildBoardPayload(home));
+      const payload = JSON.stringify(buildBoardPayload(home, cache, resolveGitRoot));
       if (payload === lastPayload) return;
       lastPayload = payload;
 
@@ -443,6 +485,10 @@ interface DaemonContext {
   home: string;
   token: string;
   clients: Set<SseController>;
+  /** Ticket 13: this Daemon's own per-process log cache, warmed across every connect-time push and watcher tick alike — see `buildBoardPayload`'s own doc comment. */
+  logCache: SessionLogCache;
+  /** Ticket 13, criterion 3: this Daemon's own per-process `cwd → git root` memoization (`sessions.ts`'s `createCachingGitRootResolver`) — the ACTUAL measured cause of the per-tick cost, never invalidated within one Daemon's run. */
+  resolveGitRoot: (cwd: string) => string | undefined;
 }
 
 function healthResponse(): Response {
@@ -513,7 +559,7 @@ function eventsResponse(ctx: DaemonContext, req: Request, server: ReturnType<typ
     start(controller) {
       thisController = controller;
       ctx.clients.add(controller);
-      controller.enqueue(encodeSseEvent(buildBoardPayload(ctx.home)));
+      controller.enqueue(encodeSseEvent(buildBoardPayload(ctx.home, ctx.logCache, ctx.resolveGitRoot)));
     },
     cancel() {
       if (thisController) ctx.clients.delete(thisController);
@@ -883,7 +929,13 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
     return 1;
   }
 
-  const ctx: DaemonContext = { home, token: generateDaemonToken(), clients: new Set() };
+  const ctx: DaemonContext = {
+    home,
+    token: generateDaemonToken(),
+    clients: new Set(),
+    logCache: createSessionLogCache(),
+    resolveGitRoot: createCachingGitRootResolver(),
+  };
 
   let server: ReturnType<typeof Bun.serve>;
   try {
@@ -917,7 +969,7 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const url = buildDaemonUrl(boundPort, ctx.token);
 
   const heartbeat = setInterval(() => writeAlive(home), heartbeatIntervalMs());
-  const watcher = startStateWatcher(home, ctx.clients);
+  const watcher = startStateWatcher(home, ctx.clients, ctx.logCache, ctx.resolveGitRoot);
 
   shutdown = (): void => {
     clearInterval(heartbeat);

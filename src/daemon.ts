@@ -8,6 +8,7 @@ import { readAllSessionEvents } from "./log";
 import {
   daemonAlivePath,
   daemonTokenPath,
+  DEFAULT_DAEMON_PORT,
   humanLogPath,
   openRecorderPath,
   sessionsDir,
@@ -25,8 +26,8 @@ import {
 import { TENAZA_VERSION } from "./version";
 import index from "./ui/index.html";
 
-/** The Live surface's own default (decision 05); `--port` overrides it. */
-export const DEFAULT_DAEMON_PORT = 4747;
+/** Re-exported from `paths.ts` (its real home — see that file's own doc comment on why) so every EXISTING caller that looks for it here, `tenaza ui`'s own default included, is unaffected. */
+export { DEFAULT_DAEMON_PORT };
 
 /** "rewritten every ~2 s" (ticket 07) — overridable via `TENAZA_HEARTBEAT_MS` so a test never waits 2 real seconds per assertion. */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 2000;

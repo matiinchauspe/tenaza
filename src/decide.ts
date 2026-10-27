@@ -1,5 +1,6 @@
 import type { Capability } from "./contract/event";
 import { type Action, actionDecidedEvent } from "./contract/event";
+import { BUILT_IN_FENCE_RULE, matchesBuiltInFence } from "./fence";
 import { inboxIdentityHash, shortHashAt } from "./identity";
 import { deriveInboxReport } from "./inbox";
 import { appendEventAtLine } from "./log";
@@ -31,6 +32,15 @@ export type DecisionResult =
  * Inbox id, and notifying each get their OWN catch below, so a failure in
  * any of them can never turn a deny already decided into an allow.
  *
+ * The built-in fence (decision 05, ticket 09, `fence.ts`) is checked FIRST,
+ * ahead of the Policy's own Rules and independent of what `policy.toml`
+ * contains — it is never a `policy.toml` entry, so a match here must never
+ * depend on the Policy having loaded any Rules at all. A fence match takes
+ * over the SAME `human`-effect pipeline every other reserved command goes
+ * through (deny, log, open an Inbox item, notify) rather than inventing a
+ * second one, so the rest of this function is unaware the Rule it is
+ * holding is built-in at all.
+ *
  * Inbox identity (decision 03, ADR 0005, ticket 06): the id is hashed
  * DIRECTLY from the line `appendEventAtLine` reports THIS call's own Event
  * landed on — never derived by re-deriving the whole Inbox and taking
@@ -57,7 +67,7 @@ export async function decideAction(
   capabilities: Capability[] = ["observe", "block"],
 ): Promise<DecisionResult> {
   const policy = loadPolicy(home);
-  const outcome = await matchRule(action, policy);
+  const outcome = matchesBuiltInFence(action) ? { rule: BUILT_IN_FENCE_RULE } : await matchRule(action, policy);
   if (!outcome) return { decision: "allow", logged: false };
   const { rule, reason } = outcome;
 

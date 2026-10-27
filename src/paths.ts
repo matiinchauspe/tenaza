@@ -9,6 +9,19 @@ export function tenazaHome(): string {
   return process.env.TENAZA_HOME ?? path.join(homedir(), ".tenaza");
 }
 
+/**
+ * The Live surface's own default port (decision 05); `--port` overrides it
+ * for a given `tenaza ui` launch. Lives HERE, not in `daemon.ts` (which
+ * re-exports it for back-compat) — `daemon.ts` imports `./ui/index.html`
+ * at module scope, Bun's own HTML-import bundling of the whole React app,
+ * and `fence.ts` needs this constant from the PreToolUse hook's hot path
+ * (every Bash/MCP call, `decide.ts` → `fence.ts`). Importing `daemon.ts`
+ * from there would drag that bundling cost into every single hook
+ * invocation; `paths.ts` carries no such cost, so this is the one shared
+ * home both sides can import without it.
+ */
+export const DEFAULT_DAEMON_PORT = 4747;
+
 export function policyPath(home: string = tenazaHome()): string {
   return path.join(home, "config", "policy.toml");
 }

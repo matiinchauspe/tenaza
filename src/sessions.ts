@@ -82,6 +82,12 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.capabilities = event.data.capabilities;
       node.startedAt = event.ts;
       node.terminalLocator = event.data.terminal;
+      // A start AFTER an end is the same Session running again (ticket 13):
+      // SendMessage re-fires SubagentStart under the same agent_id. Only a
+      // start revives it — the usage.sampled every SessionEnd/SubagentStop
+      // appends right after its own end must never read as activity.
+      delete node.endedAt;
+      delete node.endedReason;
     } else if (event.type === "session.ended") {
       node.endedAt = event.ts;
       node.endedReason = event.data.reason;

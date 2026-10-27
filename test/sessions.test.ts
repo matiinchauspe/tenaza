@@ -203,6 +203,42 @@ describe("nodeCategory and rollupCategory", () => {
     expect(nodeCategory(index.get("agent-1")!, new Set())).toBe("done");
   });
 
+  test("ticket 13: a subagent re-started after it ended (SendMessage re-fires SubagentStart under the SAME agent_id) reads alive again, its stale end dropped", () => {
+    // The real shape from ~/.tenaza (2026-10-27, abd9287f / aa1de933): the
+    // card sat in TERMINÓ while the continued subagent was working.
+    const index = buildSessionIndex([
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("agent-1", "subagent_stop"),
+      usageSampledEvent("agent-1", { context_tokens: 120_000 }),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const node = index.get("agent-1")!;
+    expect(node.endedAt).toBeUndefined();
+    expect(node.endedReason).toBeUndefined();
+    expect(nodeCategory(node, new Set())).toBe("alive");
+  });
+
+  test("ticket 13: the usage.sampled every SubagentStop appends right after its own end never revives it — only a start does", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("agent-1", "subagent_stop"),
+      usageSampledEvent("agent-1", { context_tokens: 120_000 }),
+    ]);
+    expect(nodeCategory(index.get("agent-1")!, new Set())).toBe("done");
+  });
+
+  test("ticket 13: a re-started subagent that ends AGAIN reads done, carrying its newest end (aa820af8: three runs, three ends)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      { ...sessionEndedEvent("agent-1", "subagent_stop"), ts: "2026-10-27T13:12:56.028Z" },
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      { ...sessionEndedEvent("agent-1", "subagent_stop"), ts: "2026-10-27T13:20:08.186Z" },
+    ]);
+    const node = index.get("agent-1")!;
+    expect(node.endedAt).toBe("2026-10-27T13:20:08.186Z");
+    expect(nodeCategory(node, new Set())).toBe("done");
+  });
+
   test("a parent rolls up its most urgent descendant: waits > alive > done > ended", async () => {
     const index = buildSessionIndex([
       sessionStartedEvent("parent", { runtime: "claude", cwd: "/repo", capabilities: [] }),

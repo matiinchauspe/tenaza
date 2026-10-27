@@ -222,6 +222,50 @@ const RunFailedData = z.object({
  */
 const SessionArchivedData = z.object({});
 
+/**
+ * Ticket 14: the human just submitted a new turn (Claude Code's own
+ * `UserPromptSubmit` hook) — a pure ACTIVITY signal, carrying no decision
+ * capability at all in Claude Code's own contract. Once per TURN, not per
+ * tool call, so this is nowhere near the per-call growth ADR 0002's
+ * "single-writer log stays small" guards against — the same cadence
+ * `session.started`/`session.ended`/`SubagentStop` already log at. Its
+ * only job is to move `lastEventTs` forward (`sessions.ts`'s
+ * `buildSessionIndex` already does that for every Event type, generically)
+ * so a long CORRIENDO stretch's last turn-ending Stop never reads stale the
+ * moment a fresh prompt starts the next one — and, per `nativeWaitFor`, to
+ * resolve a stale `notification.observed` (below) the instant real human
+ * activity resumes. No payload beyond the envelope itself.
+ */
+const PromptSubmittedData = z.object({});
+
+/**
+ * Ticket 14: the two `Notification` matcher values the ticket scopes
+ * this to (`docs/research/claude-code-waiting-on-human-hooks.md`) — never
+ * the full matcher table Claude Code carries (`auth_success`,
+ * `agent_completed`, …), which this project has no use for and
+ * `adapters/claude.ts`'s own `handleNotification` silently ignores.
+ */
+export const NotificationKindSchema = z.enum(["permission_prompt", "idle_prompt"]);
+export type NotificationKind = z.infer<typeof NotificationKindSchema>;
+
+/**
+ * Ticket 14: Claude Code's OWN signal that it is showing a permission
+ * prompt, or that a turn has sat idle ~60s with nobody answering — NEVER
+ * Tenaza's own `human` Rule hold (contrast `action.decided`'s `"held"`,
+ * which Tenaza raised and can itself resolve with an answer). This is
+ * OBSERVED ONLY: nothing here ever carries a permission decision, and
+ * nothing in this project ever answers it on the agent's behalf (`decide.
+ * ts` never reads this Event type at all). Resolution is INFERRED, never a
+ * second Event — `sessions.ts`'s `nativeWaitFor` reads this as "still the
+ * most recent thing this Session did" until some LATER Event (a fresh
+ * prompt, a touch, another notification) supersedes it, exactly mirroring
+ * how Claude Code's own docs describe both signals resolving (no dedicated
+ * "answered" hook exists for either).
+ */
+const NotificationObservedData = z.object({
+  kind: NotificationKindSchema,
+});
+
 const envelope = <Type extends string, Data extends z.ZodType>(
   type: Type,
   data: Data,
@@ -244,6 +288,8 @@ export const EventSchema = z.discriminatedUnion("type", [
   envelope("live.answered", LiveAnsweredData),
   envelope("run.failed", RunFailedData),
   envelope("session.archived", SessionArchivedData),
+  envelope("prompt.submitted", PromptSubmittedData),
+  envelope("notification.observed", NotificationObservedData),
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
@@ -255,6 +301,8 @@ export type ApprovalResolvedEvent = Extract<Event, { type: "approval.resolved" }
 export type LiveAnsweredEvent = Extract<Event, { type: "live.answered" }>;
 export type RunFailedEvent = Extract<Event, { type: "run.failed" }>;
 export type SessionArchivedEvent = Extract<Event, { type: "session.archived" }>;
+export type PromptSubmittedEvent = Extract<Event, { type: "prompt.submitted" }>;
+export type NotificationObservedEvent = Extract<Event, { type: "notification.observed" }>;
 
 /**
  * Build an `action.decided` Event envelope with the current timestamp.
@@ -437,4 +485,36 @@ export function sessionArchivedEvent(session: string): SessionArchivedEvent {
     type: "session.archived",
     data: {},
   }) as SessionArchivedEvent;
+}
+
+/**
+ * Build a `prompt.submitted` Event envelope with the current timestamp
+ * (ticket 14) — appended by `adapters/claude.ts`'s `handleUserPromptSubmit`
+ * on every `UserPromptSubmit` call, once per turn.
+ */
+export function promptSubmittedEvent(session: string): PromptSubmittedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "prompt.submitted",
+    data: {},
+  }) as PromptSubmittedEvent;
+}
+
+/**
+ * Build a `notification.observed` Event envelope with the current
+ * timestamp (ticket 14) — appended by `adapters/claude.ts`'s
+ * `handleNotification` only for the two matcher values this project
+ * reads (`NotificationKindSchema`); every other `notification_type` never
+ * reaches this builder at all.
+ */
+export function notificationObservedEvent(session: string, kind: NotificationKind): NotificationObservedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "notification.observed",
+    data: { kind },
+  }) as NotificationObservedEvent;
 }

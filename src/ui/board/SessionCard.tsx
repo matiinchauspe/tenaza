@@ -117,6 +117,26 @@ function LiveRequestBlock({
   );
 }
 
+/**
+ * Ticket 14: the plain, non-actionable line a card grows while Claude
+ * Code's OWN permission/idle prompt is the most recent thing observed for
+ * it — a badge plus its age, nothing more. Deliberately NO approve/reject,
+ * NO message input, NO draining bar: unlike `LiveRequestBlock` below,
+ * Tenaza never raised this and can never answer it on the agent's behalf
+ * (spec's "Requests vs agents" puts approval state on the agent's card for
+ * a hold TENAZA owns — this follows that same placement principle for a
+ * fact Tenaza only OBSERVES, while staying visually and behaviourally
+ * distinct so pressing `a`/`r` here is never implied to do anything).
+ */
+function NativeWaitBlock({ nativeWait }: { nativeWait: NonNullable<SessionCardViewModel["nativeWait"]> }) {
+  return (
+    <div className="native-wait" title={nativeWait.hint}>
+      <StatusBadge tone="native">{nativeWait.label}</StatusBadge>
+      <span className="native-wait__when">hace {nativeWait.age}</span>
+    </div>
+  );
+}
+
 /** The resolution trace's own line (spec "Requests vs agents") — composed straight from the already-resolved view-model fields, never re-deriving wording here. */
 function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["resolutionTrace"]> }) {
   return (
@@ -154,7 +174,7 @@ export function SessionCard({
   showArchive,
   onArchive,
 }: SessionCardProps) {
-  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}`;
+  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}${card.nativeWait ? `, ${card.nativeWait.label.toLowerCase()}` : ""}`;
   return (
     <li
       id={boardCardElementId(card.id)}
@@ -176,6 +196,7 @@ export function SessionCard({
         {card.worktree ? ` · ${card.worktree}` : ""} · <span title={card.id}>{card.shortId}</span>
         {card.parentLabel ? ` · ${card.parentLabel}` : ""}
       </div>
+      {card.nativeWait && <NativeWaitBlock nativeWait={card.nativeWait} />}
       {card.resolutionTrace && <ResolutionTrace trace={card.resolutionTrace} />}
       <div className="session-card__signal" title={card.lastSignal}>
         {card.lastSignal}

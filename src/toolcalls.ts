@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { toolCallCounterPath } from "./paths";
+import { sessionTouchedPath, toolCallCounterPath } from "./paths";
 
 /** Every 25th PostToolUse call (25, 50, 75, …) — the ticket's own boundary (AC2), exactly on it. */
 export const SAMPLE_EVERY_N_TOOL_CALLS = 25;
@@ -36,4 +36,27 @@ export function countToolCall(home: string, session: string): number {
 /** True exactly on the 25th, 50th, 75th, … call — never before. */
 export function shouldSampleOnToolCall(count: number): boolean {
   return count % SAMPLE_EVERY_N_TOOL_CALLS === 0;
+}
+
+/**
+ * Ticket 14 (AC3): bump `session`'s own "last ordinary activity" marker —
+ * a plain file beside its log, same convention as `countToolCall` above,
+ * never an Event: "an ordinary tool call moves the card's age" without
+ * growing the single-writer log ADR 0002 protects. Called from
+ * `adapters/claude.ts`'s `handlePreToolUse`, `handlePostToolUse` and
+ * `handleStop` alike — every call that fires on ordinary agent activity,
+ * matched or not. Swallows its own failure (same reasoning as every other
+ * best-effort side-effect writer in this project, e.g.
+ * `backfillSessionStartedIfMissing`): failing to bump a DISPLAY-ONLY
+ * timestamp must never crash — or even warn on — the hook call that
+ * triggered it.
+ */
+export function touchSession(home: string, session: string): void {
+  try {
+    const file = sessionTouchedPath(session, home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    appendFileSync(file, "x");
+  } catch {
+    // See the doc comment above.
+  }
 }

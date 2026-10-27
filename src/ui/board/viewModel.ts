@@ -25,6 +25,7 @@ import type {
   BoardInboxItem,
   BoardPayload,
   BoardSession,
+  NativeWaitKind,
   ResolutionTraceEntry,
   SessionRole,
   TerminalReach,
@@ -89,6 +90,28 @@ export interface LiveRequestViewModel {
   remainingFraction: number;
 }
 
+/**
+ * Ticket 14: the plain, non-actionable block a Session's own card grows
+ * while Claude Code's OWN permission/idle prompt is the most recent thing
+ * observed for it — never a Tenaza hold (contrast `LiveRequestViewModel`
+ * above, which carries `remainingSeconds`/`remainingFraction` for its OWN
+ * draining window and an `id` the view can post an answer against). There
+ * is no window Tenaza owns here, no command to show (Claude Code's own
+ * `Notification` payload carries none), and no answer Tenaza can send —
+ * `SessionCard` renders this with no aprobar/rechazar, no message input,
+ * no draining bar: only a badge plus the age, so pressing `a`/`r` on a
+ * card showing this never does anything it looks like it should.
+ */
+export interface NativeWaitViewModel {
+  kind: NativeWaitKind;
+  /** The badge's own es-AR text, already picked (`NATIVE_WAIT_LABEL`) — "PERMISO NATIVO" or "INACTIVA". */
+  label: string;
+  /** The badge's own `title` tooltip, spelling out that Tenaza only observes this. */
+  hint: string;
+  /** "hace Ns" since the notification was observed. */
+  age: string;
+}
+
 /** One line of a Session's resolution trace (spec "Requests vs agents") — already resolved to its es-AR symbol/text/tone; `SessionCard` only ever composes these into the final "✓ #<id> <text> · hace <age>" string, never re-derives the wording itself. */
 export interface ResolutionTraceLineViewModel {
   symbol: "✓" | "✕" | "✗";
@@ -140,6 +163,16 @@ export interface SessionCardViewModel {
   terminalLabel: string;
   terminalReach: TerminalReach;
   terminalNeedsTcc: boolean;
+  /**
+   * Ticket 14: present while Claude Code's OWN native permission/idle
+   * prompt is the most recent thing observed for this Session — `undefined`
+   * for every other card. NEVER conflated with `liveRequest` above: that
+   * one is a Tenaza `human` Rule hold this VIEW can itself approve/reject;
+   * this one is pure observation — the card offers only "ir a terminal ↗"
+   * for it, never aprobar/rechazar, since Tenaza never raised it and can
+   * never answer it on the agent's behalf.
+   */
+  nativeWait: NativeWaitViewModel | undefined;
 }
 
 export interface BoardColumnViewModel<Card> {
@@ -215,6 +248,28 @@ function toLiveRequest(item: BoardInboxItem, now: Date, waitSeconds: number): Li
     age: formatAge(item.ts, now),
     remainingSeconds,
     remainingFraction: liveWaitRemainingFraction(item.ts, now, waitSeconds),
+  };
+}
+
+/** Ticket 14's own es-AR wording for each native-wait kind — the ONE place either string is picked, so `SessionCard` never re-derives or duplicates this copy (same convention `traceInfo` below already follows for the resolution trace). */
+const NATIVE_WAIT_LABEL: Record<NativeWaitKind, string> = {
+  permission_prompt: "PERMISO NATIVO",
+  idle_prompt: "INACTIVA",
+};
+
+/** The badge's own tooltip — spells out, in es-AR, that Tenaza only observes this (never answers it) and names where to actually act. */
+const NATIVE_WAIT_HINT: Record<NativeWaitKind, string> = {
+  permission_prompt: "Claude Code te pide permiso — Tenaza solo observa, contestale en la terminal",
+  idle_prompt: "el turno terminó y nadie respondió — Tenaza solo observa, contestale en la terminal",
+};
+
+function toNativeWait(nativeWait: BoardSession["nativeWait"], now: Date): NativeWaitViewModel | undefined {
+  if (!nativeWait) return undefined;
+  return {
+    kind: nativeWait.kind,
+    label: NATIVE_WAIT_LABEL[nativeWait.kind],
+    hint: NATIVE_WAIT_HINT[nativeWait.kind],
+    age: formatAge(nativeWait.since, now),
   };
 }
 
@@ -335,6 +390,7 @@ function toSessionCard(
     terminalLabel: terminalLabelFor(session.terminalReach, session.terminalAppLabel),
     terminalReach: session.terminalReach,
     terminalNeedsTcc: session.terminalNeedsTcc,
+    nativeWait: toNativeWait(session.nativeWait, now),
   };
 }
 

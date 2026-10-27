@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { handleClaudeHook } from "../../src/adapters/claude";
@@ -10,6 +10,7 @@ import { inboxIdentityHash } from "../../src/identity";
 import { appendEvent, appendHumanEvent, readSessionEvents } from "../../src/log";
 import { readNotificationRecorder } from "../../src/notify";
 import { renderSessionTree } from "../../src/sessions";
+import { sessionTouchedPath } from "../../src/paths";
 
 const fixture = (name: string) =>
   path.join(import.meta.dir, "..", "fixtures", "transcripts", name);
@@ -1116,5 +1117,220 @@ effect = "flag"
 
     // No branch_id at all → unsafe (absent is never safe) → still denies.
     expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+});
+
+describe("UserPromptSubmit (ticket 14): a pure activity signal, once per turn", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-promptsubmit-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("appends a prompt.submitted Event for session_id, and answers with nothing at all", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "UserPromptSubmit",
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ session: "sess-1", type: "prompt.submitted", data: {} });
+  });
+
+  test("inside a subagent, logs under agent_id, never session_id", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "UserPromptSubmit",
+      agent_id: "agent-1",
+    });
+
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    expect(readSessionEvents("agent-1", home)).toHaveLength(1);
+  });
+
+  test("a payload missing session_id entirely never throws — degrades silently, no Event written", async () => {
+    await expect(
+      handleClaudeHook(home, { hook_event_name: "UserPromptSubmit" } as never),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("Notification (ticket 14): Claude Code's OWN native permission/idle signal — observed only, never a decision", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-notification-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("permission_prompt appends a notification.observed Event with that kind, and answers with nothing at all", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Notification",
+      notification_type: "permission_prompt",
+    });
+
+    expect(response).toBeUndefined();
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      session: "sess-1",
+      type: "notification.observed",
+      data: { kind: "permission_prompt" },
+    });
+  });
+
+  test("idle_prompt appends a notification.observed Event with that kind", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Notification",
+      notification_type: "idle_prompt",
+    });
+
+    const events = readSessionEvents("sess-1", home);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "notification.observed", data: { kind: "idle_prompt" } }),
+    );
+  });
+
+  test("every OTHER notification_type (Claude Code's own full matcher table) is a silent no-op — never logged, never a crash", async () => {
+    for (const notificationType of ["auth_success", "agent_completed", "agent_needs_input", "elicitation_dialog"]) {
+      const response = await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Notification",
+        notification_type: notificationType,
+      });
+      expect(response).toBeUndefined();
+    }
+
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("a MISSING notification_type is also a silent no-op", async () => {
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "Notification" });
+    expect(response).toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("inside a subagent, logs under agent_id, never session_id", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "Notification",
+      agent_id: "agent-1",
+      notification_type: "permission_prompt",
+    });
+
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    expect(readSessionEvents("agent-1", home)).toHaveLength(1);
+  });
+
+  test("a payload missing session_id entirely never throws — degrades silently, no Event written", async () => {
+    await expect(
+      handleClaudeHook(home, { hook_event_name: "Notification", notification_type: "permission_prompt" } as never),
+    ).resolves.toBeUndefined();
+  });
+
+  test("a notification_type that is not even a string (malformed payload) never throws", async () => {
+    await expect(
+      handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "Notification",
+        notification_type: 42,
+      } as never),
+    ).resolves.toBeUndefined();
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+});
+
+describe("touchSession wiring (ticket 14, AC3): every ordinary call bumps the Session's own activity marker, never an Event", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-touch-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("an UNMATCHED PreToolUse call touches the Session, writing no Event at all", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/a" },
+    });
+
+    expect(response).toBeUndefined();
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(true);
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("a MATCHED PreToolUse call touches the Session too, alongside its own action.decided Event", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr merge 1" },
+    });
+
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(true);
+    expect(readSessionEvents("sess-1", home).some((e) => e.type === "action.decided")).toBe(true);
+  });
+
+  test("an ordinary PostToolUse call (below the 25th-call sample boundary) touches the Session, writing no usage.sampled Event", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      cwd: "/tmp/repo",
+    });
+
+    expect(response).toBeUndefined();
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(true);
+    // The M6 backfill's session.started is the ONLY Event — never usage.sampled this early.
+    expect(readSessionEvents("sess-1", home).some((e) => e.type === "usage.sampled")).toBe(false);
+  });
+
+  test("a Stop call with no transcript still touches the Session — closes ticket 13's own 'Stop with no transcript' no-frame gap", async () => {
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "Stop" });
+
+    expect(response).toBeUndefined();
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(true);
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("touches are scoped per Session — a subagent's touch never lands on its parent's marker", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      agent_id: "agent-1",
+      cwd: "/tmp/repo",
+    });
+
+    expect(existsSync(sessionTouchedPath("agent-1", home))).toBe(true);
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(false);
+  });
+
+  test("a later call moves the touch file's own mtime forward", async () => {
+    await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse", cwd: "/tmp/repo" });
+    const first = statSync(sessionTouchedPath("sess-1", home)).mtimeMs;
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse", cwd: "/tmp/repo" });
+    const second = statSync(sessionTouchedPath("sess-1", home)).mtimeMs;
+
+    expect(second).toBeGreaterThanOrEqual(first);
   });
 });

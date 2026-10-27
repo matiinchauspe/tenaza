@@ -41,10 +41,33 @@ describe("hooks.json shape", () => {
   });
 
   test("every other event keeps no matcher at all", () => {
-    for (const event of ["SessionStart", "SubagentStart", "PostToolUse", "SubagentStop", "Stop", "SessionEnd"]) {
+    for (const event of [
+      "SessionStart",
+      "SubagentStart",
+      "PostToolUse",
+      "SubagentStop",
+      "Stop",
+      "SessionEnd",
+      "UserPromptSubmit",
+    ]) {
       const [entry] = entriesFor(event);
       expect(entry).toBeDefined();
       expect(entry?.matcher).toBeUndefined();
+    }
+  });
+
+  test("ticket 14: Notification matches ONLY permission_prompt and idle_prompt, never Claude Code's full matcher table", () => {
+    const [entry] = entriesFor("Notification");
+    expect(entry?.matcher).toBe("permission_prompt|idle_prompt");
+    expect(entry?.hooks[0]?.timeout).toBeUndefined(); // no decision capability — no reason to carry a timeout at all
+  });
+
+  test("ticket 14: UserPromptSubmit and Notification carry no `onFailure` either — same ADR 0007 rule as every other event", () => {
+    for (const event of ["UserPromptSubmit", "Notification"]) {
+      const [entry] = entriesFor(event);
+      expect(entry).toBeDefined();
+      expect("onFailure" in (entry as object)).toBe(false);
+      expect("onFailure" in (entry?.hooks[0] as object)).toBe(false);
     }
   });
 

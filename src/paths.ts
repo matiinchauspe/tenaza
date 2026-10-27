@@ -68,6 +68,23 @@ export function toolCallCounterPath(
 }
 
 /**
+ * Ticket 14: a Session's own "last ordinary activity" marker — a plain
+ * file beside its log, bumped (never an Event, same convention as
+ * `toolCallCounterPath` above) on every PreToolUse, PostToolUse and Stop
+ * call, matched or not (`toolcalls.ts`'s `touchSession`). `daemon.ts`'s
+ * board payload folds its mtime into the Session's own `lastEventTs` so
+ * "a busy agent never reads frozen" through a long run of ordinary tool
+ * calls that write no Event at all (AC3) — without growing the
+ * single-writer log ADR 0002 protects.
+ */
+export function sessionTouchedPath(
+  session: string,
+  home: string = tenazaHome(),
+): string {
+  return path.join(sessionsDir(home), `${session}.touched`);
+}
+
+/**
  * Where the notifier's test seam records "what would have been sent" (ticket
  * 08) when `TENAZA_NOTIFY_RECORDER` swaps the real macOS sender for it — a
  * plain JSONL file, never an Event: a notification attempt isn't part of the

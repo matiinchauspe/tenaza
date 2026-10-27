@@ -70,6 +70,16 @@ export type SessionRole = z.infer<typeof SessionRoleSchema>;
 export const TerminalReachSchema = z.enum(["exact", "app", "unknown"]);
 export type TerminalReach = z.infer<typeof TerminalReachSchema>;
 
+/**
+ * Ticket 14: the two `Notification` matcher values this project reads —
+ * same set as `contract/event.ts`'s own `NotificationKindSchema`, kept as
+ * its own schema here (never imported from `event.ts`) so this module
+ * stays free of any server-only import chain, the same discipline every
+ * other type in this file already follows.
+ */
+export const NativeWaitKindSchema = z.enum(["permission_prompt", "idle_prompt"]);
+export type NativeWaitKind = z.infer<typeof NativeWaitKindSchema>;
+
 export const ActionSummarySchema = z.object({
   kind: z.enum(["shell", "mcp"]),
   /** The runtime's own tool name (e.g. "Bash", or an MCP tool's fully-qualified name). */
@@ -131,6 +141,19 @@ export const BoardSessionSchema = z.object({
   terminalAppLabel: z.string().optional(),
   /** True for a row behind a macOS Automation (TCC) prompt (Terminal.app, iTerm2, Ghostty) — the card's own "macOS va a pedir permiso" note. */
   terminalNeedsTcc: z.boolean(),
+  /**
+   * Ticket 14: present while Claude Code's OWN permission prompt or idle
+   * turn is the MOST RECENT thing observed for this Session — `since` is
+   * the notification's own ts (`sessions.ts`'s `nativeWaitFor`). NEVER
+   * raised or resolvable by Tenaza itself: no Rule matched, no Inbox item
+   * opened — contrast a Session's own `liveRequest` (ticket 10), which
+   * Tenaza DID raise and CAN answer. The client renders this as a plain,
+   * non-actionable badge (no aprobar/rechazar, no draining bar — there is
+   * no window Tenaza owns here) precisely because of that difference.
+   * `undefined` for every Session where nothing later superseded it, or
+   * where nothing was ever observed at all.
+   */
+  nativeWait: z.object({ kind: NativeWaitKindSchema, since: z.string() }).optional(),
 });
 export type BoardSession = z.infer<typeof BoardSessionSchema>;
 

@@ -1,6 +1,8 @@
 import path from "node:path";
-import type { Action, Capability } from "../contract/event";
+import type { Action, Capability, NotificationKind } from "../contract/event";
 import {
+  notificationObservedEvent,
+  promptSubmittedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
@@ -13,7 +15,7 @@ import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing }
 import { loadPolicy, policyWarning } from "../policy";
 import { captureTerminalLocator } from "../terminallocator";
 import { measureContextTokens } from "../transcript";
-import { countToolCall, shouldSampleOnToolCall } from "../toolcalls";
+import { countToolCall, shouldSampleOnToolCall, touchSession } from "../toolcalls";
 
 /**
  * The subset of Claude Code's PreToolUse hook payload Tenaza reads.
@@ -126,6 +128,39 @@ export interface ClaudePostToolUsePayload {
   cwd?: string;
 }
 
+/**
+ * Ticket 14: the human just submitted a new turn. Carries no decision
+ * capability at all in Claude Code's own contract — `handleUserPromptSubmit`
+ * only ever appends a Event and touches the activity marker; it is
+ * dispatched exactly like every OTHER non-PreToolUse event (see
+ * `handleClaudeHook`), so nothing here can ever answer back with a
+ * permission decision regardless of what this payload contains.
+ * `agent_id`, if Claude Code ever sends it for this event, is handled the
+ * SAME defensive way as every other hook in this file (`agent_id ??
+ * session_id`) even though research turned up no confirmation either way.
+ */
+export interface ClaudeUserPromptSubmitPayload {
+  session_id: string;
+  hook_event_name: "UserPromptSubmit";
+  agent_id?: string;
+}
+
+/**
+ * Ticket 14: Claude Code's own `Notification` hook — `hooks/hooks.json`'s
+ * own matcher already narrows the calls that reach this process to
+ * `permission_prompt`/`idle_prompt`, and `handleNotification` below checks
+ * `notification_type` AGAIN, defensively, against anything else a
+ * malformed or future payload might carry. No decision capability exists
+ * for this event in Claude Code's own contract either — same guarantee as
+ * `ClaudeUserPromptSubmitPayload` above.
+ */
+export interface ClaudeNotificationPayload {
+  session_id: string;
+  hook_event_name: "Notification";
+  agent_id?: string;
+  notification_type?: string;
+}
+
 export type ClaudeHookInput =
   | ClaudeHookPayload
   | ClaudeSessionStartPayload
@@ -133,7 +168,9 @@ export type ClaudeHookInput =
   | ClaudeSubagentStopPayload
   | ClaudeSessionEndPayload
   | ClaudeStopPayload
-  | ClaudePostToolUsePayload;
+  | ClaudePostToolUsePayload
+  | ClaudeUserPromptSubmitPayload
+  | ClaudeNotificationPayload;
 
 export interface ClaudeHookResponse {
   /**
@@ -317,6 +354,11 @@ async function handlePreToolUse(
   // subagent decision under the PARENT's log instead of the subagent's
   // own). Resolved once, used everywhere below.
   const session = payload.agent_id ?? payload.session_id;
+  // Ticket 14, AC3: touch BEFORE anything else below — every Bash/mcp
+  // call is activity, whether or not it ends up matching a Rule, and a
+  // long-running call's own START is worth showing as soon as it happens,
+  // not only once it completes (PostToolUse's own touch).
+  touchSession(home, session);
   backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
 
   const action = normalizeClaudeAction(payload);
@@ -486,8 +528,15 @@ export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload)
   sampleUsage(home, payload.session_id, payload.transcript_path);
 }
 
-/** Stop: the main agent finished a turn — sample usage for `session_id`. Never ends the Session. */
+/**
+ * Stop: the main agent finished a turn — sample usage for `session_id`.
+ * Never ends the Session. Ticket 14, AC3: also touches the Session's own
+ * activity marker, closing ticket 13's own "Stop with no transcript | no
+ * frame" gap — a turn ending IS activity, even when there's nothing to
+ * sample from.
+ */
 export function handleStop(home: string, payload: ClaudeStopPayload): void {
+  touchSession(home, payload.session_id);
   backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
   sampleUsage(home, payload.session_id, payload.transcript_path);
 }
@@ -540,10 +589,13 @@ function resolveSampleTranscriptPath(payload: ClaudePostToolUsePayload): string 
  * usage on exactly the 25th (and every 25th after) — AC2's own boundary.
  * Keyed by `agent_id ?? session_id` (ticket 05, M2), exactly like
  * `PreToolUse` — a subagent's own tool calls must land in ITS log, never
- * its parent's.
+ * its parent's. Ticket 14, AC3: also touches the resolved Session's own
+ * "last ordinary activity" marker on EVERY call, matched or not — never an
+ * Event, so this never grows the single-writer log.
  */
 export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): void {
   const session = payload.agent_id ?? payload.session_id;
+  touchSession(home, session);
   backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
   const count = countToolCall(home, session);
   if (!shouldSampleOnToolCall(count)) return;
@@ -551,10 +603,58 @@ export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayloa
 }
 
 /**
+ * UserPromptSubmit (ticket 14): the human just submitted a new turn — a
+ * pure ACTIVITY signal, once per turn (never per tool call, so nowhere
+ * near the growth ADR 0002 guards the log against). Appends a
+ * `prompt.submitted` Event — which, like every Event, already moves
+ * `lastEventTs` forward generically (`sessions.ts`'s `buildSessionIndex`)
+ * — so a long-idle Session's last Stop never reads stale once a fresh
+ * prompt starts the next turn, and so a stale `notification.observed`
+ * (below) is superseded the instant real human activity resumes. Wrapped
+ * the same way every other lifecycle append in this file already is
+ * (ADR 0007): a write failure here is a side effect, never worth failing
+ * — or even reporting on — the call that triggered it, exactly matching
+ * this event's own total lack of decision capability in Claude Code's
+ * contract.
+ */
+export function handleUserPromptSubmit(home: string, payload: ClaudeUserPromptSubmitPayload): void {
+  const session = payload.agent_id ?? payload.session_id;
+  try {
+    appendEvent(home, promptSubmittedEvent(session));
+  } catch {
+    // See the doc comment above.
+  }
+}
+
+/**
+ * Notification (ticket 14): Claude Code's OWN signal that it is showing a
+ * permission prompt, or that a turn has sat idle ~60s with nobody
+ * answering — NEVER Tenaza's own `human` Rule hold (contrast
+ * `action.decided`'s `"held"`, which Tenaza itself raised and can resolve
+ * with an answer). `hooks/hooks.json`'s own matcher already narrows calls
+ * to `permission_prompt`/`idle_prompt`; the check below is a SECOND,
+ * defensive gate against a malformed or future payload — every OTHER
+ * `notification_type` (and a missing one) is a silent no-op, never a
+ * crash, and this event carries no decision capability to begin with, so
+ * there is nothing here that could ever block, delay or alter the
+ * runtime regardless of what the payload contains.
+ */
+export function handleNotification(home: string, payload: ClaudeNotificationPayload): void {
+  const kind = payload.notification_type;
+  if (kind !== "permission_prompt" && kind !== "idle_prompt") return;
+  const session = payload.agent_id ?? payload.session_id;
+  try {
+    appendEvent(home, notificationObservedEvent(session, kind as NotificationKind));
+  } catch {
+    // See the doc comment above.
+  }
+}
+
+/**
  * Dispatch one Claude Code hook call by its `hook_event_name`. Only
  * PreToolUse ever answers back with a permission decision; every other
- * event (lifecycle, Stop, PostToolUse) just appends what it has and tells
- * the host nothing.
+ * event (lifecycle, Stop, PostToolUse, and ticket 14's UserPromptSubmit/
+ * Notification) just appends what it has and tells the host nothing.
  */
 export async function handleClaudeHook(
   home: string,
@@ -580,6 +680,12 @@ export async function handleClaudeHook(
       return undefined;
     case "PostToolUse":
       handlePostToolUse(home, payload);
+      return undefined;
+    case "UserPromptSubmit":
+      handleUserPromptSubmit(home, payload);
+      return undefined;
+    case "Notification":
+      handleNotification(home, payload);
       return undefined;
     default:
       return undefined;

@@ -41,6 +41,17 @@
       {
         "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+      }
     ]
   }
 }

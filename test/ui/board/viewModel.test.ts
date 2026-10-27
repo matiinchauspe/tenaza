@@ -323,6 +323,61 @@ describe("buildBoardViewModel — Session card fields", () => {
   });
 });
 
+describe("ticket 14: nativeWait — observed only, never actionable", () => {
+  test("no nativeWait on the payload — the card's own field is undefined", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "a", lastEventTs: NOW.toISOString() })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.nativeWait).toBeUndefined();
+  });
+
+  test("permission_prompt resolves to its own es-AR label and hint, never the TE ESPERA wording", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: NOW.toISOString(),
+          nativeWait: { kind: "permission_prompt", since: "2026-01-01T23:58:00.000Z" },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    const nativeWait = model.corriendo.cards[0]?.nativeWait;
+    expect(nativeWait?.kind).toBe("permission_prompt");
+    expect(nativeWait?.label).toBe("PERMISO NATIVO");
+    expect(nativeWait?.label).not.toContain("TE ESPERA");
+    expect(nativeWait?.hint).toContain("Tenaza solo observa");
+    expect(nativeWait?.age).toBe("2m");
+  });
+
+  test("idle_prompt resolves to its own distinct label", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: NOW.toISOString(),
+          nativeWait: { kind: "idle_prompt", since: NOW.toISOString() },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.nativeWait?.label).toBe("INACTIVA");
+  });
+
+  test("a nativeWait on a TRABADA card still resolves — it is independent of the column's own stall classification", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 → TRABADA
+          nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.trabada.cards[0]?.nativeWait?.kind).toBe("idle_prompt");
+  });
+});
+
 describe("buildBoardViewModel — orderedIds", () => {
   test("flattens TE NECESITA, then CORRIENDO, TRABADA, TERMINÓ, each in its own display order", () => {
     const payload = makeBoardPayload({

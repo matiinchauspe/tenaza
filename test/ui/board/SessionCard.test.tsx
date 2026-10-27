@@ -55,6 +55,7 @@ function baseCard(overrides: Partial<SessionCardViewModel> = {}): SessionCardVie
     terminalLabel: "terminal desconocida",
     terminalReach: "unknown",
     terminalNeedsTcc: false,
+    nativeWait: undefined,
     ...overrides,
   };
 }
@@ -164,6 +165,86 @@ describe("SessionCard — TE ESPERA block (ticket 10)", () => {
     act(() => fireEvent.click(button!));
 
     expect(selected).toEqual([]);
+  });
+});
+
+describe("SessionCard — native wait block (ticket 14): observed only, never actionable", () => {
+  function nativeWaitCard(kind: "permission_prompt" | "idle_prompt" = "permission_prompt"): SessionCardViewModel {
+    return baseCard({
+      nativeWait: {
+        kind,
+        label: kind === "permission_prompt" ? "PERMISO NATIVO" : "INACTIVA",
+        hint: "Claude Code te pide permiso — Tenaza solo observa, contestale en la terminal",
+        age: "12s",
+      },
+    });
+  }
+
+  test("renders the badge and age when nativeWait is present", () => {
+    const { container } = renderCard({ card: nativeWaitCard() });
+
+    expect(container.textContent).toContain("PERMISO NATIVO");
+    expect(container.textContent).toContain("hace 12s");
+  });
+
+  test("renders no native-wait block at all when nativeWait is undefined", () => {
+    const { container } = renderCard({ card: baseCard() });
+    expect(container.querySelector(".native-wait")).toBeNull();
+  });
+
+  test("offers NO aprobar/rechazar/message-input controls — Tenaza never answers a native prompt", () => {
+    const { container } = renderCard({ card: nativeWaitCard() });
+
+    expect(container.querySelector(".live-request")).toBeNull();
+    const buttons = [...container.querySelectorAll("button")].map((b) => b.textContent ?? "");
+    expect(buttons.some((text) => text.includes("aprobar"))).toBe(false);
+    expect(buttons.some((text) => text.includes("rechazar"))).toBe(false);
+    expect(container.querySelector(".live-request__input")).toBeNull();
+  });
+
+  test("still offers the terminal button — the human's own way to actually respond", () => {
+    const { container } = renderCard({ card: nativeWaitCard() });
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.includes("terminal"))).toBe(true);
+  });
+
+  test("the card's own border never carries the amber TE ESPERA treatment for a native wait alone", () => {
+    const { container } = renderCard({ card: nativeWaitCard() });
+    expect(container.querySelector(".session-card--waiting")).toBeNull();
+  });
+
+  test("idle_prompt renders its own distinct label", () => {
+    const { container } = renderCard({ card: nativeWaitCard("idle_prompt") });
+    expect(container.textContent).toContain("INACTIVA");
+  });
+
+  test("the card's aria-label names the native wait, distinct wording from 'te espera'", () => {
+    const { container } = renderCard({ card: nativeWaitCard() });
+    const li = container.querySelector("li");
+    expect(li?.getAttribute("aria-label")).toContain("permiso nativo");
+  });
+
+  test("a card with BOTH a liveRequest and a nativeWait renders both blocks without conflict", () => {
+    const card = baseCard({
+      liveRequest: {
+        id: "abc123",
+        tool: "Bash",
+        command: "gh pr merge 58",
+        toolLabel: "Bash: gh pr merge 58",
+        age: "5s",
+        remainingSeconds: 175,
+        remainingFraction: 0.97,
+      },
+      nativeWait: {
+        kind: "idle_prompt",
+        label: "INACTIVA",
+        hint: "el turno terminó y nadie respondió — Tenaza solo observa, contestale en la terminal",
+        age: "1m",
+      },
+    });
+    const { container } = renderCard({ card });
+
+    expect(container.querySelector(".live-request")).not.toBeNull();
+    expect(container.querySelector(".native-wait")).not.toBeNull();
   });
 });
 

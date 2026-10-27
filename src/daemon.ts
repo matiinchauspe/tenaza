@@ -46,6 +46,8 @@ import {
   isArchived,
   isNoiseSession,
   latestArchiveTimestamps,
+  nativeWaitFor,
+  readTouchedTimestamps,
   UnknownSessionError,
   type SessionNode,
 } from "./sessions";
@@ -218,6 +220,11 @@ function toBoardSession(
     terminalReach: terminal.reach,
     terminalAppLabel: terminal.appLabel,
     terminalNeedsTcc: terminal.needsTcc,
+    // Ticket 14: `node.lastEventTs` here already carries `buildBoardPayload`'s
+    // own touched-file merge (below) — `nativeWaitFor` reads it to tell a
+    // CURRENT native wait apart from a stale one any later activity, ordinary
+    // tool calls included, already superseded.
+    nativeWait: nativeWaitFor(node),
   };
 }
 
@@ -282,6 +289,21 @@ export function buildBoardPayload(
 ): BoardPayload {
   const events = cache ? readAllSessionEventsCached(home, cache).events : readAllSessionEvents(home);
   const fullIndex = buildSessionIndex(events);
+  // Ticket 14 (AC3): fold each Session's own "last ordinary activity" touch
+  // (`toolcalls.ts`'s `touchSession`, bumped on every PreToolUse/PostToolUse/
+  // Stop call, matched or not — never an Event) into its `lastEventTs` here,
+  // the ONE place the Event-sourced timeline and this file-sourced signal
+  // ever merge. `buildSessionIndex` itself stays a pure function of
+  // `Event[]` — it has no reason to know `.touched` files exist at all.
+  // This is also what lets `nativeWaitFor` (`toBoardSession`, below) tell a
+  // CURRENT native prompt apart from one any later ordinary activity has
+  // already superseded, with no second Event ever written for that
+  // transition.
+  const touchedAt = readTouchedTimestamps(home);
+  for (const node of fullIndex.values()) {
+    const touched = touchedAt.get(node.id);
+    if (touched && (!node.lastEventTs || touched > node.lastEventTs)) node.lastEventTs = touched;
+  }
   const eventTypes = eventTypesBySession(events);
   // Ticket 11: an archived Session's card is hidden from the BOARD alone
   // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered
@@ -324,21 +346,38 @@ export function buildBoardPayload(
  * the watcher below can tell "nothing changed" from "something did" WITHOUT
  * recomputing the (more expensive) derived state on every tick.
  *
- * Deliberately excludes `<session>.toolcalls` (orchestrator review): that
- * counter lives beside a Session's log (`paths.ts`'s own `sessionsDir`) and
- * is bumped on EVERY `PostToolUse` call (`toolcalls.ts`), not just the ones
- * that change derived state — `buildBoardPayload` never reads it at all
- * (only a `usage.sampled` Event, written on every 25th call, feeds the
- * context bar). Including it here would make nearly every tick under
- * ordinary tool-call traffic recompute and (absent the payload check
- * below) push a state that provably cannot have changed — the "transitions,
- * not calls" rule this signature exists to uphold.
+ * `*.touched` (ticket 14) is included for exactly the opposite reason
+ * `<session>.toolcalls` stays excluded below: `buildBoardPayload` NOW reads
+ * it (the touched-file merge, above) — it is a real input to the derived
+ * state, so leaving it out of this signature would mean an ordinary tool
+ * call's own touch could bump `lastEventTs` on disk and the watcher would
+ * never notice, silently reintroducing the exact "busy agent reads frozen"
+ * gap AC3 exists to close. This is still "transitions, not calls": the
+ * payload-equality check below (`startStateWatcher`) still coalesces every
+ * touch inside one poll interval into at most one push, the SAME free
+ * coalescing every other file change here already gets — nothing here
+ * pushes PER call, only per POLL TICK that found something the last push
+ * didn't already carry.
+ *
+ * Deliberately excludes `<session>.toolcalls` (orchestrator review,
+ * unchanged by ticket 14): that counter lives beside a Session's log
+ * (`paths.ts`'s own `sessionsDir`) and is bumped on EVERY `PostToolUse`
+ * call (`toolcalls.ts`), not just the ones that change derived state —
+ * `buildBoardPayload` never reads IT at all (only a `usage.sampled` Event,
+ * written on every 25th call, feeds the context bar; the NEW `.touched`
+ * signal above is a SEPARATE file with a SEPARATE writer, serving a
+ * SEPARATE purpose). Including `.toolcalls` here would still make nearly
+ * every tick under ordinary tool-call traffic recompute for a value that
+ * provably cannot have changed — the "transitions, not calls" rule this
+ * signature exists to uphold, for THAT file specifically.
  */
 function computeStateSignature(home: string): string {
   const parts: string[] = [];
   const dir = sessionsDir(home);
   if (existsSync(dir)) {
-    for (const name of readdirSync(dir).filter((entry) => entry.endsWith(".jsonl")).sort()) {
+    for (const name of readdirSync(dir)
+      .filter((entry) => entry.endsWith(".jsonl") || entry.endsWith(".touched"))
+      .sort()) {
       const stat = statSync(path.join(dir, name));
       parts.push(`${name}:${stat.mtimeMs}:${stat.size}`);
     }

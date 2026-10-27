@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
 import { appendEvent, appendHumanEvent } from "../src/log";
+import { touchSession } from "../src/toolcalls";
 import {
   buildSessionIndex,
   categoryWord,
@@ -12,13 +13,16 @@ import {
   isNoiseSession,
   isStalled,
   latestArchiveTimestamps,
+  nativeWaitFor,
   nodeCategory,
+  readTouchedTimestamps,
   renderSessionTree,
   roleOf,
   rollupCategory,
 } from "../src/sessions";
 import {
   actionDecidedEvent,
+  notificationObservedEvent,
   sessionArchivedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
@@ -158,6 +162,24 @@ describe("buildSessionIndex", () => {
     ]);
 
     expect(index.get("sess-1")?.lastAction).toBeUndefined();
+  });
+
+  test("ticket 14: lastNotification captures the LATEST notification.observed Event (last write wins, same convention as lastAction)", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      notificationObservedEvent("sess-1", "idle_prompt"),
+      notificationObservedEvent("sess-1", "permission_prompt"),
+    ]);
+
+    expect(index.get("sess-1")?.lastNotification).toMatchObject({ kind: "permission_prompt" });
+  });
+
+  test("ticket 14: a Session with no notification.observed Event has lastNotification undefined", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+
+    expect(index.get("sess-1")?.lastNotification).toBeUndefined();
   });
 });
 
@@ -686,5 +708,69 @@ describe("isArchived — TIME IS STATE: an archive holds only while nothing happ
 
   test("a Session with no lastEventTs at all (should not arise for a real archived Session, which must have ended) still degrades to hidden rather than crashing", () => {
     expect(isArchived("2026-01-01T00:00:00.000Z", undefined)).toBe(true);
+  });
+});
+
+describe("readTouchedTimestamps (ticket 14, AC3 — the board's own 'last ordinary activity' signal)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-touched-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("empty when no Session was ever touched", () => {
+    expect(readTouchedTimestamps(home).size).toBe(0);
+  });
+
+  test("names every touched Session's own timestamp, scoped per Session", () => {
+    touchSession(home, "sess-1");
+    touchSession(home, "sess-2");
+
+    const map = readTouchedTimestamps(home);
+    expect(map.has("sess-1")).toBe(true);
+    expect(map.has("sess-2")).toBe(true);
+    expect(map.has("sess-3")).toBe(false);
+  });
+
+  test("never reads a Session's own .jsonl or .toolcalls files as a touch", () => {
+    mkdirSync(path.join(home, "state", "sessions"), { recursive: true });
+    writeFileSync(path.join(home, "state", "sessions", "sess-1.jsonl"), "{}\n");
+    writeFileSync(path.join(home, "state", "sessions", "sess-1.toolcalls"), "x");
+
+    expect(readTouchedTimestamps(home).size).toBe(0);
+  });
+});
+
+describe("nativeWaitFor — TIME IS STATE: a native prompt holds only while nothing happened since (ticket 14)", () => {
+  test("no notification.observed Event at all — never waiting", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    expect(nativeWaitFor(index.get("sess-1")!)).toBeUndefined();
+  });
+
+  test("the notification IS the most recent thing observed — reads as a current native wait", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      notificationObservedEvent("sess-1", "permission_prompt"),
+    ]);
+    expect(nativeWaitFor(index.get("sess-1")!)).toMatchObject({ kind: "permission_prompt" });
+  });
+
+  test("a LATER Event (any kind) supersedes a stale notification — no longer waiting, no second Event written for the transition", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      notificationObservedEvent("sess-1", "idle_prompt"),
+    ]);
+    const node = index.get("sess-1")!;
+    // Simulate `buildBoardPayload`'s own touched-file merge (daemon.ts):
+    // an ordinary tool call's touch moved lastEventTs past the notification.
+    node.lastEventTs = new Date(new Date(node.lastEventTs!).getTime() + 1000).toISOString();
+
+    expect(nativeWaitFor(node)).toBeUndefined();
   });
 });

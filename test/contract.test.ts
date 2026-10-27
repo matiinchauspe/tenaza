@@ -4,12 +4,16 @@ import {
   actionDecidedEvent,
   approvalResolvedEvent,
   liveAnsweredEvent,
+  notificationObservedEvent,
+  promptSubmittedEvent,
   runFailedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
+import { BoardSessionSchema } from "../src/contract/live";
+import { makeSession } from "./support/boardFixture";
 
 describe("Event contract", () => {
   test("accepts a well-formed action.decided line", () => {
@@ -239,5 +243,54 @@ describe("Event contract", () => {
       session: "sess-1",
       data: { labels: { ticket: "RES-131", project: "reservee" } },
     });
+  });
+
+  test("ticket 14: promptSubmittedEvent builds a schema-valid envelope with no payload beyond the envelope itself", () => {
+    const evt = promptSubmittedEvent("sess-1");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("prompt.submitted");
+    expect(evt).toMatchObject({ session: "sess-1", data: {} });
+  });
+
+  test("ticket 14: notificationObservedEvent builds a schema-valid envelope for each of the two kinds", () => {
+    const permission = notificationObservedEvent("sess-1", "permission_prompt");
+    expect(() => EventSchema.parse(permission)).not.toThrow();
+    expect(permission).toMatchObject({ session: "sess-1", type: "notification.observed", data: { kind: "permission_prompt" } });
+
+    const idle = notificationObservedEvent("sess-1", "idle_prompt");
+    expect(() => EventSchema.parse(idle)).not.toThrow();
+    expect(idle.data).toEqual({ kind: "idle_prompt" });
+  });
+
+  test("ticket 14: rejects a notification.observed line with an unknown kind", () => {
+    const line = {
+      v: 1,
+      ts: "2026-10-27T10:00:00.000Z",
+      session: "sess-1",
+      type: "notification.observed",
+      data: { kind: "agent_completed" },
+    };
+
+    expect(() => EventSchema.parse(line)).toThrow();
+  });
+});
+
+describe("ticket 14: BoardSessionSchema's nativeWait field", () => {
+  test("accepts a session with no nativeWait at all (the default, overwhelmingly common case)", () => {
+    expect(() => BoardSessionSchema.parse(makeSession())).not.toThrow();
+  });
+
+  test("accepts a session carrying a nativeWait of either kind", () => {
+    const permission = makeSession({ nativeWait: { kind: "permission_prompt", since: "2026-10-27T10:00:00.000Z" } });
+    expect(() => BoardSessionSchema.parse(permission)).not.toThrow();
+
+    const idle = makeSession({ nativeWait: { kind: "idle_prompt", since: "2026-10-27T10:00:00.000Z" } });
+    expect(() => BoardSessionSchema.parse(idle)).not.toThrow();
+  });
+
+  test("rejects a nativeWait with an unknown kind", () => {
+    const session = makeSession({ nativeWait: { kind: "agent_completed" as never, since: "2026-10-27T10:00:00.000Z" } });
+    expect(() => BoardSessionSchema.parse(session)).toThrow();
   });
 });

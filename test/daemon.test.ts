@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -7,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +16,8 @@ import path from "node:path";
 import {
   actionDecidedEvent,
   approvalResolvedEvent,
+  notificationObservedEvent,
+  promptSubmittedEvent,
   sessionArchivedEvent,
   sessionEndedEvent,
   sessionStartedEvent,
@@ -31,10 +35,18 @@ import { inboxIdentityHash } from "../src/identity";
 import { deriveInbox } from "../src/inbox";
 import { LIVE_ANSWER_CUTOFF_MS } from "../src/live";
 import { postLiveAnswer } from "../src/resolve";
-import { appendEvent, appendHumanEvent, createSessionLogCache, readHumanEvents } from "../src/log";
-import { daemonAlivePath, daemonTokenPath, sessionLogPath, DEFAULT_DAEMON_PORT } from "../src/paths";
+import { appendEvent, appendHumanEvent, createSessionLogCache, readHumanEvents, readSessionEvents } from "../src/log";
+import {
+  daemonAlivePath,
+  daemonTokenPath,
+  sessionLogPath,
+  sessionTouchedPath,
+  toolCallCounterPath,
+  DEFAULT_DAEMON_PORT,
+} from "../src/paths";
 import { DEFAULT_CONTEXT_THRESHOLD, DEFAULT_STALL_MINUTES, DEFAULT_WAIT_SECONDS } from "../src/policy";
 import { createCachingGitRootResolver } from "../src/sessions";
+import { touchSession } from "../src/toolcalls";
 import { RUN_FAILURE_MARKER } from "../src/runoutput";
 import { TENAZA_VERSION } from "../src/version";
 
@@ -444,16 +456,59 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
    * "transitions, not calls" rule and growing CPU with tool-call rate, not
    * with actual Session/Inbox changes.
    *
-   * Reproduced here with REAL PostToolUse calls below the 25-call sample
-   * boundary (`SAMPLE_EVERY_N_TOOL_CALLS`): each one bumps ONLY the
-   * `.toolcalls` file (never the Session's own `.jsonl` log, since no
-   * `usage.sampled` Event is written until the 25th). The first call for a
-   * brand-new Session is excluded on purpose — the M6 backfill writes a
-   * `session.started` Event on it, which IS a real jsonl change and
-   * correctly produces one event; the regression is only about the calls
-   * AFTER that.
+   * Ticket 14 amendment: a REAL PostToolUse call can no longer isolate
+   * `.toolcalls` on its own — it now ALSO touches `<session>.touched`
+   * (`toolcalls.ts`'s `touchSession`, AC3), which `computeStateSignature`
+   * DOES include on purpose (that file is now a real input to the derived
+   * state — see its own doc comment). So this test bumps `.toolcalls`
+   * DIRECTLY, bypassing the hook, to keep proving the ORIGINAL, narrower
+   * claim: that file alone, isolated from `.touched`, still never pushes.
+   * The next test below covers what a real call does now.
    */
   test("the SSE watcher does not push when only a Session's .toolcalls counter changed, never the Session's own log", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_SSE_POLL_MS: "50" } });
+    try {
+      const sse = await connectEvents(daemon.port);
+      const initial = await sse.nextEvent(2000);
+      expect(initial).toEqual(EMPTY_BOARD_PAYLOAD);
+
+      // First call: backfills `session.started` (a real jsonl change) —
+      // expect exactly one event for it, same as any other log write.
+      await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({ session_id: "sess-1", hook_event_name: "PostToolUse", cwd: home }),
+      });
+      const afterBackfill = await sse.nextEvent(2000);
+      expect(afterBackfill.sessions.length).toBe(1);
+
+      // Bumps 2 through 10: ONLY `sess-1.toolcalls` grows (bytes 2..10 —
+      // nowhere near the 25th-call sample boundary), never `sess-1.jsonl`
+      // and, crucially, never `sess-1.touched` either — isolating exactly
+      // the file this test is about.
+      mkdirSync(path.dirname(toolCallCounterPath("sess-1", home)), { recursive: true });
+      for (let i = 0; i < 9; i++) appendFileSync(toolCallCounterPath("sess-1", home), "x");
+
+      // Give the watcher several poll intervals' worth of real time to
+      // have pushed something, if it was going to.
+      await sse.expectNoEventWithin(400);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  /**
+   * Ticket 14, AC3: the counterpart to the regression test above — a REAL
+   * ordinary PostToolUse call (no Rule match, below the 25th-call sample
+   * boundary) now DOES reach the board, via its own `.touched` bump,
+   * within one poll interval. This is "an ordinary tool call moves the
+   * card's age" made concrete: before this ticket, calls 2-10 here would
+   * have left `afterFirstCall` and the final payload byte-identical; now
+   * the final payload's own `lastEventTs` has moved forward, PAST the
+   * Session's own `session.started`/first-call ts, reflecting call #10's
+   * own touch — still with ZERO new Events in the Session's log (`events`
+   * stays at exactly one: the M6 backfill's `session.started`).
+   */
+  test("AC3: an ordinary PostToolUse call (no Rule match) moves the board's own lastEventTs within the poll interval, via its touch — never a new Event", async () => {
     const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_SSE_POLL_MS: "50" } });
     try {
       const sse = await connectEvents(daemon.port);
@@ -463,26 +518,33 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       const postToolUse = (): Promise<unknown> =>
         runCli(["hook", "claude"], {
           home,
-          stdin: JSON.stringify({
-            session_id: "sess-1",
-            hook_event_name: "PostToolUse",
-            cwd: home,
-          }),
+          stdin: JSON.stringify({ session_id: "sess-1", hook_event_name: "PostToolUse", cwd: home }),
         });
 
-      // First call: backfills `session.started` (a real jsonl change) —
-      // expect exactly one event for it, same as any other log write.
       await postToolUse();
-      const afterBackfill = await sse.nextEvent(2000);
-      expect(afterBackfill.sessions.length).toBe(1);
+      const afterFirstCall = await sse.nextEvent(2000);
+      expect(afterFirstCall.sessions).toHaveLength(1);
+      const firstSession = afterFirstCall.sessions[0] as { lastEventTs?: string };
+      const firstLastEventTs = firstSession.lastEventTs;
+      expect(typeof firstLastEventTs).toBe("string");
 
-      // Calls 2 through 10: only `sess-1.toolcalls` grows (bytes 2..10 —
-      // nowhere near the 25th-call sample boundary), never `sess-1.jsonl`.
+      await new Promise((resolve) => setTimeout(resolve, 10));
       for (let i = 0; i < 9; i++) await postToolUse();
 
-      // Give the watcher several poll intervals' worth of real time to
-      // have pushed something, if it was going to.
-      await sse.expectNoEventWithin(400);
+      const afterMoreCalls = await sse.nextEvent(2000);
+      expect(afterMoreCalls.sessions).toHaveLength(1);
+      const laterSession = afterMoreCalls.sessions[0] as { lastEventTs?: string };
+      expect(laterSession.lastEventTs !== undefined && laterSession.lastEventTs > (firstLastEventTs as string)).toBe(
+        true,
+      );
+
+      // Still exactly ONE Event in the log (the M6 backfill's own
+      // session.started) — the 9 extra calls never grew it, per ADR 0002.
+      const logLines = readFileSync(sessionLogPath("sess-1", home), "utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0);
+      expect(logLines).toHaveLength(1);
     } finally {
       await daemon.stop();
     }
@@ -1606,5 +1668,84 @@ describe("buildBoardPayload — cached vs uncached (ticket 13, criterion 3)", ()
     const secondCall = JSON.stringify(buildBoardPayload(home, undefined, memoized));
     expect(calls).toBe(0);
     expect(secondCall).toBe(withoutMemo);
+  });
+});
+
+describe("buildBoardPayload — ticket 14: the touched-file merge and nativeWait", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-ticket14-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("AC3: a Session's own .touched file moves lastEventTs forward past its latest Event", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    const beforeTouch = buildBoardPayload(home).sessions[0]?.lastEventTs;
+
+    touchSession(home, "sess-1");
+    // Guarantee a strictly later ISO timestamp than whatever session.started carried.
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(sessionTouchedPath("sess-1", home), future, future);
+
+    const afterTouch = buildBoardPayload(home).sessions[0]?.lastEventTs;
+    expect(afterTouch).toBeDefined();
+    expect(afterTouch! > (beforeTouch as string)).toBe(true);
+  });
+
+  test("AC3: the touch never shrinks lastEventTs — a touch OLDER than the latest Event changes nothing", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    const started = buildBoardPayload(home).sessions[0]?.lastEventTs;
+
+    touchSession(home, "sess-1");
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(sessionTouchedPath("sess-1", home), past, past);
+
+    expect(buildBoardPayload(home).sessions[0]?.lastEventTs).toBe(started);
+  });
+
+  test("a native permission_prompt is the most recent thing observed — nativeWait is present", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, notificationObservedEvent("sess-1", "permission_prompt"));
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.nativeWait).toMatchObject({ kind: "permission_prompt" });
+  });
+
+  test("a later touch (ordinary tool-call activity) supersedes a stale native wait — no second Event ever written for the transition", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, notificationObservedEvent("sess-1", "idle_prompt"));
+    expect(buildBoardPayload(home).sessions[0]?.nativeWait).toMatchObject({ kind: "idle_prompt" });
+
+    touchSession(home, "sess-1");
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(sessionTouchedPath("sess-1", home), future, future);
+
+    const after = buildBoardPayload(home);
+    expect(after.sessions[0]?.nativeWait).toBeUndefined();
+    // Still just the two Events — superseding a native wait writes nothing new.
+    expect(readSessionEvents("sess-1", home)).toHaveLength(2);
+  });
+
+  test("a later prompt.submitted Event (a fresh turn) also supersedes a stale native wait", async () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, notificationObservedEvent("sess-1", "permission_prompt"));
+    // A real turn boundary is always milliseconds apart in practice (a
+    // SEPARATE Claude Code hook invocation) — nativeWaitFor's own ordering
+    // check is a strict ts comparison (same accepted tie as log.ts's own
+    // appendEventAtLine doc), so this guarantees a distinct, later ts
+    // rather than asserting behavior the clock's own resolution could flake.
+    await Bun.sleep(5);
+    appendEvent(home, promptSubmittedEvent("sess-1"));
+
+    expect(buildBoardPayload(home).sessions[0]?.nativeWait).toBeUndefined();
+  });
+
+  test("no notification.observed Event at all — nativeWait is undefined", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    expect(buildBoardPayload(home).sessions[0]?.nativeWait).toBeUndefined();
   });
 });

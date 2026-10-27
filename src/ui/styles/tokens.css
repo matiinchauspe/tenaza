@@ -771,6 +771,12 @@ kbd {
   background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
 
+/* Ticket 14: the SAME muted tone ".status-badge--inbox" already uses — never the "wait" tone's amber, since Tenaza only OBSERVES a native prompt (never holds or answers it) and the badge's own color must never imply otherwise. */
+.status-badge--native {
+  color: var(--mut);
+  border-color: var(--line2);
+}
+
 /* -------------------------------------------------------------------- */
 /* Live request block (ticket 10, prototype's `.live-item`) — docked on a */
 /* Session's own card while its agent is held, live.                    */
@@ -784,6 +790,28 @@ kbd {
 /* Ticket 10's cross-highlight: a selected TE NECESITA card points at the Session that raised it. Teal, same hue `card--selected` already uses for "this is the thing you're acting on" — distinct enough in context (this card is never ALSO the keyboard selection at the same time: the selection sits on the TE NECESITA card instead). */
 .session-card--highlighted {
   border-color: var(--teal);
+}
+
+/* -------------------------------------------------------------------- */
+/* Native wait block (ticket 14) — a plain, non-actionable line a card   */
+/* grows while Claude Code's OWN permission/idle prompt is the most      */
+/* recent thing observed for it. Deliberately NO left rail, NO dashed    */
+/* divider the way `.live-request` gets below — this is a much lighter  */
+/* signal (observation, not a hold Tenaza can act on), so it reads as    */
+/* one quiet line rather than a whole block.                            */
+/* -------------------------------------------------------------------- */
+
+.native-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font: 11px var(--font-mono);
+  color: var(--dim);
+}
+
+.native-wait__when {
+  color: var(--dim);
 }
 
 .live-request {

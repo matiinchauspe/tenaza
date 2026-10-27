@@ -1,8 +1,10 @@
-import type { Action, Capability, Event, TerminalLocator } from "./contract/event";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
+import type { Action, Capability, Event, NotificationKind, TerminalLocator } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
 import { readAllSessionEvents, readHumanEvents, readSessionEvents } from "./log";
-import { tenazaHome } from "./paths";
+import { sessionsDir, tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 
 /**
@@ -44,6 +46,8 @@ export interface SessionNode {
   contextTokens?: number;
   /** The Action from the LATEST `action.decided` Event (ticket 08's "last signal" — what this Session most recently attempted, allowed or not). Last write wins, same convention as `contextTokens`; `undefined` means it has never attempted a matched or recorded Action. */
   lastAction?: Action;
+  /** Ticket 14: the LATEST `notification.observed` Event this Session carries — last write wins, same convention as `lastAction`. Whether it still reads as a CURRENT native wait (vs. superseded by later activity) is `nativeWaitFor`'s own call, never decided here. */
+  lastNotification?: { kind: NotificationKind; ts: string };
   /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
   terminalLocator?: TerminalLocator;
 }
@@ -102,6 +106,9 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       // (ticket 08) is "what did this Session most recently attempt",
       // independent of whether it was held, denied, flagged or allowed.
       node.lastAction = event.data.action;
+    } else if (event.type === "notification.observed") {
+      // Last write wins, same convention as lastAction/contextTokens above.
+      node.lastNotification = { kind: event.data.kind, ts: event.ts };
     }
   }
 
@@ -338,6 +345,69 @@ export function latestArchiveTimestamps(home: string = tenazaHome()): Map<string
 export function isArchived(archivedAt: string | undefined, lastEventTs: string | undefined): boolean {
   if (archivedAt === undefined) return false;
   return lastEventTs === undefined || lastEventTs <= archivedAt;
+}
+
+/**
+ * Ticket 14 (AC3): every Session's own "last ordinary activity" signal —
+ * each `<session>.touched` file's own mtime (`toolcalls.ts`'s
+ * `touchSession`, bumped on every PreToolUse/PostToolUse/Stop call,
+ * matched or not — NEVER an Event, so ADR 0002's single-writer log stays
+ * exactly the size it was). Scanned fresh on every call, same convention
+ * as `latestArchiveTimestamps` above; a file that vanishes between the
+ * directory listing and the stat (a race with its own writer, vanishingly
+ * rare and harmless either way) is simply absent from this read, never a
+ * crash. Used ONLY by `daemon.ts`'s board payload — `buildSessionIndex`
+ * itself stays a pure function of `Event[]` and has no reason to know
+ * this file exists; `tenaza status`/`statusline` (one-shot CLI reads the
+ * human already asked for AT that exact moment) have no need for it
+ * either, which is why this stays out of `renderSessionTree`'s own path.
+ */
+export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, string> {
+  const map = new Map<string, string>();
+  const dir = sessionsDir(home);
+  if (!existsSync(dir)) return map;
+  const suffix = ".touched";
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(suffix)) continue;
+    try {
+      const stat = statSync(path.join(dir, name));
+      map.set(name.slice(0, -suffix.length), new Date(stat.mtimeMs).toISOString());
+    } catch {
+      // See the doc comment above.
+    }
+  }
+  return map;
+}
+
+/**
+ * Ticket 14: is `node` CURRENTLY waiting on a native Claude Code prompt —
+ * a permission dialog, or the ~60s idle_prompt — right now? TIME IS
+ * STATE, the same way `isStalled`/`liveItemPhase` are elsewhere: neither
+ * signal has a documented "resolved" hook event
+ * (`docs/research/claude-code-waiting-on-human-hooks.md`), so this is
+ * derived fresh from ORDERING, never a stored flag. `node.lastNotification`
+ * still names the Session's CURRENT native wait exactly when it is STILL
+ * the most recent thing observed for this Session — i.e. `node.lastEventTs`
+ * (which the caller MUST have already folded the touched-file merge into,
+ * `daemon.ts`'s `buildBoardPayload`) has not moved past it. The moment
+ * anything later happens — a fresh prompt, an ordinary tool call's touch,
+ * a lifecycle Event, another notification — `lastEventTs` advances past
+ * `lastNotification.ts` and this reads `undefined` again, with no second
+ * Event ever written for that transition.
+ *
+ * Known, accepted tie (same shape `log.ts`'s own `appendEventAtLine` doc
+ * already accepts for two Events landing in the exact same millisecond):
+ * a later Event whose `ts` happens to be BYTE-IDENTICAL to the notification's
+ * own never resolves it here (a strict string comparison, not `>=`) — in
+ * practice vanishingly rare for real activity, each a separate hook process
+ * launch apart in wall-clock time; only ever observed in a synthetic test
+ * that appends two Events back to back with no delay between them.
+ */
+export function nativeWaitFor(node: SessionNode): { kind: NotificationKind; since: string } | undefined {
+  const notification = node.lastNotification;
+  if (!notification) return undefined;
+  if (node.lastEventTs !== notification.ts) return undefined;
+  return { kind: notification.kind, since: notification.ts };
 }
 
 /** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */

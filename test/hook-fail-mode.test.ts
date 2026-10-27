@@ -3,6 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readHealth } from "../src/health";
+import { readSessionEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import { healthPath, policyPath, sessionLogPath } from "../src/paths";
 import { runCli } from "./support/cli";
@@ -379,5 +380,107 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(result.stdout.trim()).toBe("");
     expect(existsSync(healthPath(home))).toBe(false);
     expect(readNotificationRecorder(home)).toHaveLength(0);
+  });
+});
+
+/**
+ * Ticket 14's own negative test: "A negative test proves both new hooks
+ * never block, delay or alter the runtime — exit 0, no decision output,
+ * on malformed input too." Black-box over `tenaza hook claude`, same seam
+ * as every other test in this file — a fresh, policy-less home per test,
+ * since neither UserPromptSubmit nor Notification ever consults the
+ * Policy at all.
+ */
+describe("ticket 14: UserPromptSubmit and Notification never block, delay or alter the runtime", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-hook-ticket14-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** Both the exit code AND a generous wall-clock budget — "never delay" is a claim about TIME, not just the exit code. */
+  async function assertFastNoDecision(stdin: string): Promise<void> {
+    const startedAt = performance.now();
+    const result = await runCli(["hook", "claude"], { home, stdin });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result.exitCode).toBe(0);
+    expect(elapsedMs).toBeLessThan(5000); // generous — a real call completes in low tens of ms
+    if (result.stdout.trim().length > 0) {
+      const response = JSON.parse(result.stdout);
+      expect(response.hookSpecificOutput).toBeUndefined();
+    }
+  }
+
+  test("UserPromptSubmit with a well-formed payload: exit 0, no decision output", async () => {
+    await assertFastNoDecision(JSON.stringify({ session_id: "sess-1", hook_event_name: "UserPromptSubmit" }));
+  });
+
+  test("UserPromptSubmit with completely empty stdin: exit 0, no decision output, no block", async () => {
+    await assertFastNoDecision("");
+  });
+
+  test("UserPromptSubmit with garbage (not JSON at all): exit 0, no decision output, no block", async () => {
+    await assertFastNoDecision("not json at all {{{");
+  });
+
+  test("UserPromptSubmit with session_id missing entirely: exit 0, no decision output", async () => {
+    await assertFastNoDecision(JSON.stringify({ hook_event_name: "UserPromptSubmit" }));
+  });
+
+  test("Notification with a well-formed permission_prompt payload: exit 0, no decision output", async () => {
+    await assertFastNoDecision(
+      JSON.stringify({ session_id: "sess-1", hook_event_name: "Notification", notification_type: "permission_prompt" }),
+    );
+  });
+
+  test("Notification with completely empty stdin: exit 0, no decision output, no block", async () => {
+    await assertFastNoDecision("");
+  });
+
+  test("Notification with garbage (not JSON at all): exit 0, no decision output, no block", async () => {
+    await assertFastNoDecision("not json at all {{{");
+  });
+
+  test("Notification with an unrecognized notification_type: exit 0, no decision output, nothing logged", async () => {
+    await assertFastNoDecision(
+      JSON.stringify({ session_id: "sess-1", hook_event_name: "Notification", notification_type: "agent_completed" }),
+    );
+    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+  });
+
+  test("Notification with session_id missing entirely: exit 0, no decision output", async () => {
+    await assertFastNoDecision(JSON.stringify({ hook_event_name: "Notification", notification_type: "idle_prompt" }));
+  });
+
+  test("Notification with a non-string notification_type (malformed payload shape): exit 0, no decision output", async () => {
+    await assertFastNoDecision(
+      JSON.stringify({ session_id: "sess-1", hook_event_name: "Notification", notification_type: 42 }),
+    );
+  });
+
+  test("a deny already decided for a PRIOR PreToolUse call still holds after a malformed Notification call in between (ADR 0007's own cross-event guarantee)", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+
+    const deny = await runCli(["hook", "claude"], {
+      home,
+      stdin: JSON.stringify({
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "gh pr merge 1" },
+      }),
+    });
+    expect(JSON.parse(deny.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+
+    await assertFastNoDecision("not json at all {{{");
+
+    const status = await runCli(["status"], { home });
+    expect(status.stdout).toContain("gh pr merge 1");
   });
 });

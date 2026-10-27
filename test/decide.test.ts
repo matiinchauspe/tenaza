@@ -267,4 +267,63 @@ effect = "flag"
       expect(noMatch.logged).toBe(false);
     });
   });
+
+  describe("mcp Actions (ticket 04, decision 07)", () => {
+    beforeEach(() => {
+      writeFileSync(
+        path.join(home, "config", "policy.toml"),
+        `
+[[rule]]
+tool = "mcp__*neon*__run_sql*"
+unless = { branch_id = ["br-dev-123"] }
+effect = "human"
+
+[[rule]]
+tool = "mcp__*vercel*"
+effect = "flag"
+`,
+      );
+    });
+
+    test("a human mcp Rule denies and opens an Inbox item, carrying the Action's tool and args", async () => {
+      const result = await decideAction(home, "sess-1", {
+        kind: "mcp",
+        tool: "mcp__neon__run_sql",
+        args: { branch_id: "br-prod" },
+      });
+
+      expect(result.decision).toBe("deny");
+      expect(result.decision === "deny" && result.inboxId).toBe(1);
+
+      const events = readSessionEvents("sess-1", home);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "action.decided",
+        data: { action: { kind: "mcp", tool: "mcp__neon__run_sql" }, decision: "deny" },
+      });
+    });
+
+    test("a flag mcp Rule allows and still records action.decided", async () => {
+      const result = await decideAction(home, "sess-1", {
+        kind: "mcp",
+        tool: "mcp__vercel__promote_deployment",
+        args: { target: "production" },
+      });
+
+      expect(result.decision).toBe("allow");
+      expect(result.logged).toBe(true);
+      expect(deriveInbox(home)).toHaveLength(0);
+    });
+
+    test("unless with a safe branch_id exempts the call — allowed and NOT logged", async () => {
+      const result = await decideAction(home, "sess-1", {
+        kind: "mcp",
+        tool: "mcp__neon__run_sql",
+        args: { branch_id: "br-dev-123" },
+      });
+
+      expect(result.decision).toBe("allow");
+      expect(result.logged).toBe(false);
+    });
+  });
 });

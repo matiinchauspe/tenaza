@@ -2,21 +2,57 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
-import { type Action, EffectSchema } from "./contract/event";
+import { type Action, type McpAction, EffectSchema } from "./contract/event";
 import { policyLkgPath, policyPath, tenazaHome } from "./paths";
 import { matchesContiguousRun, parseExecutedCommands, words } from "./shellparse";
 
 /**
- * One entry of the Policy: a text pattern matched against a normalized
- * Action, and the Effect applied when it matches. Matching is text on the
+ * A `shell` Rule (unchanged from ticket 03): a text pattern matched against
+ * a normalized `shell` Action's parsed command. Matching is text on the
  * Action — a guardrail against honest agent mistakes, not a security
  * boundary.
  */
-export const RuleSchema = z.object({
+export const ShellRuleSchema = z.object({
   match: z.string(),
   effect: EffectSchema,
 });
+export type ShellRule = z.infer<typeof ShellRuleSchema>;
+
+/**
+ * An `mcp` Rule (ticket 04, decision 07): `tool` is a glob on the tool's own
+ * name (`*` as the only wildcard, e.g. "mcp__*neon*__run_sql*"); `unless`
+ * EXEMPTS the match when a (dotted) argument path holds one of the listed
+ * safe values — an ABSENT argument never counts as safe, it still matches
+ * (the Neon worked example: no `branch_id` hits the default branch, which
+ * is prod); `when` REQUIRES a (dotted) argument path to equal the given
+ * value. An array argument satisfies either check when ANY of its elements
+ * does. No per-provider code, and argument CONTENT (SQL text and the like)
+ * is never inspected — only these two structural conditions are.
+ */
+export const McpRuleSchema = z.object({
+  tool: z.string(),
+  unless: z.record(z.string(), z.array(z.unknown())).optional(),
+  when: z.record(z.string(), z.unknown()).optional(),
+  effect: EffectSchema,
+});
+export type McpRule = z.infer<typeof McpRuleSchema>;
+
+/**
+ * One entry of the Policy, either shape — discriminated by which REQUIRED
+ * field it carries (`match` vs `tool`) since neither TOML table declares a
+ * literal kind of its own. A malformed entry (neither, or a type mismatch)
+ * fails the whole `policy.toml` parse and degrades the way ticket 01's LKG
+ * path does — it never disables every OTHER Rule on its own.
+ */
+export const RuleSchema = z.union([ShellRuleSchema, McpRuleSchema]);
 export type Rule = z.infer<typeof RuleSchema>;
+
+export function isShellRule(rule: Rule): rule is ShellRule {
+  return "match" in rule;
+}
+export function isMcpRule(rule: Rule): rule is McpRule {
+  return "tool" in rule;
+}
 
 export interface Policy {
   rules: Rule[];
@@ -187,7 +223,7 @@ export interface MatchOutcome {
  * check that lets the hot path skip tree-sitter entirely on an ordinary
  * Bash call that names no Rule at all.
  */
-function mayMatchSomeRule(command: string, rules: readonly Rule[]): boolean {
+function mayMatchSomeRule(command: string, rules: readonly ShellRule[]): boolean {
   return rules.some((rule) => {
     const [first] = words(rule.match);
     return first !== undefined && command.includes(first);
@@ -195,43 +231,111 @@ function mayMatchSomeRule(command: string, rules: readonly Rule[]): boolean {
 }
 
 /** The v0.1 behavior: the first Rule, in file order, whose `match` text is a raw substring of the command — the fallback a parse failure degrades to, never "no match" (the guard must never go empty). */
-function matchByRawSubstring(command: string, rules: readonly Rule[]): Rule | undefined {
+function matchByRawSubstring(command: string, rules: readonly ShellRule[]): ShellRule | undefined {
   return rules.find((rule) => command.includes(rule.match));
 }
 
+/** Convert an `mcp` Rule's tool glob (`*` the only wildcard) into a RegExp anchored to the whole string. */
+function globToRegExp(glob: string): RegExp {
+  const pattern = glob
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${pattern}$`);
+}
+
+/** Reach a (possibly nested) argument by a dotted path, e.g. "params.branch_id". `undefined` on any missing or non-object step. */
+function argAtPath(args: Record<string, unknown>, dottedPath: string): unknown {
+  let current: unknown = args;
+  for (const key of dottedPath.split(".")) {
+    if (current === null || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+/** `predicate` against `value`, or against ANY element when `value` is an array — decision 07's own "an array argument matches if any element does," applied uniformly to both `unless` and `when`. */
+function matchesValueOrElement(value: unknown, predicate: (candidate: unknown) => boolean): boolean {
+  return Array.isArray(value) ? value.some(predicate) : predicate(value);
+}
+
 /**
- * The first Rule, in file order, that matches the Action (ticket 03,
- * decision 02, ADR 0006): the command is parsed with tree-sitter-bash, and
- * a Rule matches when its words appear as a CONTIGUOUS RUN anywhere in some
+ * Does `rule.unless` exempt this call — i.e. is EVERY listed argument
+ * already holding one of ITS OWN safe values? An absent argument never
+ * counts as safe (the Neon worked example: no `branch_id` hits the default
+ * branch, which is prod), so a Rule whose `unless` names an argument the
+ * call never carries is never exempted. No `unless` at all is never an
+ * exemption either — there's nothing to exempt it.
+ */
+function exemptedByUnless(rule: McpRule, args: Record<string, unknown>): boolean {
+  if (!rule.unless) return false;
+  return Object.entries(rule.unless).every(([argPath, safeValues]) => {
+    const value = argAtPath(args, argPath);
+    if (value === undefined) return false;
+    return matchesValueOrElement(value, (candidate) => safeValues.includes(candidate));
+  });
+}
+
+/** Does every `rule.when` condition hold? No `when` at all is vacuously true — the Rule carries no such requirement. */
+function satisfiesWhen(rule: McpRule, args: Record<string, unknown>): boolean {
+  if (!rule.when) return true;
+  return Object.entries(rule.when).every(([argPath, target]) =>
+    matchesValueOrElement(argAtPath(args, argPath), (candidate) => candidate === target),
+  );
+}
+
+/** Does this `mcp` Rule match this `mcp` Action (decision 07)? The tool glob first — cheapest, and most calls name no Rule's tool at all — then `when`, then `unless`. */
+function mcpRuleMatches(rule: McpRule, action: McpAction): boolean {
+  if (!globToRegExp(rule.tool).test(action.tool)) return false;
+  if (!satisfiesWhen(rule, action.args)) return false;
+  if (exemptedByUnless(rule, action.args)) return false;
+  return true;
+}
+
+/**
+ * The first Rule, in file order, that matches the Action — a `shell` Action
+ * against the Policy's `shell` Rules (ticket 03, decision 02, ADR 0006), or
+ * an `mcp` Action against its `mcp` Rules (ticket 04, decision 07). A
+ * `shell` Action's command is parsed with tree-sitter-bash, and a Rule
+ * matches when its words appear as a CONTIGUOUS RUN anywhere in some
  * executed command's argv — `timeout 60 gh pr merge 58` and
  * `sudo gh pr merge 58` match with no launcher table, while `rg "gh pr
  * merge"`, a heredoc body and a commit message never do, because a quoted
  * string stays one argv word. A parse failure or parser error falls back to
  * the v0.1 raw-substring match and reports `reason: "parse_error"` — the
- * caller logs that onto the Event. `undefined` means the Action matched
- * nothing at all. Takes only the `rules` a Policy carries — never the whole
- * `Policy` shape — since matching an Action has nothing to do with the Flag
- * threshold.
+ * caller logs that onto the Event; an `mcp` Action never takes this
+ * fallback path, since there is no parse to fail. `undefined` means the
+ * Action matched nothing at all. Takes only the `rules` a Policy carries —
+ * never the whole `Policy` shape — since matching an Action has nothing to
+ * do with the Flag threshold.
  *
- * Async because loading the grammar (`parseExecutedCommands`) is: the cost
- * is paid only past the prefilter below, which is why it stays synchronous
- * and checked FIRST — most Bash calls return right there, with no `await`
- * ever reached.
+ * Async because loading the bash grammar (`parseExecutedCommands`) is: the
+ * cost is paid only past the prefilter below, which is why it stays
+ * synchronous and checked FIRST — most Bash calls return right there, with
+ * no `await` ever reached. An `mcp` Action never awaits anything at all.
  */
 export async function matchRule(
   action: Action,
   policy: Pick<Policy, "rules">,
 ): Promise<MatchOutcome | undefined> {
+  if (action.kind === "mcp") {
+    const rule = policy.rules.find(
+      (candidate): candidate is McpRule => isMcpRule(candidate) && mcpRuleMatches(candidate, action),
+    );
+    return rule ? { rule } : undefined;
+  }
   if (action.kind !== "shell") return undefined;
-  if (!mayMatchSomeRule(action.command, policy.rules)) return undefined;
+
+  const shellRules = policy.rules.filter(isShellRule);
+  if (!mayMatchSomeRule(action.command, shellRules)) return undefined;
 
   const parsed = await parseExecutedCommands(action.command);
   if (!parsed) {
-    const rule = matchByRawSubstring(action.command, policy.rules);
+    const rule = matchByRawSubstring(action.command, shellRules);
     return rule ? { rule, reason: "parse_error" } : undefined;
   }
 
-  for (const rule of policy.rules) {
+  for (const rule of shellRules) {
     const ruleWords = words(rule.match);
     if (parsed.commands.some((argv) => matchesContiguousRun(ruleWords, argv))) {
       return { rule };

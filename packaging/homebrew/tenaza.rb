@@ -32,6 +32,46 @@ class Tenaza < Formula
     bin.install Dir["tenaza-darwin-*"].first => "tenaza"
   end
 
+  # The Daemon's optional LaunchAgent (decision 05, ADR 0004): a USER agent,
+  # never `sudo` — Tenaza watches one human's own `~/.tenaza/state/` and
+  # focuses that human's own terminals, neither of which a system daemon
+  # could do. `brew services start tenaza` is what installs and loads this;
+  # `brew install` on its own never touches launchd at all (Homebrew only
+  # registers a `service` block on an explicit `services` command), which is
+  # how "brew install starts nothing" holds with no extra code here.
+  service do
+    run [opt_bin/"tenaza", "ui", "--no-open"]
+    # `--no-open`: a LaunchAgent restarts on its own (a reboot, KeepAlive
+    # after a crash) far more often than a human types `brew services start
+    # tenaza` — popping a browser window on every one of those would be
+    # Tenaza acting on its own initiative (ADR 0007, spec's own "nothing
+    # starts on its own"), the exact thing v0.2 is built to never do. A
+    # human who wants the view opens it by hand: `tenaza ui`, or the
+    # plugin's `/tenaza`.
+    keep_alive true
+    # Homebrew's own PATH, not launchd's bare minimal one — `tenaza ui`
+    # shells out to `open`, `osascript`, `tmux` and the terminal CLIs (ticket
+    # 11's own focuser) to bring a terminal to the front; launchd's default
+    # PATH has none of them.
+    environment_variables PATH: std_service_path_env
+    log_path var/"log/tenaza.log"
+    error_log_path var/"log/tenaza.log"
+  end
+
+  def caveats
+    <<~EOS
+      The Daemon (the Live surface's board, live answering) is OPT-IN.
+      Installing Tenaza starts nothing — no service, no process, no port.
+
+      Start it as a background service, restarted on login/crash:
+        brew services start tenaza
+      Or run it yourself, in the foreground (Ctrl-C stops it):
+        tenaza ui
+
+      Either way, open the board from any Claude Code session with /tenaza.
+    EOS
+  end
+
   test do
     assert_match "Inbox:", shell_output("TENAZA_HOME=#{testpath} #{bin}/tenaza status")
   end

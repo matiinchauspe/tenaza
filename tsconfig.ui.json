@@ -1,0 +1,16 @@
+{
+  // The React client's own tsconfig (ticket 08 fix): extends the server's
+  // tsconfig.json for everything (strictness, module/bundler settings,
+  // jsx) and adds back the DOM libs the server config deliberately drops —
+  // `src/ui` and `test/ui` are the only trees this project ever runs in a
+  // browser-shaped environment (a real browser, or happy-dom in tests).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  // Override, don't inherit, the root's "exclude": the root excludes these
+  // same two trees (so the two configs never check each other's files);
+  // this config's job is to check exactly them.
+  "exclude": ["node_modules"],
+  "include": ["src/ui/**/*", "test/ui/**/*"]
+}

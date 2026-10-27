@@ -2,6 +2,7 @@ import type { Action, Capability } from "../contract/event";
 import { sessionEndedEvent, sessionStartedEvent } from "../contract/event";
 import { decideAction } from "../decide";
 import { appendEvent } from "../log";
+import { isShellRule } from "../policy";
 
 /**
  * A test Adapter (ADR 0001, ticket 06): it emits the same Events every real
@@ -52,30 +53,40 @@ function normalizeFakeAction(payload: FakeActionPayload): Action {
  * ADR 0001's degradation — this Adapter never checks `block` itself, it
  * only reports whatever the core already decided, honestly.
  */
-function handleFakeAction(home: string, payload: FakeActionPayload): FakeHookResponse | undefined {
+async function handleFakeAction(
+  home: string,
+  payload: FakeActionPayload,
+): Promise<FakeHookResponse | undefined> {
   const action = normalizeFakeAction(payload);
-  const result = decideAction(home, payload.session, action, FAKE_CAPABILITIES);
+  const result = await decideAction(home, payload.session, action, FAKE_CAPABILITIES);
 
   if (result.decision === "deny") {
     // Unreachable while FAKE_CAPABILITIES excludes "block" — decideAction
     // itself refuses to deny without it. Kept so this branch stays honest
     // if this Adapter's declared Capabilities ever change.
-    return { decision: "deny", message: `Reserved for the human, inbox #${result.inboxId}.` };
+    return { decision: "deny", message: `Reserved for the human, inbox ${result.inboxId ?? "?"}.` };
   }
   if (result.logged) {
     const enforceable = result.rule.effect !== "human";
+    // This Adapter only ever normalizes a `shell` Action (above), so the
+    // matched Rule is always a `shell` Rule too — `isShellRule` just keeps
+    // that honest for the type checker now that `Rule` also covers `mcp`.
+    const label = isShellRule(result.rule) ? result.rule.match : result.rule.tool;
     return {
       decision: "allow",
       message: enforceable
-        ? `Flagged by Policy rule "${result.rule.match}" and recorded.`
-        : `Matched Policy rule "${result.rule.match}" (effect: human), but this Adapter has no "block" Capability — could not be denied. Recorded instead.`,
+        ? `Flagged by Policy rule "${label}" and recorded.`
+        : `Matched Policy rule "${label}" (effect: human), but this Adapter has no "block" Capability — could not be denied. Recorded instead.`,
     };
   }
   return undefined;
 }
 
 /** Dispatch one fake hook call by its `kind`. Only "action" ever answers back; "start" and "end" just append what they have. */
-export function handleFakeHook(home: string, payload: FakeHookInput): FakeHookResponse | undefined {
+export async function handleFakeHook(
+  home: string,
+  payload: FakeHookInput,
+): Promise<FakeHookResponse | undefined> {
   switch (payload.kind) {
     case "start":
       appendEvent(
@@ -89,7 +100,7 @@ export function handleFakeHook(home: string, payload: FakeHookInput): FakeHookRe
       );
       return undefined;
     case "action":
-      return handleFakeAction(home, payload);
+      return await handleFakeAction(home, payload);
     case "end":
       appendEvent(home, sessionEndedEvent(payload.session, payload.reason ?? "fake_end"));
       return undefined;

@@ -1,8 +1,10 @@
-import type { Capability, Event } from "./contract/event";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
+import type { Action, Capability, Event, NotificationKind, TerminalLocator } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
-import { readAllSessionEvents } from "./log";
-import { tenazaHome } from "./paths";
+import { readAllSessionEvents, readHumanEvents, readSessionEvents } from "./log";
+import { sessionsDir, tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 
 /**
@@ -42,6 +44,19 @@ export interface SessionNode {
   lastEventTs?: string;
   /** The context size from the LATEST `usage.sampled` Event this Session has (q9). `undefined` means never sampled, never zero. */
   contextTokens?: number;
+  /** The Action from the LATEST `action.decided` Event (ticket 08's "last signal" — what this Session most recently attempted, allowed or not). Last write wins, same convention as `contextTokens`; `undefined` means it has never attempted a matched or recorded Action. */
+  lastAction?: Action;
+  /** Ticket 14: the LATEST `notification.observed` Event this Session carries — last write wins, same convention as `lastAction`. Whether it still reads as a CURRENT native wait (vs. superseded by later activity) is `nativeWaitFor`'s own call, never decided here. */
+  lastNotification?: { kind: NotificationKind; ts: string };
+  /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
+  terminalLocator?: TerminalLocator;
+}
+
+/** Thrown by every Session-scoped operation (the focus and archive write routes, `daemon.ts`/`resolve.ts`, ticket 11) when an id names no observed Session at all. */
+export class UnknownSessionError extends Error {
+  constructor(public readonly id: string) {
+    super(`unknown session ${id}`);
+  }
 }
 
 function emptyNode(id: string): SessionNode {
@@ -70,6 +85,13 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.cwd = event.data.cwd;
       node.capabilities = event.data.capabilities;
       node.startedAt = event.ts;
+      node.terminalLocator = event.data.terminal;
+      // A start AFTER an end is the same Session running again (ticket 13):
+      // SendMessage re-fires SubagentStart under the same agent_id. Only a
+      // start revives it — the usage.sampled every SessionEnd/SubagentStop
+      // appends right after its own end must never read as activity.
+      delete node.endedAt;
+      delete node.endedReason;
     } else if (event.type === "session.ended") {
       node.endedAt = event.ts;
       node.endedReason = event.data.reason;
@@ -79,6 +101,14 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       // Last write wins, same as endedAt/endedReason above — the file's own
       // chronological order is the only ordering Tenaza trusts (ADR 0002).
       node.contextTokens = event.data.context_tokens;
+    } else if (event.type === "action.decided") {
+      // Every matched Action, not only a `human`-effect one — "last signal"
+      // (ticket 08) is "what did this Session most recently attempt",
+      // independent of whether it was held, denied, flagged or allowed.
+      node.lastAction = event.data.action;
+    } else if (event.type === "notification.observed") {
+      // Last write wins, same convention as lastAction/contextTokens above.
+      node.lastNotification = { kind: event.data.kind, ts: event.ts };
     }
   }
 
@@ -86,12 +116,31 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
 }
 
 /**
- * This Session's OWN category — before any rollup from descendants. An open
- * Inbox item outranks everything else, even a Session that also ended (the
- * ticket's own priority order, applied here too, not just across the tree).
+ * The `cwd` a Session's OWN `session.started` carried (ticket 06, "`run`
+ * from the Session's directory") — `undefined` when this Session has no
+ * `session.started` at all (its start hook never fired, or the Session id
+ * is unknown outright). Deliberately NOT a fallback to the caller's own
+ * current directory: a caller that treats `undefined` as "run here
+ * instead" would silently run a denied command somewhere the human never
+ * asked for it to run (the ticket's own warning) — `resolve.ts`'s
+ * `runInboxItem` refuses outright instead.
+ */
+export function cwdForSession(session: string, home: string = tenazaHome()): string | undefined {
+  return buildSessionIndex(readSessionEvents(session, home)).get(session)?.cwd;
+}
+
+/**
+ * This Session's OWN category — before any rollup from descendants. ENDED
+ * beats an open Inbox item (ticket 05, #1436's own fix — flipped from the
+ * priority ticket 03 originally gave this check): a Session that already
+ * finished is never shown "te espera" just because a `human`-Rule match it
+ * triggered before ending is still unresolved. That match stays visible in
+ * the Inbox on its own (`deriveInbox`), independent of this Session's row —
+ * an open Inbox item only promotes a STILL-RUNNING Session to "waits".
+ * (`rollupCategory`'s own waits > alive > done > ended priority, below, is
+ * unaffected: it ranks a PARENT against its descendants, never this check.)
  */
 export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): SessionCategory {
-  if (waiting.has(node.id)) return "waits";
   if (node.endedAt !== undefined) {
     // An ended Session WITH a parent is a subagent finishing its work ("done");
     // an ended Session with no parent is the top-level Session closing ("ended").
@@ -99,6 +148,7 @@ export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): S
     // `reason` — a build-time judgment call (ticket 03), not spec-mandated.
     return node.parent !== undefined ? "done" : "ended";
   }
+  if (waiting.has(node.id)) return "waits";
   return "alive";
 }
 
@@ -183,11 +233,208 @@ export function deriveProject(
   return resolveGitRoot(node.cwd) ?? node.cwd;
 }
 
+/**
+ * Ticket 13, criterion 3 — the ACTUAL measured cause, found by profiling
+ * `buildBoardPayload` once the log-read cache (`log.ts`'s `SessionLogCache`)
+ * turned out NOT to be where the ~440 ms at real scale went: every Session
+ * with no `project` Label spawns its OWN `git … rev-parse` process in
+ * `defaultGitRootFor`, and the real-scale fixture (1165 Sessions, 197 of
+ * them visible) has only 8 DISTINCT `cwd`s among them — one spawn per
+ * Session instead of one per distinct `cwd` is what actually cost
+ * ~450 ms, confirmed by isolating this one call from the rest of
+ * `buildBoardPayload` and timing it alone.
+ *
+ * A `git` worktree's root for a given `cwd` cannot change within the
+ * lifetime of ONE Daemon process (the worktree would have to move or be
+ * deleted and recreated elsewhere while the Daemon keeps running) — so,
+ * unlike the log cache, this one never needs an invalidation key at all:
+ * once resolved, a `cwd`'s root is memoized for good. `tenaza status` and
+ * `statusline` (one-shot processes) have no reason to pay for a cache that
+ * dies with them — `deriveProject`'s own default stays exactly as it was;
+ * only `daemon.ts` builds ONE resolver via this and passes it down for the
+ * life of the Daemon.
+ */
+export function createCachingGitRootResolver(
+  resolveGitRoot: (cwd: string) => string | undefined = defaultGitRootFor,
+): (cwd: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  return (cwd: string): string | undefined => {
+    if (cache.has(cwd)) return cache.get(cwd);
+    const root = resolveGitRoot(cwd);
+    cache.set(cwd, root);
+    return root;
+  };
+}
+
+/**
+ * Claude Code's own internal side-agents (ticket 05 — #1436's "~85 phantom
+ * Sessions" measured on the human's real `tenaza status`, 2026-10-25): a
+ * Session whose ENTIRE observed log is its own end plus a Usage sample —
+ * no `session.started` even after `adapters/claude.ts`'s own M6 backfill
+ * (the triggering Events never carried a `cwd` to backfill FROM), no
+ * Policy match, no Label. There is nothing useful to show for it, so
+ * `renderSessionTree` hides it rather than rendering a permanent
+ * "(sin proyecto) sin datos cerró" row forever.
+ *
+ * Widened 2026-10-27 for a NARROWER legacy shape the
+ * same side-agents also leave behind — a log whose ENTIRE content is a
+ * single `session.ended` with reason `"subagent_stop"` (no usage sample at
+ * all, e.g. an unreadable or absent transcript). `adapters/claude.ts`'s own
+ * `handleSubagentStop` now refuses to WRITE this shape going forward (it
+ * never appends anything for an `agent_id` with no existing log), but a
+ * log that already landed on disk before that fix shipped is never
+ * deleted (ADR 0002) — this is what still hides it from a render. Gated on
+ * `endedReason` specifically (never on the type-set alone, unlike the
+ * two-Event case above): a GENUINE top-level Session that happens to have
+ * ended with no `session.started` at all (its own end carried no `cwd` to
+ * backfill from either) is a real, if sparse, Session — never silently
+ * dropped just because its log happens to be short. `endedReason` is
+ * `undefined` for every pre-ticket-14 caller, which keeps this branch
+ * permanently false and the original two-Event rule untouched for them.
+ */
+export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>, endedReason?: string): boolean {
+  if (eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled")) return true;
+  return eventTypes.size === 1 && eventTypes.has("session.ended") && endedReason === "subagent_stop";
+}
+
+/**
+ * Ticket 11's "archive a TERMINÓ card": every Session id's LATEST
+ * `session.archived` Event ts, read from the human log's own Events (ADR
+ * 0002 — no state beside the logs; the Daemon's write route appended one
+ * there, never a side file). Scanned fresh on every read, same convention
+ * as every other derived state in this project.
+ *
+ * Orchestrator review, 2026-10-27: a Claude Code Session can be RESUMED
+ * (`claude --resume`/`--continue`) under the SAME `session_id`, firing
+ * SessionStart/tool Events again long after it was archived — so a human
+ * may archive, resume, run, and eventually archive the SAME Session a
+ * SECOND time. Collapsing to the newest ts here (never a bare `Set`,
+ * which this function used to return) is what lets `isArchived` below
+ * tell "still archived" apart from "was archived once, but that's stale
+ * now" — an EARLIER archive Event is never deleted (ADR 0002 never
+ * rewrites a line), only superseded by comparing timestamps.
+ */
+export function latestArchiveTimestamps(home: string = tenazaHome()): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const event of readHumanEvents(home)) {
+    if (event.type !== "session.archived") continue;
+    const current = map.get(event.session);
+    if (!current || event.ts > current) map.set(event.session, event.ts);
+  }
+  return map;
+}
+
+/**
+ * TIME IS STATE (orchestrator review, 2026-10-27): an archive hides a
+ * Session's card from the board only while NOTHING of that Session
+ * happened AFTER it — never permanently. `archivedAt` is this Session's
+ * own latest archive ts (`latestArchiveTimestamps`, `undefined` when
+ * never archived at all); `lastEventTs` is the Session's own latest
+ * Event (`SessionNode.lastEventTs`, the same running max every other
+ * time-based check in this project already reads). A resumed Session —
+ * a fresh SessionStart or tool call landing AFTER the archive — makes
+ * `lastEventTs` newer than `archivedAt`, which is exactly what brings its
+ * card back, in whatever column its CURRENT state now puts it: visibility
+ * is re-evaluated fresh on every read, the same way `isStalled`/
+ * `sessionColumn` already re-evaluate against a ticking clock elsewhere —
+ * never a flag written once and trusted forever. Used ONLY by `daemon.ts`'s
+ * board payload and `resolve.ts`'s own re-archive check — never by
+ * `renderSessionTree` (`tenaza status`), since the spec scopes archiving
+ * to "hides that Session from the BOARD," not the CLI.
+ */
+export function isArchived(archivedAt: string | undefined, lastEventTs: string | undefined): boolean {
+  if (archivedAt === undefined) return false;
+  return lastEventTs === undefined || lastEventTs <= archivedAt;
+}
+
+/**
+ * Ticket 14 (AC3): every Session's own "last ordinary activity" signal —
+ * each `<session>.touched` file's own mtime (`toolcalls.ts`'s
+ * `touchSession`, bumped on every PreToolUse/PostToolUse/Stop call,
+ * matched or not — NEVER an Event, so ADR 0002's single-writer log stays
+ * exactly the size it was). Scanned fresh on every call, same convention
+ * as `latestArchiveTimestamps` above; a file that vanishes between the
+ * directory listing and the stat (a race with its own writer, vanishingly
+ * rare and harmless either way) is simply absent from this read, never a
+ * crash. Used ONLY by `daemon.ts`'s board payload — `buildSessionIndex`
+ * itself stays a pure function of `Event[]` and has no reason to know
+ * this file exists; `tenaza status`/`statusline` (one-shot CLI reads the
+ * human already asked for AT that exact moment) have no need for it
+ * either, which is why this stays out of `renderSessionTree`'s own path.
+ */
+export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, string> {
+  const map = new Map<string, string>();
+  const dir = sessionsDir(home);
+  if (!existsSync(dir)) return map;
+  const suffix = ".touched";
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(suffix)) continue;
+    try {
+      const stat = statSync(path.join(dir, name));
+      map.set(name.slice(0, -suffix.length), new Date(stat.mtimeMs).toISOString());
+    } catch {
+      // See the doc comment above.
+    }
+  }
+  return map;
+}
+
+/**
+ * Ticket 14: is `node` CURRENTLY waiting on a native Claude Code prompt —
+ * a permission dialog, or the ~60s idle_prompt — right now? TIME IS
+ * STATE, the same way `isStalled`/`liveItemPhase` are elsewhere: neither
+ * signal has a documented "resolved" hook event
+ * (`docs/research/claude-code-waiting-on-human-hooks.md`), so this is
+ * derived fresh from ORDERING, never a stored flag. `node.lastNotification`
+ * still names the Session's CURRENT native wait exactly when it is STILL
+ * the most recent thing observed for this Session — i.e. `node.lastEventTs`
+ * (which the caller MUST have already folded the touched-file merge into,
+ * `daemon.ts`'s `buildBoardPayload`) has not moved past it. The moment
+ * anything later happens — a fresh prompt, an ordinary tool call's touch,
+ * a lifecycle Event, another notification — `lastEventTs` advances past
+ * `lastNotification.ts` and this reads `undefined` again, with no second
+ * Event ever written for that transition.
+ *
+ * Known, accepted tie (same shape `log.ts`'s own `appendEventAtLine` doc
+ * already accepts for two Events landing in the exact same millisecond):
+ * a later Event whose `ts` happens to be BYTE-IDENTICAL to the notification's
+ * own never resolves it here (a strict string comparison, not `>=`) — in
+ * practice vanishingly rare for real activity, each a separate hook process
+ * launch apart in wall-clock time; only ever observed in a synthetic test
+ * that appends two Events back to back with no delay between them.
+ */
+export function nativeWaitFor(node: SessionNode): { kind: NotificationKind; since: string } | undefined {
+  const notification = node.lastNotification;
+  if (!notification) return undefined;
+  if (node.lastEventTs !== notification.ts) return undefined;
+  return { kind: notification.kind, since: notification.ts };
+}
+
+/** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */
+export function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
+  const map = new Map<string, Set<Event["type"]>>();
+  for (const event of events) {
+    const types = map.get(event.session) ?? new Set();
+    types.add(event.type);
+    map.set(event.session, types);
+  }
+  return map;
+}
+
 function byStartedThenId(a: SessionNode, b: SessionNode): number {
   return (a.startedAt ?? "").localeCompare(b.startedAt ?? "") || a.id.localeCompare(b.id);
 }
 
-/** Every Session that names `parent` as its own parent, sorted chronologically. */
+/**
+ * Every Session that names `parent` as its own parent, sorted
+ * chronologically — ALWAYS, regardless of project (spec: "a subagent
+ * renders once, under its parent, even across projects"). Project is never
+ * a reason to split a child from its parent; it only decides which group a
+ * Session with NO renderable parent becomes a root of (`groupRootsByProject`
+ * below). `nodes` has already dropped noise (`isNoiseSession`), so a child
+ * whose parent WAS noise, or was never observed at all, simply finds
+ * nothing here and surfaces as its own root there instead.
+ */
 function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
   const map = new Map<string, SessionNode[]>();
   for (const node of nodes) {
@@ -201,24 +448,27 @@ function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
 }
 
 /**
- * Group every Session under its derived project. A Session whose parent
- * lands in the SAME group is never a root there — it nests under that
- * parent in the walk instead. A Session whose parent is absent, unknown, or
- * in a DIFFERENT group becomes a root in its OWN group, so a cross-project
- * subagent is never lost.
+ * Group every Session under its derived project. A Session IS a root of
+ * its own project group exactly when it has no RENDERABLE parent — no
+ * `parent` at all, or a `parent` id that names no surviving node (never
+ * observed, or filtered out as noise). Project is deliberately NOT part of
+ * this test (ticket 05 fix — a previous version of this function made a
+ * cross-project child a root here too, which rendered it TWICE alongside
+ * `childrenIndex` nesting it under its parent; the spec's own line is
+ * explicit that a subagent nests under its parent "even across projects",
+ * so a known parent always wins). A Session with a renderable parent is
+ * never a root here — `childrenIndex` nests it instead.
  */
 function groupRootsByProject(
   nodes: SessionNode[],
-  resolveGitRoot?: (cwd: string) => string | undefined,
+  projectOf: ReadonlyMap<string, string>,
 ): Map<string, SessionNode[]> {
-  const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const projectOf = new Map(nodes.map((n) => [n.id, deriveProject(n, resolveGitRoot)] as const));
+  const ids = new Set(nodes.map((node) => node.id));
   const groups = new Map<string, SessionNode[]>();
 
   for (const node of nodes) {
     const project = projectOf.get(node.id) ?? UNKNOWN_PROJECT;
-    const parent = node.parent !== undefined ? byId.get(node.parent) : undefined;
-    const isRoot = parent === undefined || projectOf.get(parent.id) !== project;
+    const isRoot = node.parent === undefined || !ids.has(node.parent);
     if (!isRoot) continue;
 
     const roots = groups.get(project) ?? [];
@@ -310,8 +560,9 @@ function renderNode(
  * `tenaza status`'s Session tree, grouped per project — the spec's variant
  * D, now WITH the context bar (ticket 04, q9): 15 cells over 300k, a `┊`
  * mark at the Policy's threshold (default 200k), red past it, and the
- * number as `243k` / `⚑243k`. Empty when no Session has ever been observed,
- * so it adds nothing to a fresh `status` (ticket 01/02's own output stays
+ * number as `243k` / `⚑243k`. Empty when no Session has ever been observed
+ * — or when every observed Session was noise (ticket 05, `isNoiseSession`)
+ * — so it adds nothing to a fresh `status` (ticket 01/02's own output stays
  * unchanged).
  */
 export function renderSessionTree(home: string = tenazaHome(), now: Date = new Date()): string {
@@ -319,10 +570,19 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   if (events.length === 0) return "";
 
   const index = buildSessionIndex(events);
-  const nodes = [...index.values()];
+  const eventTypes = eventTypesBySession(events);
+  const nodes = [...index.values()].filter(
+    (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason),
+  );
+  if (nodes.length === 0) return "";
+
+  // `projectOf` only feeds `groupRootsByProject` now — `childrenIndex`
+  // nests purely on `parent`, never on project (ticket 05 fix: a subagent
+  // nests under its parent even across projects, per spec).
+  const projectOf = new Map(nodes.map((node) => [node.id, deriveProject(node)] as const));
   const childrenOf = childrenIndex(nodes);
   const waiting = new Set(deriveInbox(home).map((row) => row.session));
-  const groups = groupRootsByProject(nodes);
+  const groups = groupRootsByProject(nodes, projectOf);
   const thresholdTokens = loadPolicy(home).thresholdTokens;
 
   const lines: string[] = [];

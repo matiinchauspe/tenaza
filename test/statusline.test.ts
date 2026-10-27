@@ -8,6 +8,11 @@ import {
   sessionStartedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
+import { GREEN, RED, RESET } from "../src/contextbar";
+import { writeAlive } from "../src/daemonlink";
+import { recordDegraded, recordHealthy } from "../src/health";
+import { inboxIdentityHash } from "../src/identity";
+import { shortIdIndex } from "../src/inbox";
 import { appendEvent } from "../src/log";
 import { deriveStatuslineCounts, firstWords, formatStatusline } from "../src/statusline";
 
@@ -130,7 +135,8 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
     // each still gets a node that reads "alive" (ticket 03: a Session known
     // only through an action.decided has no endedAt, so it is never "ended"),
     // so both count toward vivas too.
-    expect(formatStatusline(home)).toBe("tenaza │ ● 2 vivas · ⚑ 0 · ✉ 2 → #2 gh pr merge");
+    const shortId = shortIdIndex(home).get(inboxIdentityHash("sess-2", 1));
+    expect(formatStatusline(home)).toBe(`tenaza │ ● 2 vivas · ⚑ 0 · ✉ 2 → ${shortId} gh pr merge`);
   });
 
   test("an unblocked Inbox item (ADR 0001, ticket 06) still counts toward ✉, and can be the most urgent one", () => {
@@ -144,7 +150,23 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
 
     const counts = deriveStatuslineCounts(home);
     expect(counts.inbox).toBe(1);
-    expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → #1 gh pr merge");
+    const shortId = inboxIdentityHash("sess-1", 1).slice(0, 4);
+    expect(formatStatusline(home)).toBe(`tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → ${shortId} gh pr merge`);
+  });
+
+  test("an mcp Inbox item (ticket 04) as the most urgent one never crashes — `action.command` doesn't exist on it", () => {
+    appendEvent(
+      home,
+      actionDecidedEvent("sess-1", { kind: "mcp", tool: "mcp__neon__run_sql", args: { branch_id: "br-prod" } }, "deny", {
+        tool: "mcp__*neon*__run_sql*",
+        effect: "human",
+      }),
+    );
+
+    const shortId = inboxIdentityHash("sess-1", 1).slice(0, 4);
+    expect(formatStatusline(home)).toBe(
+      `tenaza │ ● 1 vivas · ⚑ 0 · ✉ 1 → ${shortId} mcp__neon__run_sql  branch_id=br-prod`,
+    );
   });
 
   test("a resolved Inbox item drops out of ✉, same as it drops out of tenaza status", () => {
@@ -176,5 +198,54 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
     appendEvent(home, usageSampledEvent("sess-1", { context_tokens: 120_000 }));
 
     expect(formatStatusline(home)).toBe("tenaza │ ● 1 vivas · ⚑ 1 >100k · ✉ 0");
+  });
+
+  test("ADR 0007 (ticket 02): a red 'degradado' mark while state/health.json reports a fault", () => {
+    expect(formatStatusline(home)).not.toContain("degradado");
+
+    recordDegraded(home, "policy.toml is invalid", true);
+
+    expect(formatStatusline(home)).toBe(`tenaza │ ${RED}degradado${RESET} · ● 0 vivas · ⚑ 0 · ✉ 0`);
+  });
+
+  test("ADR 0007 (ticket 02): the mark clears the moment the next healthy answer does", () => {
+    recordDegraded(home, "a torn log line was skipped");
+    expect(formatStatusline(home)).toContain("degradado");
+
+    recordHealthy(home);
+
+    expect(formatStatusline(home)).not.toContain("degradado");
+    expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+  });
+
+  describe("ticket 12: the Daemon's live dot", () => {
+    test("no heartbeat at all — never shown", () => {
+      expect(formatStatusline(home)).not.toContain("daemon");
+      expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("a fresh heartbeat shows the green dot, trailing the line", () => {
+      writeAlive(home);
+
+      expect(formatStatusline(home)).toBe(
+        `tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0 · ${GREEN}●${RESET} daemon`,
+      );
+    });
+
+    test("a STALE heartbeat (same rule the live-answering hold reads, never a second threshold) reads the same as none at all", () => {
+      writeAlive(home, new Date(Date.now() - 60_000));
+
+      expect(formatStatusline(home)).not.toContain("daemon");
+      expect(formatStatusline(home)).toBe("tenaza │ ● 0 vivas · ⚑ 0 · ✉ 0");
+    });
+
+    test("the live dot composes with the degradado mark — a broken Tenaza is still visible even if the Daemon is up", () => {
+      writeAlive(home);
+      recordDegraded(home, "policy.toml is invalid", true);
+
+      expect(formatStatusline(home)).toBe(
+        `tenaza │ ${RED}degradado${RESET} · ● 0 vivas · ⚑ 0 · ✉ 0 · ${GREEN}●${RESET} daemon`,
+      );
+    });
   });
 });

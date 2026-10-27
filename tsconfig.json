@@ -1,6 +1,13 @@
 {
   "compilerOptions": {
     // Environment setup & latest features
+    // DOM-free: this is the server's own tsconfig (the `tenaza` binary has
+    // no DOM globals at all). The React client (src/ui, test/ui) gets its
+    // OWN tsconfig (tsconfig.ui.json) with DOM/DOM.Iterable added — split
+    // out (ticket 08 fix) instead of widening this one, so a server file
+    // that accidentally references a DOM global is still caught at
+    // compile time instead of only failing at runtime the first time it's
+    // hit.
     "lib": ["ESNext"],
     "target": "ESNext",
     "module": "Preserve",
@@ -26,5 +33,10 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // The React client is DOM-y and lives under its own tsconfig
+  // (tsconfig.ui.json, which extends this one and adds DOM back) — this
+  // server config never type-checks it, and the UI config never type-checks
+  // this server. `bun run typecheck` runs both.
+  "exclude": ["node_modules", "dist", "src/ui", "test/ui"]
 }

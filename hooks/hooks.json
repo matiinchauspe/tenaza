@@ -12,7 +12,14 @@
     ],
     "PreToolUse": [
       {
-        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+        "matcher": "Bash|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tenaza >/dev/null 2>&1 || { printf '%s' '{\"systemMessage\":\"Tenaza guardrail OFF — binary not found\"}'; exit 0; }; exec tenaza hook claude",
+            "timeout": 240
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -32,6 +39,17 @@
     ],
     "SessionEnd": [
       {
+        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
         "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
       }
     ]

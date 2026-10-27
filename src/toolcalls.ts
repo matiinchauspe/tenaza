@@ -1,34 +1,62 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { toolCallCounterPath } from "./paths";
+import { sessionTouchedPath, toolCallCounterPath } from "./paths";
 
 /** Every 25th PostToolUse call (25, 50, 75, …) — the ticket's own boundary (AC2), exactly on it. */
 export const SAMPLE_EVERY_N_TOOL_CALLS = 25;
 
 /**
  * Record one PostToolUse call for `session`, returning the new running
- * total. A plain integer file beside the Session's own log — never an
- * Event, since "a tool call happened" isn't part of the Event contract and
- * would double the log's size for no reader (q9's own residual: "the
- * counter lives beside the Session's log, keeping one writer per file").
+ * total. A plain file beside the Session's own log — never an Event, since
+ * "a tool call happened" isn't part of the Event contract and would
+ * double the log's size for no reader (q9's own residual: "the counter
+ * lives beside the Session's log, keeping one writer per file").
  * `tenaza hook claude` is a fresh process per call, so nothing survives in
  * memory between calls — this file IS the count.
+ *
+ * Atomic under PARALLEL hooks for the same Session (ticket 05, M5 — a
+ * previous read-modify-write here lost updates: 50 parallel calls counted
+ * 44). Fixed by never reading the count at all: each call appends exactly
+ * ONE byte through an `O_APPEND`-opened fd (`appendFileSync`'s own 'a'
+ * flag), and the count IS the file's size, read back fresh every time. The
+ * kernel serializes the seek-to-end-and-write of an O_APPEND fd as one
+ * atomic step per call — and a single byte is always within the
+ * filesystem's atomic-write guarantee — so two processes racing on this
+ * file can never both land on the same offset the way a separate
+ * read-then-write always could. The byte's own VALUE is never read back;
+ * only the file's length is the count.
  */
 export function countToolCall(home: string, session: string): number {
   const file = toolCallCounterPath(session, home);
-  const next = readCounter(file) + 1;
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, String(next), "utf8");
-  return next;
-}
-
-function readCounter(file: string): number {
-  if (!existsSync(file)) return 0;
-  const parsed = Number(readFileSync(file, "utf8").trim());
-  return Number.isFinite(parsed) ? parsed : 0;
+  appendFileSync(file, "x");
+  return statSync(file).size;
 }
 
 /** True exactly on the 25th, 50th, 75th, … call — never before. */
 export function shouldSampleOnToolCall(count: number): boolean {
   return count % SAMPLE_EVERY_N_TOOL_CALLS === 0;
+}
+
+/**
+ * Ticket 14 (AC3): bump `session`'s own "last ordinary activity" marker —
+ * a plain file beside its log, same convention as `countToolCall` above,
+ * never an Event: "an ordinary tool call moves the card's age" without
+ * growing the single-writer log ADR 0002 protects. Called from
+ * `adapters/claude.ts`'s `handlePreToolUse`, `handlePostToolUse` and
+ * `handleStop` alike — every call that fires on ordinary agent activity,
+ * matched or not. Swallows its own failure (same reasoning as every other
+ * best-effort side-effect writer in this project, e.g.
+ * `backfillSessionStartedIfMissing`): failing to bump a DISPLAY-ONLY
+ * timestamp must never crash — or even warn on — the hook call that
+ * triggered it.
+ */
+export function touchSession(home: string, session: string): void {
+  try {
+    const file = sessionTouchedPath(session, home);
+    mkdirSync(path.dirname(file), { recursive: true });
+    appendFileSync(file, "x");
+  } catch {
+    // See the doc comment above.
+  }
 }

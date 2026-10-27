@@ -146,7 +146,19 @@ describe("BoardApp — keyboard 'a' on a live Session card (ticket 12 follow-up)
   });
 });
 
-describe("BoardApp — activity panel open/close and feed (ticket 12)", () => {
+describe("BoardApp — the official mark replaces the ⚒ placeholder glyph (ticket 12)", () => {
+  test("the header renders the inline Tenaza mark, never the ⚒ glyph, with the TENAZA wordmark still beside it", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    const logo = container.querySelector(".app__logo");
+    expect(logo).not.toBeNull();
+    expect(logo?.querySelector("svg.app__logo-mark")).not.toBeNull();
+    expect(logo?.querySelector("svg.app__logo-mark")?.getAttribute("aria-label")).toBe("Tenaza");
+    expect(logo?.textContent).not.toContain("⚒");
+    expect(logo?.textContent).toContain("TENAZA");
+  });
+
   test("l opens the panel; l again closes it", () => {
     installFakeEventSource();
     const { container } = render(<BoardApp />);

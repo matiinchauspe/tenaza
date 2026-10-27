@@ -332,6 +332,36 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
     }
   });
 
+  /**
+   * Ticket 12 (the human's approved logo): the official mark is the
+   * board's own favicon, served offline from the binary the SAME way the
+   * fonts already are — Bun's HTML-import bundler rewrites
+   * `<link rel="icon">`'s `href` into a bundled `/_bun/asset/...svg` path,
+   * exactly like it already does for the entry script and stylesheet
+   * above; this is the one server-side proof that holds, the page's own
+   * favicon-tab rendering being a by-hand check like the rest of the UI.
+   */
+  test("GET / carries a favicon link, and its SVG asset resolves open, with no token", async () => {
+    const daemon = await spawnDaemon(["--port", "0"], { home });
+    try {
+      const page = await fetch(`http://127.0.0.1:${daemon.port}/`);
+      const html = await page.text();
+
+      const iconMatch = html.match(/<link rel="icon"[^>]*href="(\/[^"]+\.svg)"/);
+      expect(iconMatch).not.toBeNull();
+
+      const iconPath = iconMatch?.[1] as string;
+      const icon = await fetch(`http://127.0.0.1:${daemon.port}${iconPath}`);
+      expect(icon.status).toBe(200);
+      expect(icon.headers.get("content-type")).toContain("svg");
+      const svg = await icon.text();
+      expect(svg).toContain("<svg");
+      expect(svg).toContain("Tenaza");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   test("the heartbeat file is rewritten on an interval", async () => {
     const daemon = await spawnDaemon(["--port", "0"], { home, env: { TENAZA_HEARTBEAT_MS: "50" } });
     try {

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ActivityPanel } from "./ActivityPanel";
 import { Board } from "./Board";
 import { LiveDot } from "./LiveDot";
+import { TenazaMark } from "./TenazaMark";
 import { ToastStack } from "./ToastStack";
 import { useActivityFeed } from "./useActivityFeed";
 import { useBoardKeyboard } from "./useBoardKeyboard";
@@ -34,11 +35,12 @@ const STALE_TOKEN_MESSAGE =
  * state. `Board` and everything under it stay pure presentational.
  *
  * Header (restyled per the approved prototype, human fix round): the
- * `⚒ TENAZA` wordmark, the stat chips, and the live dot — no sim menu, no
- * activity feed of its own here (ticket 12 adds a SEPARATE one, the
- * `l`-toggled `ActivityPanel`, below). The footer keybar shows the keys
- * wired so far — `j`/`k` (ticket 08), `d`/`x` (ticket 09), `a`/`r`
- * (ticket 10), now `t` (go to
+ * `TENAZA` wordmark beside the official mark (`TenazaMark`, ticket 12 —
+ * the `⚒` placeholder glyph it replaces), the stat chips, and the live
+ * dot — no sim menu, no activity feed of its own here (ticket 12 adds a
+ * SEPARATE one, the `l`-toggled `ActivityPanel`, below). The footer
+ * keybar shows the keys wired so far — `j`/`k` (ticket 08), `d`/`x`
+ * (ticket 09), `a`/`r` (ticket 10), now `t` (go to
  * terminal) and `x`'s second job (archive a TERMINÓ card, ticket 11).
  *
  * `d`/`x` only ever dispatch against an id this render actually knows is
@@ -111,7 +113,8 @@ export function BoardApp() {
     <div className="app">
       <header className="app__header">
         <span className="app__logo">
-          ⚒ TENA<span className="app__logo-accent">Z</span>A
+          <TenazaMark />
+          TENA<span className="app__logo-accent">Z</span>A
         </span>
         {viewModel && (
           <div className="app__stats">

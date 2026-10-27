@@ -195,8 +195,17 @@ kbd {
 }
 
 .app__logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font: 600 13px var(--font-mono);
   letter-spacing: 2px;
+}
+
+/* Ticket 12: the official mark, inline, sized to the wordmark's own text height — `display: block` so the SVG's default inline baseline gap never adds a stray few pixels under it the way an inline `<img>`/`<svg>` otherwise would. */
+.app__logo-mark {
+  display: block;
+  flex-shrink: 0;
 }
 
 .app__logo-accent {

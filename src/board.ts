@@ -189,3 +189,143 @@ export function moveSelection(
   const nextIndex = Math.min(Math.max(currentIndex + direction, 0), ids.length - 1);
   return ids[nextIndex];
 }
+
+// ---------------------------------------------------------------------------
+// Activity panel (ticket 12, spec "Activity panel (l)") — resolutions and
+// session-column transitions "the SSE stream already carries," derived
+// client-side by diffing one tick's board state against the last one this
+// file itself remembered, never a new server field and never persisted
+// past this render (spec: "derived from the stream, never stored").
+// ---------------------------------------------------------------------------
+
+export interface ActivityFeedEntry {
+  /** A unique key for this ENTRY (react's own list key) — never a domain id by itself, since one resolution or one session can legitimately produce several entries over a run. */
+  id: string;
+  /** When this was OBSERVED (a resolution's own `ts` when one exists; `now` for a transition, which carries no timestamp of its own). */
+  ts: string;
+  text: string;
+}
+
+/** The subset of a Session's resolution trace this diff actually reads — named independently of `contract/live.ts`'s own `ResolutionTraceEntry`, same convention `SessionTiming` above already follows, so this file stays import-free. */
+export interface ActivityResolution {
+  id: string;
+  kind: "ran" | "done" | "dismissed" | "failed" | "approved" | "rejected";
+  ts: string;
+}
+
+/** The subset of a Session this diff reads — `SessionTiming`'s own two fields (for the column classification) plus what a feed LINE needs to read (its label) and what its resolutions the diff watches for new ones. */
+export interface ActivitySession extends SessionTiming {
+  id: string;
+  project: string;
+  ticket?: string;
+  /** Newest first, same convention the contract's own `resolutions` field already carries — only `[0]` (the latest) is ever compared. */
+  resolutions: readonly ActivityResolution[];
+}
+
+/** What this diff remembers about ONE Session between ticks — just enough to tell "did its column change" and "is there a resolution here it hasn't already reported." */
+export interface ActivitySnapshot {
+  column: SessionColumn | undefined;
+  latestResolutionId: string | undefined;
+}
+
+export type ActivitySnapshots = ReadonlyMap<string, ActivitySnapshot>;
+
+/** The feed's own short verbs (spec, parenthetical list) — DELIBERATELY not `viewModel.ts`'s own `traceInfo` wording ("corrido por vos," "cerrado como listo"): that is a CARD's memory of its own latest request, read in context; this is a compact, cross-session timeline where a terser verb reads better one line at a time. */
+const RESOLUTION_FEED_VERB: Record<ActivityResolution["kind"], string> = {
+  ran: "corrido",
+  done: "listo",
+  dismissed: "descartado",
+  failed: "falló",
+  approved: "aprobado",
+  rejected: "rechazado",
+};
+
+/** A Session's own short label for a feed line — its `ticket` Label when it announced one, else its project name (never its bare id, which says nothing at a glance). */
+function activitySessionLabel(session: ActivitySession): string {
+  return session.ticket ?? session.project;
+}
+
+/**
+ * The feed's own wording for a column change (no literal spec text given —
+ * this run's own call, reported): "se trabó" entering TRABADA, "terminó"
+ * entering TERMINÓ, "volvió a correr" entering CORRIENDO — never "arrancó"
+ * for that last one, since a transition only ever fires for a Session this
+ * diff has ALREADY seen in some other column before (a brand-new Session's
+ * first sighting is seeded silently, below, never reported as a
+ * transition) — reaching CORRIENDO again always means it came FROM
+ * somewhere else (TRABADA, or a resume after TERMINÓ), never a first
+ * start.
+ */
+function activityTransitionText(column: SessionColumn): string {
+  if (column === "trabada") return "se trabó";
+  if (column === "termino") return "terminó";
+  return "volvió a correr";
+}
+
+/**
+ * One tick of the activity feed's own diff (`useActivityFeed.ts` calls this
+ * on every viewModel recompute — a fresh SSE payload AND the ticking clock
+ * alike, since a column change like TRABADA is itself time-driven with no
+ * new bytes over the wire, same "TIME IS STATE" every other classifier in
+ * this file already follows). Compares `sessions` (this tick's own,
+ * classified against `now`) to `previous` (what the LAST call to this
+ * function left behind) and returns both what's NEW this tick and the
+ * updated snapshot to diff against next time.
+ *
+ * A Session seen for the FIRST time (no entry in `previous` at all) is
+ * seeded into `next` silently — never a synthetic "transition," which
+ * would flood the panel with every already-running Session the instant
+ * the board first connects. A Session that VANISHES from `sessions`
+ * entirely while its last known column was TERMINÓ reads as archived
+ * (ticket 11's own archive route is the only thing that removes a TERMINÓ
+ * card outright) — the one entry this diff can never read off a
+ * `resolutions` array, since archiving a Session is not itself the
+ * resolution of any request it raised.
+ */
+export function diffActivityFeed(
+  sessions: readonly ActivitySession[],
+  previous: ActivitySnapshots,
+  now: Date,
+  stallMinutes: number,
+): { additions: ActivityFeedEntry[]; next: ActivitySnapshots } {
+  const next = new Map<string, ActivitySnapshot>();
+  const additions: ActivityFeedEntry[] = [];
+  let seq = 0;
+  const nextEntryId = (prefix: string): string => `${prefix}-${now.getTime()}-${seq++}`;
+
+  for (const session of sessions) {
+    const column = sessionColumn(session, now, stallMinutes);
+    const prevSnapshot = previous.get(session.id);
+    const latest = session.resolutions[0];
+
+    if (prevSnapshot) {
+      if (column !== undefined && prevSnapshot.column !== column) {
+        additions.push({
+          id: nextEntryId(`t-${session.id}`),
+          ts: now.toISOString(),
+          text: `${activitySessionLabel(session)} ${activityTransitionText(column)}`,
+        });
+      }
+      if (latest && latest.id !== prevSnapshot.latestResolutionId) {
+        additions.push({
+          id: `r-${latest.id}`,
+          ts: latest.ts,
+          text: `#${latest.id.slice(0, 4)} ${RESOLUTION_FEED_VERB[latest.kind]}`,
+        });
+      }
+    }
+
+    next.set(session.id, { column, latestResolutionId: latest?.id });
+  }
+
+  for (const [id, prevSnapshot] of previous) {
+    if (!next.has(id) && prevSnapshot.column === "termino") {
+      additions.push({ id: nextEntryId(`a-${id}`), ts: now.toISOString(), text: `#${id.slice(0, 4)} archivado` });
+    }
+  }
+
+  return { additions, next };
+}
+
+/** "the latest ~12 board events" (spec) — the activity panel's own cap, applied by `useActivityFeed.ts` after prepending each tick's `additions`. */
+export const ACTIVITY_FEED_CAPACITY = 12;

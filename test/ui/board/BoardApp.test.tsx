@@ -60,6 +60,27 @@ function currentSource(): FakeEventSource {
   return source;
 }
 
+describe("BoardApp — footer keys and the activity panel (ticket 12)", () => {
+  test("the footer reads 'j atrás' / 'k adelante' / 'l actividad' — never the old 'mover'", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    const footer = container.querySelector("footer.app__footer");
+    expect(footer).not.toBeNull();
+    expect(footer?.textContent).toContain("atrás");
+    expect(footer?.textContent).toContain("adelante");
+    expect(footer?.textContent).toContain("actividad");
+    expect(footer?.textContent).not.toContain("mover");
+  });
+
+  test("the activity panel is absent by default — closed, per spec", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    expect(container.querySelector(".activity-panel")).toBeNull();
+  });
+});
+
 /**
  * Ticket 12 follow-up (verified finding #2 from the prior run): keyboard
  * `a` on a live Session card used to pass the SESSION's own id to
@@ -122,5 +143,87 @@ describe("BoardApp — keyboard 'a' on a live Session card (ticket 12 follow-up)
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("BoardApp — activity panel open/close and feed (ticket 12)", () => {
+  test("l opens the panel; l again closes it", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(container.querySelector(".activity-panel")).not.toBeNull();
+    expect(container.querySelector(".activity-panel__empty")?.textContent).toBe("nada todavía");
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(container.querySelector(".activity-panel")).toBeNull();
+  });
+
+  test("Escape closes the panel too", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(container.querySelector(".activity-panel")).not.toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(container.querySelector(".activity-panel")).toBeNull();
+  });
+
+  test("l/Esc never fire while typing in an input — the SAME isTypingTarget guard a/r/j/k/d/x already follow", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    try {
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+      });
+      expect(container.querySelector(".activity-panel")).toBeNull();
+    } finally {
+      input.remove();
+    }
+  });
+
+  test("a session going CORRIENDO -> TERMINÓ between two pushes shows up in the open panel", () => {
+    installFakeEventSource();
+    const { container } = render(<BoardApp />);
+    const source = currentSource();
+
+    const startedAt = "2026-10-27T10:00:00.000Z";
+    act(() => {
+      source.emit(makeBoardPayload({ sessions: [makeSession({ id: "s1", ticket: "RES-131", lastEventTs: startedAt })] }));
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(container.querySelector(".activity-panel__entry")).toBeNull();
+
+    // The SAME session now carries `endedAt` — a fact, not a clock tick —
+    // so `sessionColumn` reclassifies it to TERMINÓ regardless of this
+    // test's own real wall-clock speed: no stall threshold, no waiting on
+    // `useNow`'s own interval.
+    const endedAt = new Date().toISOString();
+    act(() => {
+      source.emit(
+        makeBoardPayload({
+          sessions: [makeSession({ id: "s1", ticket: "RES-131", lastEventTs: startedAt, endedAt })],
+        }),
+      );
+    });
+
+    const entry = container.querySelector(".activity-panel__entry");
+    expect(entry).not.toBeNull();
+    expect(entry?.textContent).toContain("RES-131 terminó");
   });
 });

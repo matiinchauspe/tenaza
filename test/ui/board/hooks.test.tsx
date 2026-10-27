@@ -302,6 +302,67 @@ describe("useBoardKeyboard", () => {
       }
     });
   });
+
+  describe("l/Esc — the activity panel (ticket 12)", () => {
+    test("l calls onToggleActivity, with no selection required at all", () => {
+      let toggled = 0;
+      const { result } = renderHook(() => useBoardKeyboard([], { onToggleActivity: () => toggled++ }));
+      // Deliberately no `select(...)` call — `l` must fire even with an
+      // empty board (no cards, nothing selected).
+      void result;
+
+      dispatchKey(window, "l");
+
+      expect(toggled).toBe(1);
+    });
+
+    test("Escape calls onCloseActivity, with no selection required at all", () => {
+      let closed = 0;
+      renderHook(() => useBoardKeyboard([], { onCloseActivity: () => closed++ }));
+
+      dispatchKey(window, "Escape");
+
+      expect(closed).toBe(1);
+    });
+
+    test("l/Esc are ignored when the event's target is a text input, same as a/r/j/k/d/x (follows isTypingTarget)", () => {
+      const input = document.createElement("input");
+      document.body.appendChild(input);
+      try {
+        let toggled = 0;
+        let closed = 0;
+        renderHook(() =>
+          useBoardKeyboard([], { onToggleActivity: () => toggled++, onCloseActivity: () => closed++ }),
+        );
+
+        dispatchKey(input, "l");
+        dispatchKey(input, "Escape");
+
+        expect(toggled).toBe(0);
+        expect(closed).toBe(0);
+      } finally {
+        input.remove();
+      }
+    });
+
+    test("l never disturbs j/k selection or a/r/d/x dispatch — it is an independent key, not folded onto any of them", () => {
+      const approved: string[] = [];
+      let toggled = 0;
+      const { result } = renderHook(() =>
+        useBoardKeyboard(["a", "b"], {
+          onApprove: (id) => approved.push(id),
+          onToggleActivity: () => toggled++,
+        }),
+      );
+      act(() => result.current.select("a"));
+
+      dispatchKey(window, "l");
+      dispatchKey(window, "a");
+
+      expect(toggled).toBe(1);
+      expect(approved).toEqual(["a"]);
+    });
+  });
 });
 
 /** A fully scriptable `EventSource` stand-in (ticket 08's own "fake EventSource" requirement) — never a real network connection. */

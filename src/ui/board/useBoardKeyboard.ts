@@ -31,6 +31,10 @@ export interface BoardKeyboardActions {
   onFocusTerminal?(id: string): void;
   /** Ticket 11: `x` on a selected TERMINÓ Session card — folded onto the SAME key `onDismiss` already owns (below), never a new keybinding: the container's own gating (is this id an Inbox card, or a TERMINÓ Session card) is what makes exactly one of the two actually fire for any given selection. */
   onArchive?(id: string): void;
+  /** Ticket 12: `l` toggles the activity panel — never gated on `selectedId` (it has nothing to do with the board's selection), so it fires whenever this hook's own `isTypingTarget` guard allows it through, same as every other key here. */
+  onToggleActivity?(): void;
+  /** Ticket 12: `Esc` closes the activity panel — a dedicated close rather than a second meaning folded onto `onToggleActivity`, since a future `Esc` use (e.g. clearing a selection) must never also toggle this panel back OPEN. */
+  onCloseActivity?(): void;
 }
 
 export function isTypingTarget(target: EventTarget | null): boolean {
@@ -125,6 +129,10 @@ export function useBoardKeyboard(
         // doc. A no-op when the selected card carries no live request at
         // all (nothing to focus).
         document.getElementById(liveMessageInputElementId(selectedId))?.focus();
+      } else if (event.key === "l") {
+        actions.onToggleActivity?.();
+      } else if (event.key === "Escape") {
+        actions.onCloseActivity?.();
       }
     }
     window.addEventListener("keydown", onKeyDown);

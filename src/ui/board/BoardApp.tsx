@@ -1,6 +1,9 @@
+import { useState } from "react";
+import { ActivityPanel } from "./ActivityPanel";
 import { Board } from "./Board";
 import { LiveDot } from "./LiveDot";
 import { ToastStack } from "./ToastStack";
+import { useActivityFeed } from "./useActivityFeed";
 import { useBoardKeyboard } from "./useBoardKeyboard";
 import { useDocumentTitle } from "./useDocumentTitle";
 import { useEventSource } from "./useEventSource";
@@ -32,8 +35,10 @@ const STALE_TOKEN_MESSAGE =
  *
  * Header (restyled per the approved prototype, human fix round): the
  * `⚒ TENAZA` wordmark, the stat chips, and the live dot — no sim menu, no
- * activity feed. The footer keybar shows the keys wired so far — `j`/`k`
- * (ticket 08), `d`/`x` (ticket 09), `a`/`r` (ticket 10), now `t` (go to
+ * activity feed of its own here (ticket 12 adds a SEPARATE one, the
+ * `l`-toggled `ActivityPanel`, below). The footer keybar shows the keys
+ * wired so far — `j`/`k` (ticket 08), `d`/`x` (ticket 09), `a`/`r`
+ * (ticket 10), now `t` (go to
  * terminal) and `x`'s second job (archive a TERMINÓ card, ticket 11).
  *
  * `d`/`x` only ever dispatch against an id this render actually knows is
@@ -53,6 +58,10 @@ export function BoardApp() {
   const viewModel = payload ? buildBoardViewModel(payload, now) : undefined;
   const orderedIds = viewModel?.orderedIds ?? [];
   const actions = useInboxActions();
+  // Ticket 12: closed by default (spec "Activity panel (l)") — `l`
+  // toggles it, `Esc` always closes it, neither gated on a selection.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const activityFeed = useActivityFeed(payload, now);
 
   const inboxIds = new Set(viewModel?.teNecesita.cards.map((card) => card.id) ?? []);
   // Ticket 12 follow-up (verified bug): keyed by the SESSION's own id
@@ -90,6 +99,8 @@ export function BoardApp() {
     onArchive: (id) => {
       if (terminoSessionIds.has(id)) actions.archive(id);
     },
+    onToggleActivity: () => setActivityOpen((open) => !open),
+    onCloseActivity: () => setActivityOpen(false),
   });
   const highlightedId = viewModel ? highlightedSessionId(viewModel, selectedId) : undefined;
 
@@ -142,8 +153,10 @@ export function BoardApp() {
       )}
       <footer className="app__footer">
         <span className="app__key">
-          <kbd>j</kbd>
-          <kbd>k</kbd> mover
+          <kbd>j</kbd> atrás
+        </span>
+        <span className="app__key">
+          <kbd>k</kbd> adelante
         </span>
         <span className="app__key">
           <kbd>a</kbd> aprobar
@@ -160,7 +173,11 @@ export function BoardApp() {
         <span className="app__key">
           <kbd>t</kbd> terminal
         </span>
+        <span className="app__key">
+          <kbd>l</kbd> actividad
+        </span>
       </footer>
+      <ActivityPanel open={activityOpen} entries={activityFeed} />
       <ToastStack toasts={actions.toasts} />
     </div>
   );

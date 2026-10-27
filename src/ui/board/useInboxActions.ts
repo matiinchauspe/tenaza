@@ -43,10 +43,17 @@ const GENERIC_MESSAGE = (status: number): string => `No se pudo (${status})`;
  * success — `done`/`dismiss`'s own 200 response, or `run`'s stream ending
  * with no failure trailer — never optimistically on click, so a refused
  * write (409/422/500/404, surfaced in `errors[id]` instead) never shows a
- * false "listo" alongside it. `run`/`answer` never show one on their OWN
- * (a live answer's feedback is the resolution trace + the agent
- * continuing, not a toast — spec scopes the toast to "run / listo /
- * descartar" alone).
+ * false "listo" alongside it.
+ *
+ * **Amended ticket 12** (spec "Requests vs agents," 2026-10-27): a live
+ * `answer` (approve/reject) now ALSO toasts, on the Daemon's own
+ * confirmation — never optimistically on the `a`/`r` keypress or button
+ * click, same rule as every other toast here. A REFUSED answer (409
+ * `not-live`, the window already lapsed) shows its error instead, exactly
+ * like a refused `done`/`dismiss`/`run` — never a toast. `buildAnswerToastMessage`
+ * (below) is `answer`'s own builder, kept separate from `buildToastMessage`
+ * because its wording doesn't fit the shared "cerrado como <verb>" template
+ * (the spec gives each answer kind its own exact phrasing).
  */
 const RESOLUTION_VERBS: Record<"run" | "done" | "dismiss", string> = {
   run: "corrido",
@@ -59,6 +66,31 @@ const TOAST_ID_DISPLAY_LENGTH = 8;
 
 function buildToastMessage(id: string, action: "run" | "done" | "dismiss"): string {
   return `✓ pedido #${id.slice(0, TOAST_ID_DISPLAY_LENGTH)} cerrado como ${RESOLUTION_VERBS[action]} — el agente no se entera`;
+}
+
+/**
+ * Ticket 12: mirrors `live.ts`'s own `GENERIC_REJECT_REASON` text — copied
+ * here VERBATIM rather than imported, same convention `runoutput.ts`'s own
+ * doc comment already establishes for a format two sides must agree on
+ * ("a ZERO-IMPORT module... so the writer and the reader can never
+ * disagree"): `live.ts` imports `daemonlink.ts`/`log.ts`, both
+ * `node:fs`-backed, and importing it here would drag that server-only
+ * code into the browser bundle. A human reading the toast sees the SAME
+ * words the agent actually reads when no message was typed.
+ */
+const GENERIC_REJECT_REASON_FOR_TOAST = "Rechazado por el humano — sin mensaje.";
+
+/**
+ * Ticket 12 (spec, amended "Requests vs agents"): `✓ #<id> aprobado — el
+ * agente sigue` / `✕ #<id> rechazado — el agente lee: "<msg>"` — the
+ * EXACT wording the spec gives, never folded into `buildToastMessage`'s
+ * own "cerrado como <verb>" template above.
+ */
+function buildAnswerToastMessage(id: string, answer: "approve" | "reject", message: string | undefined): string {
+  const shortId = id.slice(0, TOAST_ID_DISPLAY_LENGTH);
+  if (answer === "approve") return `✓ #${shortId} aprobado — el agente sigue`;
+  const shown = message && message.length > 0 ? message : GENERIC_REJECT_REASON_FOR_TOAST;
+  return `✕ #${shortId} rechazado — el agente lee: "${shown}"`;
 }
 
 /** How long a toast stays up before it's dropped (the prototype's own ~2.6s). */
@@ -182,8 +214,11 @@ export function useInboxActions(): InboxActionsState {
     toastTimeoutsRef.current.add(timeout);
   }
 
+  /** The ONLY shape `body` is ever actually sent as (`approve`/`reject`'s own call sites, below) — `done`/`dismiss`/`run` always call `post` with no third argument at all. Typed here so the success branch can read `answer`/`message` straight back WITHOUT re-parsing JSON a second time or re-casting `unknown`. */
+  type AnswerBody = { answer: "approve" | "reject"; message?: string };
+
   const post = useCallback(
-    async (id: string, action: "run" | "done" | "dismiss" | "answer", body?: unknown): Promise<Response> => {
+    async (id: string, action: "run" | "done" | "dismiss" | "answer", body?: AnswerBody): Promise<Response> => {
       const res = await fetch(itemActionUrl(id, action), {
         method: "POST",
         ...(body !== undefined
@@ -207,6 +242,11 @@ export function useInboxActions(): InboxActionsState {
         // that one's own toast fires once the stream actually ends (below),
         // never here.
         if (action === "done" || action === "dismiss") pushToast(buildToastMessage(id, action));
+        // Ticket 12: `answer`'s own toast, on the SAME "confirmed by this
+        // response" rule — `body` is always defined here (every `answer`
+        // call site passes one; see `AnswerBody`'s own doc), but the guard
+        // stays defensive rather than asserting it.
+        else if (action === "answer" && body) pushToast(buildAnswerToastMessage(id, body.answer, body.message));
       }
       return res;
     },

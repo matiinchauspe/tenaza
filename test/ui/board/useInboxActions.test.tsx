@@ -205,6 +205,72 @@ describe("useInboxActions (ticket 09) — the view's own run/done/dismiss", () =
     await waitFor(() => expect(result.current.errors["abc123"]).toBe("Ya no está en vivo — pasó a pendiente"));
   });
 
+  describe("ticket 12 (spec amended 2026-10-27): a confirmed live answer toasts too", () => {
+    test("a confirmed approve shows '✓ #<8-char id> aprobado — el agente sigue'", async () => {
+      stubFetch(() => new Response(JSON.stringify({ ok: true })));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.approve("abc123456789"));
+
+      await waitFor(() => expect(result.current.toasts).toHaveLength(1));
+      expect(result.current.toasts[0]?.message).toBe("✓ #abc12345 aprobado — el agente sigue");
+    });
+
+    test("a confirmed reject WITH a message shows it quoted: '✕ #<id> rechazado — el agente lee: \"<msg>\"'", async () => {
+      stubFetch(() => new Response(JSON.stringify({ ok: true })));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.reject("abc123456789", "primero corré los tests"));
+
+      await waitFor(() => expect(result.current.toasts).toHaveLength(1));
+      expect(result.current.toasts[0]?.message).toBe(
+        '✕ #abc12345 rechazado — el agente lee: "primero corré los tests"',
+      );
+    });
+
+    test("a confirmed reject with NO message shows the SAME generic reason the agent itself reads", async () => {
+      stubFetch(() => new Response(JSON.stringify({ ok: true })));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.reject("abc123456789"));
+
+      await waitFor(() => expect(result.current.toasts).toHaveLength(1));
+      expect(result.current.toasts[0]?.message).toBe(
+        '✕ #abc12345 rechazado — el agente lee: "Rechazado por el humano — sin mensaje."',
+      );
+    });
+
+    test("a REFUSED answer (409 not-live) shows its error, never a toast — same rule as done/dismiss/run", async () => {
+      stubFetch(() => refusalResponse("not-live", 409));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.approve("abc123"));
+
+      await waitFor(() => expect(result.current.errors["abc123"]).toBeDefined());
+      expect(result.current.toasts).toEqual([]);
+    });
+
+    test("a REFUSED reject (409 not-live) also shows no toast", async () => {
+      stubFetch(() => refusalResponse("not-live", 409));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.reject("abc123", "demasiado tarde"));
+
+      await waitFor(() => expect(result.current.errors["abc123"]).toBeDefined());
+      expect(result.current.toasts).toEqual([]);
+    });
+
+    test("a 403 (stale token) on approve never toasts either", async () => {
+      stubFetch(() => new Response("forbidden\n", { status: 403 }));
+      const { result } = renderHook(() => useInboxActions());
+
+      act(() => result.current.approve("abc123"));
+
+      await waitFor(() => expect(result.current.staleToken).toBe(true));
+      expect(result.current.toasts).toEqual([]);
+    });
+  });
+
   test("run accumulates every streamed chunk into outputs[id], in order", async () => {
     stubFetch(() => streamingResponse(["uno ", "dos ", "tres"]));
     const { result } = renderHook(() => useInboxActions());

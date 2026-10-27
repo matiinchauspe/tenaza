@@ -959,3 +959,66 @@ kbd {
   box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
   max-width: 360px;
 }
+
+/* -------------------------------------------------------------------- */
+/* Activity panel (ticket 12, prototype's `#feed`/`#log`) — `l` toggles a */
+/* small panel listing the latest board events, derived client-side and  */
+/* never stored (spec "Activity panel (l)"). Same fixed position the     */
+/* toast stack uses (the prototype's own layout, ported literally) — the */
+/* two are mutually rare in practice and a toast's own z-index (9) still  */
+/* wins if they ever do overlap.                                        */
+/* -------------------------------------------------------------------- */
+
+.activity-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 46px;
+  width: 360px;
+  background: var(--s2);
+  border: var(--border-width) solid var(--line2);
+  font: 11px var(--font-mono);
+  color: var(--mut);
+  z-index: 7;
+}
+
+/* An open panel sits exactly where toasts land, so a toast fired while it is open moves to the panel's left instead of covering its log. `BoardApp` renders the stack right after the panel, and the panel renders nothing while closed. */
+.activity-panel + .toast-stack {
+  right: calc(16px + 360px + 12px);
+}
+
+.activity-panel__header {
+  padding: 8px 10px;
+  border-bottom: var(--border-width) solid var(--line);
+  color: var(--fg);
+  display: flex;
+  justify-content: space-between;
+}
+
+.activity-panel__header em {
+  font-style: normal;
+  color: var(--dim);
+}
+
+.activity-panel__log {
+  padding: 6px 10px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.activity-panel__entry {
+  padding: 2px 0;
+}
+
+.activity-panel__entry--latest {
+  color: var(--fg);
+}
+
+.activity-panel__entry time {
+  color: var(--dim);
+  margin-right: 8px;
+}
+
+.activity-panel__empty {
+  padding: 2px 0;
+  color: var(--dim);
+}

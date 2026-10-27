@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type ActivitySession,
+  type ActivitySnapshots,
+  diffActivityFeed,
   formatAge,
   isSessionStalled,
   liveItemPhase,
@@ -275,5 +278,164 @@ describe("liveWaitRemainingFraction", () => {
 
   test("never divides by zero on a degenerate zero-second window", () => {
     expect(liveWaitRemainingFraction(heldAt, new Date(heldAt), 0)).toBe(0);
+  });
+});
+
+describe("diffActivityFeed (ticket 12: the activity panel's own diff)", () => {
+  const STALL_MINUTES = 15;
+  const EMPTY: ActivitySnapshots = new Map();
+
+  function session(overrides: Partial<ActivitySession> & { id: string }): ActivitySession {
+    return {
+      project: "reservee",
+      resolutions: [],
+      ...overrides,
+    };
+  }
+
+  test("a brand-new Session (never seen before) is seeded silently — no transition entry on first sighting", () => {
+    const now = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({ id: "s1", lastEventTs: now.toISOString() });
+
+    const { additions, next } = diffActivityFeed([sess], EMPTY, now, STALL_MINUTES);
+
+    expect(additions).toEqual([]);
+    expect(next.get("s1")).toEqual({ column: "corriendo", latestResolutionId: undefined });
+  });
+
+  test("a Session going CORRIENDO -> TRABADA (purely from the clock, no new Event) reports 'se trabó'", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({ id: "s1", ticket: "RES-131", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([sess], EMPTY, t0, STALL_MINUTES);
+
+    const t1 = new Date(t0.getTime() + 16 * 60 * 1000); // 16 min later, past the 15 min threshold
+    const { additions } = diffActivityFeed([sess], afterFirst, t1, STALL_MINUTES);
+
+    expect(additions).toHaveLength(1);
+    expect(additions[0]?.text).toBe("RES-131 se trabó");
+  });
+
+  test("a Session going CORRIENDO -> TERMINÓ reports 'terminó'", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const running = session({ id: "s1", project: "reservee", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([running], EMPTY, t0, STALL_MINUTES);
+
+    const t1 = new Date(t0.getTime() + 1000);
+    const ended = { ...running, endedAt: t1.toISOString() };
+    const { additions } = diffActivityFeed([ended], afterFirst, t1, STALL_MINUTES);
+
+    expect(additions).toHaveLength(1);
+    expect(additions[0]?.text).toBe("reservee terminó");
+  });
+
+  test("a Session going TRABADA -> CORRIENDO again reports 'volvió a correr', never 'arrancó'", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({ id: "s1", project: "rudy", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([sess], EMPTY, t0, STALL_MINUTES);
+    const t1 = new Date(t0.getTime() + 16 * 60 * 1000);
+    const { next: afterStall } = diffActivityFeed([sess], afterFirst, t1, STALL_MINUTES);
+
+    // A fresh Event moves lastEventTs forward, reclassifying back to corriendo.
+    const t2 = new Date(t1.getTime() + 1000);
+    const revived = { ...sess, lastEventTs: t2.toISOString() };
+    const { additions } = diffActivityFeed([revived], afterStall, t2, STALL_MINUTES);
+
+    expect(additions).toHaveLength(1);
+    expect(additions[0]?.text).toBe("rudy volvió a correr");
+  });
+
+  test("a NEW resolution entry reports its own short id and the feed's own short verb", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({ id: "s1", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([sess], EMPTY, t0, STALL_MINUTES);
+
+    const resolved = {
+      ...sess,
+      resolutions: [{ id: "abc12345", kind: "approved" as const, ts: "2026-10-27T10:05:00.000Z" }],
+    };
+    const { additions } = diffActivityFeed([resolved], afterFirst, t0, STALL_MINUTES);
+
+    expect(additions).toEqual([{ id: "r-abc12345", ts: "2026-10-27T10:05:00.000Z", text: "#abc1 aprobado" }]);
+  });
+
+  test("every resolution kind maps to the feed's own short verb (never the card's longer 'corrido por vos' wording)", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({ id: "s1", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([sess], EMPTY, t0, STALL_MINUTES);
+
+    const cases: { kind: "ran" | "done" | "dismissed" | "failed" | "approved" | "rejected"; verb: string }[] = [
+      { kind: "ran", verb: "corrido" },
+      { kind: "done", verb: "listo" },
+      { kind: "dismissed", verb: "descartado" },
+      { kind: "failed", verb: "falló" },
+      { kind: "approved", verb: "aprobado" },
+      { kind: "rejected", verb: "rechazado" },
+    ];
+    for (const { kind, verb } of cases) {
+      const id = `id-${kind}`;
+      const resolved = { ...sess, resolutions: [{ id, kind, ts: t0.toISOString() }] };
+      const { additions } = diffActivityFeed([resolved], afterFirst, t0, STALL_MINUTES);
+      expect(additions.map((entry) => entry.text)).toContain(`#${id.slice(0, 4)} ${verb}`);
+    }
+  });
+
+  test("a resolution UNCHANGED since last tick produces no new entry (never re-reported every tick)", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const resolved = session({
+      id: "s1",
+      lastEventTs: t0.toISOString(),
+      resolutions: [{ id: "abc12345", kind: "approved", ts: t0.toISOString() }],
+    });
+    const { next: afterFirst } = diffActivityFeed([resolved], EMPTY, t0, STALL_MINUTES);
+
+    const t1 = new Date(t0.getTime() + 1000);
+    const { additions } = diffActivityFeed([resolved], afterFirst, t1, STALL_MINUTES);
+
+    expect(additions).toEqual([]);
+  });
+
+  test("a Session that VANISHES while its last known column was TERMINÓ reports 'archivado'", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const ended = session({ id: "s1", lastEventTs: t0.toISOString(), endedAt: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([ended], EMPTY, t0, STALL_MINUTES);
+    expect(afterFirst.get("s1")?.column).toBe("termino");
+
+    const t1 = new Date(t0.getTime() + 1000);
+    const { additions, next } = diffActivityFeed([], afterFirst, t1, STALL_MINUTES);
+
+    expect(additions).toHaveLength(1);
+    expect(additions[0]?.text).toBe("#s1 archivado");
+    expect(additions[0]?.ts).toBe(t1.toISOString());
+    expect(next.has("s1")).toBe(false);
+  });
+
+  test("a Session that vanishes while CORRIENDO or TRABADA reports nothing — only a TERMINÓ disappearance reads as archived", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const running = session({ id: "s1", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([running], EMPTY, t0, STALL_MINUTES);
+
+    const { additions, next } = diffActivityFeed([], afterFirst, t0, STALL_MINUTES);
+
+    expect(additions).toEqual([]);
+    expect(next.has("s1")).toBe(false);
+  });
+
+  test("several Sessions diff independently in one tick — no cross-contamination", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const a = session({ id: "a", project: "reservee", lastEventTs: t0.toISOString() });
+    const b = session({ id: "b", project: "rudy", lastEventTs: t0.toISOString() });
+    const { next: afterFirst } = diffActivityFeed([a, b], EMPTY, t0, STALL_MINUTES);
+
+    const t1 = new Date(t0.getTime() + 16 * 60 * 1000);
+    const aStalled = { ...a }; // no new Event — crosses the stall threshold
+    const bResolved = {
+      ...b,
+      lastEventTs: t1.toISOString(), // a fresh Event — stays corriendo
+      resolutions: [{ id: "bres0001", kind: "done" as const, ts: t1.toISOString() }],
+    };
+    const { additions } = diffActivityFeed([aStalled, bResolved], afterFirst, t1, STALL_MINUTES);
+
+    const texts = additions.map((entry) => entry.text).sort();
+    expect(texts).toEqual(["#bres listo", "reservee se trabó"].sort());
   });
 });

@@ -65,9 +65,12 @@ export function useBoardKeyboard(
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
       if (isTypingTarget(event.target)) return;
-      if (event.key === "j") {
+      // `k` forward, `j` back — the human's call (2026-10-27), deliberately the
+      // reverse of vim's j-down/k-up and of the prototype: forward walks down a
+      // column, then on to the first card of the column to its right.
+      if (event.key === "k") {
         setSelectedId((current) => moveSelection(orderedIds, current, 1));
-      } else if (event.key === "k") {
+      } else if (event.key === "j") {
         setSelectedId((current) => moveSelection(orderedIds, current, -1));
       } else if (event.key === "d" && selectedId !== undefined) {
         actions.onDone?.(selectedId);

@@ -142,6 +142,11 @@ body {
   outline-offset: 1px;
 }
 
+/* A card's focus ring IS its selected border: the roving `tabIndex` keeps DOM focus on the selected card, so the outline above drew a second teal ring 1px outside `card--selected`'s border — a double selection on every j/k move. The selected border stays the one visible indicator. */
+.card:focus-visible {
+  outline: none;
+}
+
 button {
   font-family: inherit;
   color: inherit;

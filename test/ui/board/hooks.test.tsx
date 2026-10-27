@@ -36,29 +36,29 @@ describe("useBoardKeyboard", () => {
     });
   }
 
-  test("j moves the selection down from none to the first id", () => {
+  test("k moves the selection forward from none to the first id", () => {
     const { result } = renderHook(() => useBoardKeyboard(["a", "b", "c"]));
     expect(result.current.selectedId).toBeUndefined();
 
-    dispatchKey(window, "j");
+    dispatchKey(window, "k");
     expect(result.current.selectedId).toBe("a");
   });
 
-  test("j then k returns to the first id (bounds: k never goes before the first)", () => {
+  test("k then j returns to the first id (bounds: j never goes before the first)", () => {
     const { result } = renderHook(() => useBoardKeyboard(["a", "b", "c"]));
-    dispatchKey(window, "j"); // -> a
-    dispatchKey(window, "j"); // -> b
     dispatchKey(window, "k"); // -> a
+    dispatchKey(window, "k"); // -> b
+    dispatchKey(window, "j"); // -> a
     expect(result.current.selectedId).toBe("a");
-    dispatchKey(window, "k"); // clamps at the first id
+    dispatchKey(window, "j"); // clamps at the first id
     expect(result.current.selectedId).toBe("a");
   });
 
-  test("j clamps at the last id — it never wraps", () => {
+  test("k clamps at the last id — it never wraps", () => {
     const { result } = renderHook(() => useBoardKeyboard(["a", "b"]));
-    dispatchKey(window, "j"); // -> a
-    dispatchKey(window, "j"); // -> b
-    dispatchKey(window, "j"); // clamps at b
+    dispatchKey(window, "k"); // -> a
+    dispatchKey(window, "k"); // -> b
+    dispatchKey(window, "k"); // clamps at b
     expect(result.current.selectedId).toBe("b");
   });
 
@@ -91,7 +91,7 @@ describe("useBoardKeyboard", () => {
     expect(result.current.selectedId).toBe("a");
   });
 
-  test("focus follows selection: j moves REAL DOM focus to the matching card element, not just aria-selected", () => {
+  test("focus follows selection: k moves REAL DOM focus to the matching card element, not just aria-selected", () => {
     const cardA = document.createElement("li");
     cardA.id = boardCardElementId("a");
     cardA.tabIndex = -1;
@@ -102,10 +102,10 @@ describe("useBoardKeyboard", () => {
 
     try {
       renderHook(() => useBoardKeyboard(["a", "b"]));
-      dispatchKey(window, "j");
+      dispatchKey(window, "k");
       expect(document.activeElement).toBe(cardA);
 
-      dispatchKey(window, "j");
+      dispatchKey(window, "k");
       expect(document.activeElement).toBe(cardB);
     } finally {
       cardA.remove();

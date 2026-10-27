@@ -16,6 +16,11 @@ export interface SessionCardProps {
   /** Ticket 10: fires the live request's own approve/reject — `message` is whatever `SessionCard`'s own local draft currently holds. `undefined` (never called) when `card.liveRequest` is itself `undefined`. */
   onApprove: (id: string, message: string | undefined) => void;
   onReject: (id: string, message: string | undefined) => void;
+  /** Ticket 11: "from any card" — already bound to this Session's own id by `Board`. */
+  onFocusTerminal: () => void;
+  /** Ticket 11: true only on a TERMINÓ card (`Board`'s own gate, `key === "termino"`) — this component never checks its own column. */
+  showArchive: boolean;
+  onArchive: () => void;
 }
 
 /** Stop a click inside the live-request block from ALSO firing the card's own `onClick` (select) — same convention `InboxCard`'s own `stopCardSelect` already uses. */
@@ -125,7 +130,9 @@ function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["r
 /**
  * A Session's card — CORRIENDO, TRABADA or TERMINÓ (ticket 08, restyled per
  * the approved prototype; ticket 10 adds the TE ESPERA block, the
- * resolution trace, and the cross-highlight). No uppercase `StatusBadge`
+ * resolution trace, and the cross-highlight; ticket 11 adds the terminal
+ * button every card gets, plus an "archivar" button on a TERMINÓ card
+ * only — `showArchive`, `Board`'s own gate). No uppercase `StatusBadge`
  * here: the prototype signals a Session's state with a small colored dot
  * in `l1` instead — the column it sits in already names that state in
  * text (its header), so the dot is reinforcement, not the only signal.
@@ -134,7 +141,19 @@ function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["r
  * satisfy. A TERMINÓ card reads at reduced opacity
  * (`session-card--termino`, prototype's `.ended`).
  */
-export function SessionCard({ card, tone, statusLabel, selected, highlighted, onSelect, onApprove, onReject }: SessionCardProps) {
+export function SessionCard({
+  card,
+  tone,
+  statusLabel,
+  selected,
+  highlighted,
+  onSelect,
+  onApprove,
+  onReject,
+  onFocusTerminal,
+  showArchive,
+  onArchive,
+}: SessionCardProps) {
   const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}`;
   return (
     <li
@@ -162,6 +181,22 @@ export function SessionCard({ card, tone, statusLabel, selected, highlighted, on
         {card.lastSignal}
       </div>
       <ContextTrack display={card.context} />
+      <div className="session-card__actions" onClick={stopCardSelect}>
+        <button
+          type="button"
+          className="btn"
+          disabled={card.terminalReach === "unknown"}
+          title={card.terminalNeedsTcc ? "macOS va a pedir permiso" : undefined}
+          onClick={onFocusTerminal}
+        >
+          {card.terminalLabel} <kbd>t</kbd>
+        </button>
+        {showArchive && (
+          <button type="button" className="btn" onClick={onArchive}>
+            archivar <kbd>x</kbd>
+          </button>
+        )}
+      </div>
       {card.liveRequest && (
         <LiveRequestBlock sessionId={card.id} liveRequest={card.liveRequest} onApprove={onApprove} onReject={onReject} />
       )}

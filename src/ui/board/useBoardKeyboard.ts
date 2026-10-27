@@ -27,6 +27,10 @@ export interface BoardKeyboardActions {
   onDone?(id: string): void;
   onDismiss?(id: string): void;
   onApprove?(id: string, message: string | undefined): void;
+  /** Ticket 11: "ir a terminal ↗" / key `t` — dispatched against whatever is selected, same "the container decides whether it applies" convention `onDone`/`onDismiss` already establish (this hook stays ignorant of card kinds and of terminal reach). */
+  onFocusTerminal?(id: string): void;
+  /** Ticket 11: `x` on a selected TERMINÓ Session card — folded onto the SAME key `onDismiss` already owns (below), never a new keybinding: the container's own gating (is this id an Inbox card, or a TERMINÓ Session card) is what makes exactly one of the two actually fire for any given selection. */
+  onArchive?(id: string): void;
 }
 
 export function isTypingTarget(target: EventTarget | null): boolean {
@@ -104,7 +108,16 @@ export function useBoardKeyboard(
       } else if (event.key === "d" && selectedId !== undefined) {
         actions.onDone?.(selectedId);
       } else if (event.key === "x" && selectedId !== undefined) {
+        // Ticket 11: `x` now serves TWO cards — "descartar" on a pending
+        // Inbox card (unchanged since ticket 09), "archivar" on a TERMINÓ
+        // Session card (new). Both callbacks fire; each container-level
+        // wrapper gates on whether `selectedId` actually names ITS own
+        // kind of card, so only one ever does anything for a given
+        // selection — see `BoardKeyboardActions.onArchive`'s own doc.
         actions.onDismiss?.(selectedId);
+        actions.onArchive?.(selectedId);
+      } else if (event.key === "t" && selectedId !== undefined) {
+        actions.onFocusTerminal?.(selectedId);
       } else if (event.key === "a" && selectedId !== undefined) {
         actions.onApprove?.(selectedId, currentLiveMessage(selectedId));
       } else if (event.key === "r" && selectedId !== undefined) {

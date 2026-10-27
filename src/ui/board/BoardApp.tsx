@@ -6,7 +6,7 @@ import { useDocumentTitle } from "./useDocumentTitle";
 import { useEventSource } from "./useEventSource";
 import { useInboxActions } from "./useInboxActions";
 import { useNow } from "./useNow";
-import { buildBoardViewModel, highlightedSessionId, type BoardStats } from "./viewModel";
+import { buildBoardViewModel, highlightedSessionId, sessionIdForCard, type BoardStats } from "./viewModel";
 
 const EVENTS_URL = "/events";
 
@@ -33,8 +33,8 @@ const STALE_TOKEN_MESSAGE =
  * Header (restyled per the approved prototype, human fix round): the
  * `⚒ TENAZA` wordmark, the stat chips, and the live dot — no sim menu, no
  * activity feed. The footer keybar shows the keys wired so far — `j`/`k`
- * (ticket 08), `d`/`x` (ticket 09), now `a`/`r` (ticket 10) — the
- * prototype's `t` belongs to a later ticket.
+ * (ticket 08), `d`/`x` (ticket 09), `a`/`r` (ticket 10), now `t` (go to
+ * terminal) and `x`'s second job (archive a TERMINÓ card, ticket 11).
  *
  * `d`/`x` only ever dispatch against an id this render actually knows is
  * an Inbox card (`inboxIds`, below); `a` only ever dispatches against a
@@ -57,6 +57,11 @@ export function BoardApp() {
       .filter((card) => card.liveRequest)
       .map((card) => card.id),
   );
+  // Ticket 11: `x` archives ONLY a TERMINÓ Session card — "x on any other
+  // Session card does nothing" (ticket), enforced here the SAME way
+  // `inboxIds` already gates `onDismiss`: a set this render actually knows
+  // is the TERMINÓ column's own cards, never CORRIENDO/TRABADA.
+  const terminoSessionIds = new Set(viewModel?.termino.cards.map((card) => card.id) ?? []);
   const { selectedId, select } = useBoardKeyboard(orderedIds, {
     onDone: (id) => {
       if (inboxIds.has(id)) actions.done(id);
@@ -66,6 +71,14 @@ export function BoardApp() {
     },
     onApprove: (id, message) => {
       if (liveRequestSessionIds.has(id)) actions.approve(id, message);
+    },
+    onFocusTerminal: (id) => {
+      if (!viewModel) return;
+      const sessionId = sessionIdForCard(viewModel, id);
+      if (sessionId) actions.focusTerminal(sessionId);
+    },
+    onArchive: (id) => {
+      if (terminoSessionIds.has(id)) actions.archive(id);
     },
   });
   const highlightedId = viewModel ? highlightedSessionId(viewModel, selectedId) : undefined;
@@ -111,6 +124,8 @@ export function BoardApp() {
           onDismiss={actions.dismiss}
           onApprove={actions.approve}
           onReject={actions.reject}
+          onFocusTerminal={actions.focusTerminal}
+          onArchive={actions.archive}
         />
       ) : (
         <p className="app__loading">conectando con el Daemon…</p>
@@ -130,7 +145,10 @@ export function BoardApp() {
           <kbd>d</kbd> listo
         </span>
         <span className="app__key">
-          <kbd>x</kbd> descartar
+          <kbd>x</kbd> descartar / archivar
+        </span>
+        <span className="app__key">
+          <kbd>t</kbd> terminal
         </span>
       </footer>
       <ToastStack toasts={actions.toasts} />

@@ -24,6 +24,8 @@ const NOOP_ACTION_PROPS = {
   onDismiss: () => {},
   onApprove: () => {},
   onReject: () => {},
+  onFocusTerminal: () => {},
+  onArchive: () => {},
 };
 
 describe("Board — render from a fixture payload", () => {
@@ -182,5 +184,19 @@ describe("Board — render from a fixture payload", () => {
 
   test("the request card's own badge still carries text, never color alone", () => {
     expect(html).toContain("Pendiente");
+  });
+
+  test("ticket 11: the archive control renders ONLY on the TERMINÓ card, never on CORRIENDO/TRABADA — Board's own gate, exercised end to end", () => {
+    const occurrences = html.split("archivar").length - 1;
+    expect(occurrences).toBe(1); // exactly the one TERMINÓ Session in this fixture payload
+  });
+
+  test("ticket 11: every card, Inbox and Session alike, gets its own terminal button", () => {
+    // This fixture's Sessions/Inbox items carry no terminal locator at all
+    // (the board fixture's own default), so every card reads "terminal
+    // desconocida" — proving the button is wired through `Board` for BOTH
+    // card kinds, not just one.
+    const occurrences = html.split("terminal desconocida").length - 1;
+    expect(occurrences).toBeGreaterThan(1);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBoardViewModel, highlightedSessionId } from "../../../src/ui/board/viewModel";
+import { buildBoardViewModel, highlightedSessionId, sessionIdForCard, terminalLabelFor } from "../../../src/ui/board/viewModel";
 import { makeBoardPayload, makeInboxItem, makeSession } from "../../support/boardFixture";
 
 const NOW = new Date("2026-01-02T00:00:00.000Z");
@@ -573,5 +573,82 @@ describe("highlightedSessionId (ticket 10): selecting a pending request highligh
     const payload = makeBoardPayload({ sessions: [makeSession({ id: "s1" })] });
     const model = buildBoardViewModel(payload, NOW);
     expect(highlightedSessionId(model, "s1")).toBeUndefined();
+  });
+});
+
+describe("terminalLabelFor (ticket 11, decision 09): the ONE place the button's wording is picked", () => {
+  test("exact reach", () => {
+    expect(terminalLabelFor("exact", "Orca")).toBe("ir a terminal ↗");
+  });
+
+  test("app-only reach, labeled by the app", () => {
+    expect(terminalLabelFor("app", "Warp")).toBe("abrir Warp ↗");
+  });
+
+  test("app-only reach with no app label at all (should not happen in practice) still reads sensibly", () => {
+    expect(terminalLabelFor("app", undefined)).toBe("abrir la terminal ↗");
+  });
+
+  test("unknown reach — greyed, the ticket's own exact wording", () => {
+    expect(terminalLabelFor("unknown", undefined)).toBe("terminal desconocida");
+  });
+});
+
+describe("buildBoardViewModel — terminal reach rides along on both card kinds (ticket 11)", () => {
+  test("a Session card carries its own terminalReach/terminalAppLabel/terminalNeedsTcc, already formatted into terminalLabel", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "a", terminalReach: "exact", terminalAppLabel: "Orca", terminalNeedsTcc: false })],
+    });
+    const card = buildBoardViewModel(payload, NOW).corriendo.cards[0];
+    expect(card).toMatchObject({ terminalReach: "exact", terminalLabel: "ir a terminal ↗", terminalNeedsTcc: false });
+  });
+
+  test("a TE NECESITA card carries the OWNING Session's own terminal fields (resolved server-side, carried verbatim on the row)", () => {
+    const payload = makeBoardPayload({
+      inbox: [
+        makeInboxItem({ id: "p1", sessionId: "s1", terminalReach: "app", terminalAppLabel: "Alacritty", terminalNeedsTcc: false }),
+      ],
+    });
+    const card = buildBoardViewModel(payload, NOW).teNecesita.cards[0];
+    expect(card).toMatchObject({ terminalReach: "app", terminalLabel: "abrir Alacritty ↗" });
+  });
+
+  test("a TCC-gated row's needsTcc rides through to the card unchanged", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "a", terminalReach: "exact", terminalAppLabel: "iTerm2", terminalNeedsTcc: true })],
+    });
+    const card = buildBoardViewModel(payload, NOW).corriendo.cards[0];
+    expect(card?.terminalNeedsTcc).toBe(true);
+  });
+});
+
+describe("sessionIdForCard (ticket 11): resolves ANY selected card id to the Session id the focus route needs", () => {
+  test("a Session card's own id round-trips unchanged", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "s1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(sessionIdForCard(model, "s1")).toBe("s1");
+  });
+
+  test("a TE NECESITA card resolves to its OWNING Session, never its own item hash", () => {
+    const payload = makeBoardPayload({ inbox: [makeInboxItem({ id: "p1", sessionId: "s1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(sessionIdForCard(model, "p1")).toBe("s1");
+  });
+
+  test("a TRABADA or TERMINÓ Session card's own id also round-trips", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({ id: "stalled", lastEventTs: "2026-01-01T00:00:00.000Z" }),
+        makeSession({ id: "ended", endedAt: "2026-01-01T06:00:00.000Z" }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(sessionIdForCard(model, "stalled")).toBe("stalled");
+    expect(sessionIdForCard(model, "ended")).toBe("ended");
+  });
+
+  test("an id naming nothing at all is undefined, never a guess", () => {
+    const model = buildBoardViewModel(makeBoardPayload(), NOW);
+    expect(sessionIdForCard(model, "no-such-card")).toBeUndefined();
   });
 });

@@ -390,3 +390,102 @@ describe("useInboxActions — non-403 write failures surface a per-item es-AR me
     });
   });
 });
+
+describe("useInboxActions — focusTerminal/archive (ticket 11): a SEPARATE route shape from /items/", () => {
+  let calls: FetchCall[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    calls = [];
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function stubFetch(respond: (call: FetchCall) => Response | Promise<Response>): void {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const call: FetchCall = { url: String(input), method: init?.method, body: init?.body as string | undefined };
+      calls.push(call);
+      return await respond(call);
+    }) as typeof fetch;
+  }
+
+  test("focusTerminal POSTs /sessions/<id>/focus, no body", async () => {
+    stubFetch(() => new Response(JSON.stringify({ ok: true, level: "exact" })));
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => result.current.focusTerminal("sess-1"));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({ url: "/sessions/sess-1/focus", method: "POST", body: undefined });
+  });
+
+  test("archive POSTs /sessions/<id>/archive, no body", async () => {
+    stubFetch(() => new Response(JSON.stringify({ ok: true, alreadyArchived: false })));
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => result.current.archive("sess-1"));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({ url: "/sessions/sess-1/archive", method: "POST", body: undefined });
+  });
+
+  test("neither fires a toast on success — a focus action changes nothing derived, and archive is confirmed by the card leaving the board over /events", async () => {
+    stubFetch(() => new Response(JSON.stringify({ ok: true })));
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => {
+      result.current.focusTerminal("sess-1");
+      result.current.archive("sess-2");
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(result.current.toasts).toEqual([]);
+  });
+
+  test("a 403 on either sets staleToken, same as every other write", async () => {
+    stubFetch(() => new Response(null, { status: 403 }));
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => result.current.archive("sess-1"));
+
+    await waitFor(() => expect(result.current.staleToken).toBe(true));
+  });
+
+  test("a 409 not-ended on archive sets its own es-AR message", async () => {
+    stubFetch(() => refusalResponse("not-ended", 409));
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => result.current.archive("sess-1"));
+
+    await waitFor(() => expect(result.current.errors["sess-1"]).toBe("Esa Session todavía no terminó"));
+  });
+
+  test("a 404 on focus or archive — plain text, never JSON — maps to the SESSION-worded not-found message, distinct from the Inbox item one", async () => {
+    stubFetch(() => notFoundResponse());
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => result.current.focusTerminal("sess-1"));
+
+    await waitFor(() => expect(result.current.errors["sess-1"]).toBe("Esa Session ya no existe"));
+  });
+
+  test("errors keyed by session id never collide with errors keyed by an Inbox item id", async () => {
+    stubFetch((call) =>
+      call.url.startsWith("/sessions/") ? refusalResponse("not-ended", 409) : refusalResponse("already-resolved", 409),
+    );
+    const { result } = renderHook(() => useInboxActions());
+
+    act(() => {
+      result.current.archive("sess-1");
+      result.current.done("item-1");
+    });
+
+    await waitFor(() => {
+      expect(result.current.errors["sess-1"]).toBe("Esa Session todavía no terminó");
+      expect(result.current.errors["item-1"]).toBe("Ya estaba cerrado");
+    });
+  });
+});

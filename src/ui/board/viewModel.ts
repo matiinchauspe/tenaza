@@ -27,7 +27,20 @@ import type {
   BoardSession,
   ResolutionTraceEntry,
   SessionRole,
+  TerminalReach,
 } from "../../contract/live";
+
+/**
+ * Ticket 11 (decision 09): "Label by reach: 'ir a terminal ↗', 'abrir <App>
+ * ↗', greyed 'terminal desconocida'" (ticket). The ONE place this wording
+ * is picked, for both card kinds — `SessionCard`/`InboxCard` only ever
+ * render whatever this returns, never re-deriving it.
+ */
+export function terminalLabelFor(reach: TerminalReach, appLabel: string | undefined): string {
+  if (reach === "exact") return "ir a terminal ↗";
+  if (reach === "app") return `abrir ${appLabel ?? "la terminal"} ↗`;
+  return "terminal desconocida";
+}
 
 /** `label` reuses `formatContextNumber` (`contextbar.ts`) — the SAME "243k" / "⚑243k" / "—" the CLI's `status` tree already shows, so a Session never reads two different numbers in two different places. */
 export type ContextDisplay = { kind: "track"; track: ContextTrack; label: string } | { kind: "unavailable" };
@@ -49,6 +62,10 @@ export interface InboxCardViewModel {
   blocked: boolean;
   /** Ticket 09: a YA CORRIÓ item (`blocked: false`) and an `mcp` item (no stored command) both offer no `run` — this is the ONE place that rule is computed, so `InboxCard` never re-derives it from `blocked`/`command` separately. */
   offersRun: boolean;
+  /** Ticket 11: "from any card" (spec) — the OWNING Session's own terminal button, already formatted (`terminalLabelFor`). */
+  terminalLabel: string;
+  terminalReach: TerminalReach;
+  terminalNeedsTcc: boolean;
 }
 
 /**
@@ -119,6 +136,10 @@ export interface SessionCardViewModel {
   liveRequest: LiveRequestViewModel | undefined;
   /** Ticket 10: this Session's own resolution trace, or `undefined` when it never raised a request. */
   resolutionTrace: ResolutionTraceViewModel | undefined;
+  /** Ticket 11: this Session's own (or, for a subagent, its parent's) terminal button, already formatted. */
+  terminalLabel: string;
+  terminalReach: TerminalReach;
+  terminalNeedsTcc: boolean;
 }
 
 export interface BoardColumnViewModel<Card> {
@@ -176,6 +197,9 @@ function toInboxCard(item: BoardInboxItem, now: Date): InboxCardViewModel {
     age: formatAge(item.ts, now),
     blocked: item.blocked,
     offersRun: item.blocked && item.action.kind === "shell",
+    terminalLabel: terminalLabelFor(item.terminalReach, item.terminalAppLabel),
+    terminalReach: item.terminalReach,
+    terminalNeedsTcc: item.terminalNeedsTcc,
   };
 }
 
@@ -308,6 +332,9 @@ function toSessionCard(
     age: formatAge(session.lastEventTs, now),
     liveRequest: liveItem ? toLiveRequest(liveItem, now, waitSeconds) : undefined,
     resolutionTrace: toResolutionTrace(session.resolutions, now),
+    terminalLabel: terminalLabelFor(session.terminalReach, session.terminalAppLabel),
+    terminalReach: session.terminalReach,
+    terminalNeedsTcc: session.terminalNeedsTcc,
   };
 }
 
@@ -445,4 +472,24 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
 export function highlightedSessionId(viewModel: BoardViewModel, selectedId: string | undefined): string | undefined {
   if (selectedId === undefined) return undefined;
   return viewModel.teNecesita.cards.find((card) => card.id === selectedId)?.sessionId;
+}
+
+/**
+ * Ticket 11: "from any card... t brings the terminal... to the front"
+ * (ticket) — `cardId` is whatever `useBoardKeyboard`'s own `selectedId`
+ * carries, which for a TE NECESITA card is the ITEM's hash, never the
+ * Session it belongs to. Resolves either shape to the one id the focus
+ * route actually takes (`/sessions/<id>/focus`): a Session card's own id
+ * IS already a Session id, so it round-trips unchanged; a TE NECESITA
+ * card's own `sessionId` field is read instead. `undefined` only when
+ * `cardId` names nothing at all (should not happen — it always came from
+ * `orderedIds`).
+ */
+export function sessionIdForCard(viewModel: BoardViewModel, cardId: string): string | undefined {
+  const inboxCard = viewModel.teNecesita.cards.find((card) => card.id === cardId);
+  if (inboxCard) return inboxCard.sessionId;
+  const sessionCard = [...viewModel.corriendo.cards, ...viewModel.trabada.cards, ...viewModel.termino.cards].find(
+    (card) => card.id === cardId,
+  );
+  return sessionCard?.id;
 }

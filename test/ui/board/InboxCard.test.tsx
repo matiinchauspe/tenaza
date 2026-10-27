@@ -26,6 +26,7 @@ function renderCard(overrides: Partial<InboxCardProps> & { card: InboxCardProps[
     onRun: NOOP,
     onDone: NOOP,
     onDismiss: NOOP,
+    onFocusTerminal: NOOP,
     ...overrides,
   };
   return renderToStaticMarkup(<InboxCard {...props} />);
@@ -95,6 +96,35 @@ describe("InboxCard — action buttons (ticket 09)", () => {
 
     const withEmptyOutput = renderCard({ card, output: "" });
     expect(withEmptyOutput).not.toContain("inbox-card__output");
+  });
+});
+
+describe("InboxCard — the terminal button (ticket 11, 'from any card')", () => {
+  test("renders the card's own already-formatted terminalLabel, with the t key", () => {
+    const card = cardFor({ terminalReach: "exact", terminalAppLabel: "Orca" });
+    const html = renderCard({ card });
+
+    expect(html).toContain("ir a terminal ↗");
+    expect(html).toContain("<kbd>t</kbd>");
+  });
+
+  test("app-only reach labels by the app, exact reach never does", () => {
+    const html = renderCard({ card: cardFor({ terminalReach: "app", terminalAppLabel: "Warp" }) });
+    expect(html).toContain("abrir Warp ↗");
+  });
+
+  test("unknown reach renders 'terminal desconocida' and the button itself as disabled", () => {
+    const html = renderCard({ card: cardFor({ terminalReach: "unknown" }) });
+    expect(html).toContain("terminal desconocida");
+    // The terminal button is the ONE disabled button on an item that still
+    // offers run/listo/descartar — `running: false` keeps the run button
+    // itself enabled here, so this count isolates the terminal one.
+    expect((html.match(/disabled/g) ?? []).length).toBe(1);
+  });
+
+  test("a TCC-gated row carries the 'macOS va a pedir permiso' title", () => {
+    const html = renderCard({ card: cardFor({ terminalReach: "exact", terminalNeedsTcc: true }) });
+    expect(html).toContain('title="macOS va a pedir permiso"');
   });
 });
 

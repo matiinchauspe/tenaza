@@ -445,6 +445,13 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Ticket 11: the terminal button every card gets, plus "archivar" on a TERMINÓ card only — same `.btn` base every other action button already uses (`.inbox-card__acts`/`.live-request__acts`'s own sibling row). */
+.session-card__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+}
+
 /* -------------------------------------------------------------------- */
 /* Context track (prototype's .ctx/.track/.fill/.over/.mark/.ctxn)      */
 /* -------------------------------------------------------------------- */

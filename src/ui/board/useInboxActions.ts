@@ -25,10 +25,15 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "not-live": "Ya no está en vivo — pasó a pendiente",
   "invalid-answer": "Respuesta inválida",
   "invalid-body": "No se pudo enviar la respuesta",
+  /** Ticket 11: `archiveSession`'s own refusal (`resolve.ts`) — the server-side half of "x on any other Session card does nothing". A repeat archive is never a refusal (`alreadyArchived` rides the 200 instead), so there is no "already archived" entry here. */
+  "not-ended": "Esa Session todavía no terminó",
 };
 
 /** 404 — the item doesn't exist UNDER THIS id any more (closed from elsewhere, e.g. the CLI, between this tab's last SSE push and the click). Plain text body (`daemon.ts`'s `new Response("not found\n", ...)`), never JSON — handled by status alone, before any `res.json()` attempt. */
 const NOT_FOUND_MESSAGE = "Ese ítem ya no está pendiente";
+
+/** Ticket 11: the SAME 404 shape, worded for a Session-scoped write (`focus`/`archive`) instead of an Inbox item. */
+const SESSION_NOT_FOUND_MESSAGE = "Esa Session ya no existe";
 
 const GENERIC_MESSAGE = (status: number): string => `No se pudo (${status})`;
 
@@ -72,8 +77,8 @@ export interface ToastViewModel {
  * to answer with JSON on (409/422/500); a malformed or absent JSON body
  * still degrades to the generic message rather than throwing.
  */
-async function describeWriteError(res: Response): Promise<string> {
-  if (res.status === NOT_FOUND_STATUS) return NOT_FOUND_MESSAGE;
+async function describeWriteError(res: Response, notFoundMessage: string = NOT_FOUND_MESSAGE): Promise<string> {
+  if (res.status === NOT_FOUND_STATUS) return notFoundMessage;
   try {
     const body = (await res.json()) as { error?: string };
     if (body?.error && REFUSAL_MESSAGES[body.error]) return REFUSAL_MESSAGES[body.error] as string;
@@ -101,10 +106,19 @@ export interface InboxActionsState {
   approve(id: string, message?: string): void;
   /** Ticket 10: post a live-answering REJECT for `id` — `message` is the deny reason the agent reads; empty/omitted gets a generic one (`live.ts`'s own `GENERIC_REJECT_REASON`), never silently dropped. */
   reject(id: string, message?: string): void;
+  /** Ticket 11: "go to the agent's terminal" — `sessionId` is the OWNING Session's own id, never a card's own id when the card is an Inbox item (`viewModel.ts`'s `sessionIdForCard` resolves that). Fire-and-forget, same shape `approve`/`reject` already use — a focus action never changes derived state, so there is nothing for `/events` to push back either. */
+  focusTerminal(sessionId: string): void;
+  /** Ticket 11: "archive a TERMINÓ card" — `x` on a selected TERMINÓ Session card, or its own button. */
+  archive(sessionId: string): void;
 }
 
 function itemActionUrl(id: string, action: "run" | "done" | "dismiss" | "answer"): string {
   return `/items/${id}/${action}`;
+}
+
+/** Ticket 11: `/sessions/<id>/focus` or `/sessions/<id>/archive` — a SEPARATE route shape from `itemActionUrl`'s own `/items/<id>/<action>` (`fence.ts`'s own doc comment on why). */
+function sessionActionUrl(id: string, action: "focus" | "archive"): string {
+  return `/sessions/${id}/${action}`;
 }
 
 /**
@@ -199,6 +213,48 @@ export function useInboxActions(): InboxActionsState {
     [],
   );
 
+  /**
+   * Ticket 11's own write pair (`focus`, `archive`) — same shape `post`
+   * already gives the `/items/` writes, kept SEPARATE rather than folded
+   * into it: a different URL builder (`sessionActionUrl`), a different
+   * 404 wording (`SESSION_NOT_FOUND_MESSAGE`), and neither ever needs a
+   * success toast (a focus action changes nothing derived to toast about;
+   * archiving is confirmed by the card simply leaving the board over
+   * `/events`, same as every other derived-state change in this project —
+   * never a redundant toast on top of that).
+   */
+  const postSession = useCallback(
+    async (id: string, action: "focus" | "archive"): Promise<Response> => {
+      const res = await fetch(sessionActionUrl(id, action), { method: "POST" });
+      if (unmountedRef.current) return res;
+
+      if (res.status === STALE_TOKEN_STATUS) {
+        setStaleToken(true);
+      } else if (!res.ok) {
+        const message = await describeWriteError(res.clone(), SESSION_NOT_FOUND_MESSAGE);
+        if (!unmountedRef.current) setErrors((prev) => ({ ...prev, [id]: message }));
+      } else {
+        clearError(id);
+      }
+      return res;
+    },
+    [],
+  );
+
+  const focusTerminal = useCallback(
+    (sessionId: string) => {
+      void postSession(sessionId, "focus");
+    },
+    [postSession],
+  );
+
+  const archive = useCallback(
+    (sessionId: string) => {
+      void postSession(sessionId, "archive");
+    },
+    [postSession],
+  );
+
   const done = useCallback(
     (id: string) => {
       void post(id, "done");
@@ -280,5 +336,5 @@ export function useInboxActions(): InboxActionsState {
     [post],
   );
 
-  return { runningIds, outputs, errors, staleToken, toasts, run, done, dismiss, approve, reject };
+  return { runningIds, outputs, errors, staleToken, toasts, run, done, dismiss, approve, reject, focusTerminal, archive };
 }

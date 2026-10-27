@@ -16,6 +16,8 @@ export interface InboxCardProps {
   onRun: (id: string) => void;
   onDone: (id: string) => void;
   onDismiss: (id: string) => void;
+  /** Ticket 11: "from any card" — already bound to the OWNING Session's id by `Board`, so this card never needs to know it. */
+  onFocusTerminal: () => void;
 }
 
 /**
@@ -79,9 +81,16 @@ function stopCardSelect(event: { stopPropagation(): void }): void {
  * (`inbox-card__output-error`, the prototype's own `--red`) but never
  * conflated: `output`'s own trailing failure trailer (`run` STARTED and
  * the command itself exited non-zero — "stays open WITH THE ERROR", spec)
- * vs. `errorMessage` (a write call — `run`, `done` or `dismiss` alike —
- * was REFUSED outright, nothing ever ran). Either, both, or neither can be
- * present on a given card at once; each renders in its own slot.
+ * vs. `errorMessage` (a write call — `run`, `done`, `dismiss` or `focus`
+ * alike — was REFUSED outright, nothing ever ran). Either, both, or
+ * neither can be present on a given card at once; each renders in its own
+ * slot.
+ *
+ * Ticket 11: "from any card" — a terminal button rides alongside
+ * listo/descartar, labeled and (for "terminal desconocida") disabled
+ * straight off the already-formatted `card.terminalLabel`
+ * (`viewModel.ts`'s `terminalLabelFor`) — this card never re-derives the
+ * wording or re-checks the reach itself.
  */
 export function InboxCard({
   card,
@@ -93,6 +102,7 @@ export function InboxCard({
   onRun,
   onDone,
   onDismiss,
+  onFocusTerminal,
 }: InboxCardProps) {
   const parsedOutput = output !== undefined && output.length > 0 ? parseRunOutput(output) : undefined;
 
@@ -163,6 +173,18 @@ export function InboxCard({
           }}
         >
           descartar <kbd>x</kbd>
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={card.terminalReach === "unknown"}
+          title={card.terminalNeedsTcc ? "macOS va a pedir permiso" : undefined}
+          onClick={(event) => {
+            stopCardSelect(event);
+            onFocusTerminal();
+          }}
+        >
+          {card.terminalLabel} <kbd>t</kbd>
         </button>
       </div>
       {parsedOutput && parsedOutput.body.length > 0 && (

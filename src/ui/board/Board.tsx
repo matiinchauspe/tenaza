@@ -20,6 +20,10 @@ export interface BoardProps {
   /** Ticket 10: forwarded straight through to every `SessionCard` — only the one with its own `liveRequest` set ever actually calls either. */
   onApprove: (id: string, message: string | undefined) => void;
   onReject: (id: string, message: string | undefined) => void;
+  /** Ticket 11: forwarded to every card, Inbox and Session alike — "from any card" (ticket). `id` is whatever the CLICKED card's own id is; the container (`BoardApp`) resolves it to the owning Session id before the write ever fires. */
+  onFocusTerminal: (id: string) => void;
+  /** Ticket 11: forwarded only to a TERMINÓ `SessionCard` (`showArchive`, below) — the control itself is never rendered on a CORRIENDO/TRABADA card, let alone an Inbox one. */
+  onArchive: (id: string) => void;
 }
 
 const SESSION_COLUMNS = ["corriendo", "trabada", "termino"] as const;
@@ -53,6 +57,8 @@ export function Board({
   onDismiss,
   onApprove,
   onReject,
+  onFocusTerminal,
+  onArchive,
 }: BoardProps) {
   return (
     <div className="board">
@@ -75,6 +81,7 @@ export function Board({
             onRun={onRun}
             onDone={onDone}
             onDismiss={onDismiss}
+            onFocusTerminal={() => onFocusTerminal(card.sessionId)}
           />
         ))}
       </Column>
@@ -94,6 +101,10 @@ export function Board({
                 onSelect={onSelect}
                 onApprove={onApprove}
                 onReject={onReject}
+                onFocusTerminal={() => onFocusTerminal(card.id)}
+                // Ticket 11: the archive control is a TERMINÓ-only affordance — this is the ONE place that gate is drawn (`key === "termino"`), so `SessionCard` itself never needs to know which column it's rendering in.
+                showArchive={key === "termino"}
+                onArchive={() => onArchive(card.id)}
               />
             ))}
           </Column>

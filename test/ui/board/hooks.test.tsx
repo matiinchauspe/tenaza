@@ -178,6 +178,56 @@ describe("useBoardKeyboard", () => {
     });
   });
 
+  describe("t / x's second job — go to terminal, archive (ticket 11)", () => {
+    test("t calls onFocusTerminal with the currently selected id", () => {
+      const focused: string[] = [];
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"], { onFocusTerminal: (id) => focused.push(id) }));
+      act(() => result.current.select("b"));
+
+      dispatchKey(window, "t");
+
+      expect(focused).toEqual(["b"]);
+    });
+
+    test("x calls BOTH onDismiss and onArchive — the container's own gating decides which actually does anything", () => {
+      const dismissed: string[] = [];
+      const archived: string[] = [];
+      const { result } = renderHook(() =>
+        useBoardKeyboard(["a", "b"], { onDismiss: (id) => dismissed.push(id), onArchive: (id) => archived.push(id) }),
+      );
+      act(() => result.current.select("a"));
+
+      dispatchKey(window, "x");
+
+      expect(dismissed).toEqual(["a"]);
+      expect(archived).toEqual(["a"]);
+    });
+
+    test("t is ignored when the event's target is a text input, same as j/k/d/x", () => {
+      const input = document.createElement("input");
+      document.body.appendChild(input);
+      try {
+        const focused: string[] = [];
+        const { result } = renderHook(() => useBoardKeyboard(["a", "b"], { onFocusTerminal: (id) => focused.push(id) }));
+        act(() => result.current.select("a"));
+
+        dispatchKey(input, "t");
+
+        expect(focused).toEqual([]);
+      } finally {
+        input.remove();
+      }
+    });
+
+    test("omitting onFocusTerminal/onArchive never throws", () => {
+      const { result } = renderHook(() => useBoardKeyboard(["a", "b"]));
+      act(() => result.current.select("a"));
+
+      expect(() => dispatchKey(window, "t")).not.toThrow();
+      expect(() => dispatchKey(window, "x")).not.toThrow();
+    });
+  });
+
   describe("a/r — live answering (ticket 10)", () => {
     test("a calls onApprove with the currently selected id and undefined when no message input is mounted", () => {
       const approved: [string, string | undefined][] = [];

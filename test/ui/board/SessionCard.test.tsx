@@ -52,6 +52,9 @@ function baseCard(overrides: Partial<SessionCardViewModel> = {}): SessionCardVie
     age: "2m",
     liveRequest: undefined,
     resolutionTrace: undefined,
+    terminalLabel: "terminal desconocida",
+    terminalReach: "unknown",
+    terminalNeedsTcc: false,
     ...overrides,
   };
 }
@@ -65,6 +68,9 @@ function renderCard(overrides: Partial<SessionCardProps> & { card: SessionCardVi
     onSelect: NOOP,
     onApprove: NOOP,
     onReject: NOOP,
+    onFocusTerminal: NOOP,
+    showArchive: false,
+    onArchive: NOOP,
     ...overrides,
   };
   return render(<SessionCard {...props} />);
@@ -217,5 +223,67 @@ describe("SessionCard — selection and cross-highlight (ticket 10)", () => {
     });
     const { container } = renderCard({ card });
     expect(container.querySelector("li")?.className).toContain("session-card--waiting");
+  });
+});
+
+describe("SessionCard — the terminal button and TERMINÓ-only archive control (ticket 11)", () => {
+  function terminalButton(container: HTMLElement): HTMLButtonElement | undefined {
+    return [...container.querySelectorAll("button")].find((b) => !b.textContent?.includes("archivar")) as
+      | HTMLButtonElement
+      | undefined;
+  }
+
+  test("renders the card's own already-formatted terminalLabel", () => {
+    const { container } = renderCard({ card: baseCard({ terminalLabel: "ir a terminal ↗", terminalReach: "exact" }) });
+    expect(container.textContent).toContain("ir a terminal ↗");
+  });
+
+  test("terminal button is disabled when reach is unknown, enabled otherwise", () => {
+    const unknown = renderCard({ card: baseCard({ terminalReach: "unknown" }) });
+    expect(terminalButton(unknown.container)?.disabled).toBe(true);
+
+    const exact = renderCard({ card: baseCard({ terminalReach: "exact" }) });
+    expect(terminalButton(exact.container)?.disabled).toBe(false);
+  });
+
+  test("a TCC-gated row carries the 'macOS va a pedir permiso' title", () => {
+    const { container } = renderCard({ card: baseCard({ terminalReach: "exact", terminalNeedsTcc: true }) });
+    expect(terminalButton(container)?.title).toBe("macOS va a pedir permiso");
+  });
+
+  test("clicking the terminal button fires onFocusTerminal and never also selects the card", () => {
+    let focused = 0;
+    const selected: string[] = [];
+    const { container } = renderCard({
+      card: baseCard({ terminalReach: "exact" }),
+      onFocusTerminal: () => focused++,
+      onSelect: (id) => selected.push(id),
+    });
+    act(() => fireEvent.click(terminalButton(container)!));
+    expect(focused).toBe(1);
+    expect(selected).toEqual([]);
+  });
+
+  test("the archive button renders ONLY when showArchive is true (Board's own TERMINÓ gate)", () => {
+    const hidden = renderCard({ card: baseCard(), showArchive: false });
+    expect(hidden.container.textContent).not.toContain("archivar");
+
+    const shown = renderCard({ card: baseCard(), showArchive: true });
+    expect(shown.container.textContent).toContain("archivar");
+  });
+
+  test("clicking archivar fires onArchive and never also selects the card", () => {
+    let archived = 0;
+    const selected: string[] = [];
+    const { container } = renderCard({
+      card: baseCard(),
+      showArchive: true,
+      onArchive: () => archived++,
+      onSelect: (id) => selected.push(id),
+    });
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("archivar"));
+    act(() => fireEvent.click(button!));
+    expect(archived).toBe(1);
+    expect(selected).toEqual([]);
   });
 });

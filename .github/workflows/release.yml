@@ -8,7 +8,9 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    # Tests run on the OS the release ships for. Two Daemon tests fail on
+    # Linux file watching, which is tracked separately before any Linux build.
+    runs-on: macos-latest
     strategy:
       matrix:
         include:

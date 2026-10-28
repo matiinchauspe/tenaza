@@ -60,6 +60,9 @@ class Tenaza < Formula
 
   def caveats
     <<~EOS
+      Next: run `tenaza init` — writes a starter Policy and wires up the statusline.
+      Safe to re-run any time; it never overwrites a Policy or a statusline you already have.
+
       The Daemon (the Live surface's board, live answering) is OPT-IN.
       Installing Tenaza starts nothing — no service, no process, no port.
 

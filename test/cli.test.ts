@@ -7,7 +7,7 @@ import { readOpenRecorder } from "../src/daemon";
 import { writeAlive, writeDaemonToken } from "../src/daemonlink";
 import { MIN_SHORT_HASH_LENGTH, inboxIdentityHash } from "../src/identity";
 import { shortIdIndex } from "../src/inbox";
-import { STATUSLINE_PASTE_LINE } from "../src/init";
+import { STATUSLINE_PASTE_LINE, STATUSLINE_SCRIPT_SNIPPET } from "../src/init";
 import { appendEvent } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import { policyPath } from "../src/paths";
@@ -1203,7 +1203,7 @@ describe("tenaza init (black box, temporary TENAZA_HOME + fake Claude settings)"
     expect(settings.statusLine).toEqual({ type: "command", command: STATUSLINE_PASTE_LINE });
   });
 
-  test("AC3: with a statusLine already set, init leaves the settings file byte-identical and prints the guarded line", async () => {
+  test("AC3: with a statusLine already set, init leaves the settings file byte-identical and prints the re-piped snippet, on its own line", async () => {
     mkdirSync(path.dirname(settingsPath), { recursive: true });
     const existing = '{\n  "statusLine": {\n    "type": "command",\n    "command": "my-own-script.sh"\n  }\n}\n';
     writeFileSync(settingsPath, existing);
@@ -1211,8 +1211,28 @@ describe("tenaza init (black box, temporary TENAZA_HOME + fake Claude settings)"
     const result = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("command -v tenaza >/dev/null && tenaza statusline");
+    // Ticket 01 (tenaza-v0-3): a script that already drained stdin into
+    // `$input` leaves `tenaza statusline` nothing to read, so the printed
+    // snippet re-pipes it — never the bare guarded line settings.json itself
+    // gets (that one has no `$input` to re-pipe).
+    expect(result.stdout).toContain(STATUSLINE_SCRIPT_SNIPPET);
+    expect(result.stdout).not.toContain(STATUSLINE_PASTE_LINE);
+    expect(result.stdout).toContain("own line");
     expect(readFileSync(settingsPath, "utf8")).toBe(existing);
+  });
+
+  test("AC3: with an unreadable (malformed JSON) settings file, init leaves it untouched and prints the re-piped snippet, on its own line", async () => {
+    mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const malformed = "{ this is not valid JSON";
+    writeFileSync(settingsPath, malformed);
+
+    const result = await runCli(["init"], { home, env: { TENAZA_CLAUDE_SETTINGS: settingsPath } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(STATUSLINE_SCRIPT_SNIPPET);
+    expect(result.stdout).not.toContain(STATUSLINE_PASTE_LINE);
+    expect(result.stdout).toContain("own line");
+    expect(readFileSync(settingsPath, "utf8")).toBe(malformed);
   });
 
   test("AC4: running init twice changes nothing the second time", async () => {

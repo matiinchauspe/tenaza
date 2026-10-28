@@ -8,16 +8,37 @@ import { claudeSettingsPath, policyPath, tenazaHome } from "./paths";
 import policyExampleToml from "../policy.example.toml" with { type: "text" };
 
 /**
- * Pasted into the user's own script when `init` will not touch their
- * settings (q20's exact worked line) — AND the exact command written into
- * `statusLine` itself when `init` DOES touch the settings file (below). One
- * shared string for both paths, deliberately: a bare `tenaza statusline`
+ * The exact command written into `statusLine` itself, when `init` DOES
+ * touch the settings file (below) — Tenaza's is then the ONLY thing ever
+ * reading stdin there, fed straight from Claude Code with nothing upstream
+ * draining it first. Guarded, never a bare `tenaza statusline`: a bare one
  * written straight into `statusLine` would dangle and ERROR once `tenaza`
  * is uninstalled (ticket 10's own found gap), where this guarded form fails
  * closed instead — `command -v tenaza` comes back empty, the statusline
  * prints nothing, and Claude Code keeps working.
  */
 export const STATUSLINE_PASTE_LINE = "command -v tenaza >/dev/null && tenaza statusline";
+
+/**
+ * Pasted into the user's OWN script when `init` will not touch their
+ * settings at all — a DIFFERENT string from `STATUSLINE_PASTE_LINE` above,
+ * deliberately (ticket 01, tenaza-v0-3: found on a human's own machine).
+ * That script's own first line is almost always `input=$(cat)` (the
+ * standard Claude Code statusline shape) — by the time it reaches an
+ * appended `tenaza statusline`, stdin is already drained and there is
+ * nothing left for it to read. Re-piping `$input` is what held on the
+ * human's script; `STATUSLINE_PASTE_LINE`'s bare form would silently read
+ * nothing in this shape, which is exactly why settings.json's own value and
+ * the pasted one are no longer one shared string. Same `command -v` guard
+ * as above, so it still fails closed once `tenaza` is uninstalled.
+ *
+ * It also prints Tenaza on its own OUTPUT line (`printf '\n%s'`): a script
+ * typically ends with `printf '%s' "$parts"` and no newline, so a bare
+ * pasted command would land on the END of that line — the first thing
+ * Claude Code cuts, since it truncates an overflowing line from the right.
+ * The second line is what held on the human's own script.
+ */
+export const STATUSLINE_SCRIPT_SNIPPET = `command -v tenaza >/dev/null && printf '\\n%s' "$(echo "$input" | tenaza statusline)"`;
 
 /**
  * A plugin cannot set Claude Code's MAIN `statusLine` (only `agent` and
@@ -40,7 +61,12 @@ export interface InitResult {
    * rewrite of a file that can't even be parsed.
    */
   statusLine: "set" | "already-set" | "unreadable";
-  /** The line to paste into the user's own script — present whenever `statusLine !== "set"`. */
+  /**
+   * The line to paste into the user's own script — present whenever
+   * `statusLine !== "set"`. Always `STATUSLINE_SCRIPT_SNIPPET`, never
+   * `STATUSLINE_PASTE_LINE`: this is pasted into a script that already
+   * drained stdin, not written as the sole command settings.json runs.
+   */
   pasteLine?: string;
 }
 
@@ -85,11 +111,11 @@ function wireStatusline(settingsPath: string): Pick<InitResult, "statusLine" | "
   try {
     parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
   } catch {
-    return { statusLine: "unreadable", pasteLine: STATUSLINE_PASTE_LINE };
+    return { statusLine: "unreadable", pasteLine: STATUSLINE_SCRIPT_SNIPPET };
   }
 
   if (hasStatusLine(parsed)) {
-    return { statusLine: "already-set", pasteLine: STATUSLINE_PASTE_LINE };
+    return { statusLine: "already-set", pasteLine: STATUSLINE_SCRIPT_SNIPPET };
   }
 
   writeSettingsWithStatusLine(settingsPath, parsed as Record<string, unknown>);

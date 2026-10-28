@@ -48,6 +48,8 @@ export interface SessionNode {
   lastAction?: Action;
   /** Ticket 14: the LATEST `notification.observed` Event this Session carries — last write wins, same convention as `lastAction`. Whether it still reads as a CURRENT native wait (vs. superseded by later activity) is `nativeWaitFor`'s own call, never decided here. */
   lastNotification?: { kind: NotificationKind; ts: string };
+  /** Ticket 05 ("Turn state"): the ts of the LATEST `turn.ended` Event (this Session's own `Stop`) — last write wins, same convention as `lastNotification`. Whether it still reads as a CURRENT wait (vs. superseded by a fresh prompt or ordinary activity) is `turnWaitSince`'s own call, never decided here. */
+  lastTurnEnded?: string;
   /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
   terminalLocator?: TerminalLocator;
   /** Ticket 02: the runtime's own OS process id, captured at `session.started` (`adapters/claude.ts`'s `captureProcessMarker`) — `undefined` for a backfilled start, legacy data, or an environment `ps` couldn't be read in. UNLIKE `terminalLocator`, a subagent carries its OWN copy (same OS process as its parent), never resolved by walking to `node.parent`. */
@@ -115,6 +117,9 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
     } else if (event.type === "notification.observed") {
       // Last write wins, same convention as lastAction/contextTokens above.
       node.lastNotification = { kind: event.data.kind, ts: event.ts };
+    } else if (event.type === "turn.ended") {
+      // Ticket 05: last write wins, same convention as lastNotification above.
+      node.lastTurnEnded = event.ts;
     }
   }
 
@@ -186,14 +191,39 @@ const WORD: Record<SessionCategory, string> = {
   ended: "cerró",
 };
 const STALLED_WORD = "sin señal";
+/** Ticket 05: the tree's own word for an alive Session between Turns — never a fifth category or a new glyph (same "word override on alive" convention this file's own `isStalled`/`STALLED_WORD` already established), just rendered through `categoryWord` below instead of "vivo". */
+const WAITING_WORD = "esperándote";
 
 export function glyphFor(category: SessionCategory): string {
   return GLYPH[category];
 }
 
-/** Stalled only ever overrides the "alive" word — a waiting/done/ended Session already reads unambiguously. */
-export function categoryWord(category: SessionCategory, stalled: boolean): string {
-  return category === "alive" && stalled ? STALLED_WORD : WORD[category];
+/** Ticket 05 (AC3): "esperándote · N en segundo plano" — the ONE place this suffix is built for the CLI tree (the board's own literal lives separately in `viewModel.ts`, same convention `NO_MEASURE_TEXT` already follows there, never importing this node-builtin-using module). Empty when nothing is running in the background at all — never a stray " · 0 en segundo plano". */
+function backgroundSuffix(activeDescendants: number): string {
+  return activeDescendants > 0 ? ` · ${activeDescendants} en segundo plano` : "";
+}
+
+/**
+ * Stalled and Turn state only ever override the "alive" word — a
+ * waiting(-for-Inbox)/done/ended Session already reads unambiguously.
+ * Ticket 05: a Turn that ended wins over stalled whenever both would
+ * otherwise apply — silence with a KNOWN cause ("esperándote," the human
+ * just hasn't typed the next prompt yet) is never relabeled "sin señal"
+ * (an UNKNOWN cause), however long that silence runs; "sin señal" stays
+ * reserved for a Session that went quiet for no reason this file can name
+ * at all. `turn`/`activeDescendants` default to "working"/0 so every
+ * pre-ticket-05 2-arg call (`notify.ts`, every existing test) is unaffected
+ * byte-for-byte.
+ */
+export function categoryWord(
+  category: SessionCategory,
+  stalled: boolean,
+  turn: TurnState = "working",
+  activeDescendants: number = 0,
+): string {
+  if (category !== "alive") return WORD[category];
+  if (turn === "waiting") return `${WAITING_WORD}${backgroundSuffix(activeDescendants)}`;
+  return stalled ? STALLED_WORD : WORD.alive;
 }
 
 /**
@@ -532,6 +562,72 @@ export function nativeWaitFor(node: SessionNode): { kind: NotificationKind; sinc
   return { kind: notification.kind, since: notification.ts };
 }
 
+/** Ticket 05 ("Turn state: working vs waiting"): working, mid-Turn — or waiting for the human, between Turns. See `turnWaitSince`'s own doc for how "waiting" is actually derived. */
+export type TurnState = "working" | "waiting";
+
+/**
+ * Ticket 05: `node`'s own Stop-derived wait — present exactly when its
+ * LATEST Turn ended (`turn.ended`, this Session's own `Stop`) and nothing
+ * else has happened since: no fresh `prompt.submitted`, no ordinary
+ * tool-call touch, no later native prompt. TIME IS STATE, the exact
+ * convention `nativeWaitFor` above already established for the SAME "no
+ * second Event for the transition" shape — any later Event (ticket 14's
+ * own touched-file merge, `buildBoardPayload`'s doc comment, included)
+ * simply moves `lastEventTs` past `lastTurnEnded`, and this reads
+ * `undefined` again with nothing else to do.
+ *
+ * Returns `undefined` — never "waiting" — the instant a MORE SPECIFIC
+ * native signal is also current (`nativeWaitFor`): that one carries its
+ * own `kind` (a permission prompt vs. the ~60s idle timeout) and renders
+ * its own, more specific badge, so a caller never has to choose between
+ * the two — this function already resolves that for it, which is what
+ * keeps the board from ever showing two waiting badges on one card. Also
+ * `undefined` once the Session itself has ended (`endedAt`) — mirrors
+ * `nodeCategory`'s own done/ended check, which always outranks any wait,
+ * rather than leaving that to Event-ordering alone.
+ */
+export function turnWaitSince(node: SessionNode): string | undefined {
+  if (node.endedAt !== undefined) return undefined;
+  if (nativeWaitFor(node) !== undefined) return undefined;
+  if (node.lastTurnEnded !== undefined && node.lastTurnEnded === node.lastEventTs) return node.lastTurnEnded;
+  return undefined;
+}
+
+/**
+ * Ticket 05: is `node` mid-Turn ("working") or between Turns ("waiting for
+ * the human")? "Waiting" covers BOTH a current native prompt
+ * (`nativeWaitFor`) and this Session's own plain Stop-derived wait
+ * (`turnWaitSince`) — the two are mutually exclusive by `turnWaitSince`'s
+ * own gate above, so this never double-counts them; it only needs to know
+ * whether EITHER currently applies.
+ */
+export function turnState(node: SessionNode): TurnState {
+  if (node.endedAt !== undefined) return "working";
+  return nativeWaitFor(node) !== undefined || turnWaitSince(node) !== undefined ? "waiting" : "working";
+}
+
+/**
+ * Ticket 05 (AC3, "background work is not hidden"): how many of `nodeId`'s
+ * own descendants — subagents, and THEIR subagents in turn — are not yet
+ * ended, i.e. still doing work this Session's own row alone cannot show.
+ * The ONLY "background work" Tenaza has any visibility into: a backgrounded
+ * shell command (`run_in_background`) fires no hook Tenaza could ever
+ * observe finishing, so it is deliberately never counted here — only a
+ * real subagent Session (its own `session.started`/`SubagentStart`) is.
+ * `childrenOf` is whatever a caller already built (`childrenIndex` for the
+ * CLI tree, `daemon.ts`'s own map for the board) — never rebuilt here, so
+ * this stays a cheap, pure traversal over structure the caller already has.
+ */
+export function countActiveDescendants(nodeId: string, childrenOf: ReadonlyMap<string, SessionNode[]>): number {
+  const children = childrenOf.get(nodeId) ?? [];
+  let count = 0;
+  for (const child of children) {
+    if (child.endedAt === undefined) count += 1;
+    count += countActiveDescendants(child.id, childrenOf);
+  }
+  return count;
+}
+
 /** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */
 export function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
   const map = new Map<string, Set<Event["type"]>>();
@@ -556,8 +652,12 @@ function byStartedThenId(a: SessionNode, b: SessionNode): number {
  * below). `nodes` has already dropped noise (`isNoiseSession`), so a child
  * whose parent WAS noise, or was never observed at all, simply finds
  * nothing here and surfaces as its own root there instead.
+ *
+ * Exported (ticket 05) so `daemon.ts`'s own board payload can build the
+ * SAME structural parent→children map once per read and feed it to
+ * `countActiveDescendants`, rather than re-deriving a second copy of this.
  */
-function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
+export function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
   const map = new Map<string, SessionNode[]>();
   for (const node of nodes) {
     if (node.parent === undefined) continue;
@@ -656,10 +756,15 @@ function renderNode(
 ): void {
   const category = rollupCategory(node, childrenOf, waiting);
   const stalled = isStalled(node, now);
+  // Ticket 05: this node's OWN Turn state and background count — never
+  // rolled up from descendants (unlike `category` above), since each one
+  // already renders its own row right below its parent's.
+  const turn = turnState(node);
+  const activeDescendants = countActiveDescendants(node.id, childrenOf);
   const head = isRoot ? "  " : `${prefix}${isLast ? "└ " : "├ "}`;
   const contextColumn = formatContextColumn(node, thresholdTokens);
   lines.push(
-    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${contextColumn}  ${categoryWord(category, stalled)}  ${formatAge(node, now)}`,
+    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${contextColumn}  ${categoryWord(category, stalled, turn, activeDescendants)}  ${formatAge(node, now)}`,
   );
 
   const children = childrenOf.get(node.id) ?? [];

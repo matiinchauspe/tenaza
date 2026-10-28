@@ -378,6 +378,58 @@ describe("ticket 14: nativeWait — observed only, never actionable", () => {
   });
 });
 
+describe("ticket 05: turnWait — Turn state, observed only, never actionable", () => {
+  test("no turnWait on the payload — the card's own field is undefined", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "a", lastEventTs: NOW.toISOString() })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.turnWait).toBeUndefined();
+  });
+
+  test("a turnWait resolves to its own age and background count", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: NOW.toISOString(),
+          turnWait: { since: "2026-01-01T23:58:00.000Z", backgroundCount: 0 },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    const turnWait = model.corriendo.cards[0]?.turnWait;
+    expect(turnWait?.age).toBe("2m");
+    expect(turnWait?.backgroundCount).toBe(0);
+  });
+
+  test("AC3: a positive backgroundCount rides along on the view model untouched", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: NOW.toISOString(),
+          turnWait: { since: NOW.toISOString(), backgroundCount: 2 },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.turnWait?.backgroundCount).toBe(2);
+  });
+
+  test("a turnWait on a TRABADA card still resolves — it is independent of the column's own stall classification", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 → TRABADA
+          turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.trabada.cards[0]?.turnWait).toBeDefined();
+  });
+});
+
 describe("buildBoardViewModel — orderedIds", () => {
   test("flattens TE NECESITA, then CORRIENDO, TRABADA, TERMINÓ, each in its own display order", () => {
     const payload = makeBoardPayload({

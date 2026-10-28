@@ -31,6 +31,18 @@ stored and never run from a hook. A Session whose process is confirmed gone read
 a reason distinct from a real `SessionEnd`, even though no such Event ever arrived.
 _Avoid_: Heartbeat, ping, health check
 
+**Turn**:
+One request-response cycle between the human and the agent — begins when the human submits a
+prompt (`prompt.submitted`) and ends when the agent stops to hand control back (`turn.ended`, the
+runtime's own `Stop`). A Session not yet ended is **working** while mid-Turn, or **waiting for the
+human** between Turns — derived fresh from which of the two Events is the LATEST thing observed
+for that Session, never a stored flag (ADR 0009). Distinct from an Inbox item's own "waits for the
+human" (that one needs the human to approve or deny a specific Action; a Turn simply ended and
+nobody has typed the next prompt yet) and from a native prompt (`permission_prompt`/`idle_prompt`,
+ticket 14's own signal) — a Turn ending is read IMMEDIATELY, with none of the ~60s a native
+`idle_prompt` takes to fire.
+_Avoid_: Round, cycle, request
+
 ## Runtimes
 
 **Adapter**:

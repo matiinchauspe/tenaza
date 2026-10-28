@@ -6,6 +6,7 @@ import {
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
+  turnEndedEvent,
   usageSampledEvent,
 } from "../contract/event";
 import { decideAction } from "../decide";
@@ -543,16 +544,53 @@ export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload)
 }
 
 /**
- * Stop: the main agent finished a turn — sample usage for `session_id`.
- * Never ends the Session. Ticket 14, AC3: also touches the Session's own
- * activity marker, closing ticket 13's own "Stop with no transcript | no
- * frame" gap — a turn ending IS activity, even when there's nothing to
- * sample from.
+ * Stop: the main agent finished a Turn — sample usage for `session_id`.
+ * Never ends the Session (that's SessionEnd's job).
+ *
+ * Ticket 05 ("Turn state: working vs waiting," AC1): also appends a
+ * `turn.ended` Event, UNCONDITIONALLY — the one thing that tells a reader
+ * "this Turn just ended" apart from a plain `usage.sampled` (today's ONLY
+ * other thing `Stop` can write, and one every OTHER caller —
+ * `SessionEnd`/`SubagentStop`/the 25th-call `PostToolUse` sample — writes
+ * too, so it carries no Turn-boundary meaning on its own). Appended LAST,
+ * after `sampleUsage`, so this call's own newest Event is always
+ * `turn.ended` — exactly what `sessions.ts`'s `turnWaitSince` reads as
+ * "nothing happened since the Turn ended, so it still reads waiting" the
+ * very next time anything derives this Session's state, with NO ~60s wait
+ * for Claude Code's own `idle_prompt` and no second Event ever written for
+ * the transition back once a fresh `prompt.submitted`/tool touch supersedes
+ * it (TIME IS STATE, ADR 0002). Wrapped in its own try/catch — same
+ * reasoning as `handleUserPromptSubmit`/`handleNotification`'s own appends:
+ * a write failure here is a side effect, never worth failing — or even
+ * reporting on — the call that triggered it; Claude Code sees no
+ * `hookSpecificOutput` either way, so `Stop`'s own hook answer is
+ * untouched regardless (ADR 0007 — nothing here blocks, delays or alters
+ * the runtime).
+ *
+ * This is also what makes ticket 14's own `touchSession` call here
+ * redundant, and it is REMOVED (not kept alongside): that call existed
+ * only to mark "a Turn ending IS activity" for the cases `sampleUsage`
+ * writes nothing (ticket 13's "Stop with no transcript | no frame" gap) —
+ * a job `turn.ended` now does more precisely (it also NAMES the moment as
+ * a Turn boundary, which a bare touch file never could) and unconditionally
+ * (every `Stop` call reaches this line, sample or not). Keeping BOTH would
+ * also have reopened a subtle race for ticket 05's own purpose: `touchSession`
+ * writes a SEPARATE file (`daemon.ts`'s own touched-file merge), and were it
+ * written back AFTER this append, a board tick could see that file's mtime
+ * as newer than `turn.ended`'s own `ts` and bump `lastEventTs` PAST it —
+ * which `turnWaitSince`'s strict equality check would then read as "already
+ * superseded," silently swallowing the very signal this ticket exists to
+ * deliver. Removing the call removes the race by construction rather than
+ * by careful ordering.
  */
 export function handleStop(home: string, payload: ClaudeStopPayload): void {
-  touchSession(home, payload.session_id);
   backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
   sampleUsage(home, payload.session_id, payload.transcript_path);
+  try {
+    appendEvent(home, turnEndedEvent(payload.session_id));
+  } catch {
+    // See the doc comment above.
+  }
 }
 
 /**

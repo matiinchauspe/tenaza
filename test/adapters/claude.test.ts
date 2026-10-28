@@ -364,7 +364,7 @@ effect = "flag"
     expect(events.some((e) => e.type === "usage.sampled")).toBe(false);
   });
 
-  test("Stop samples usage for session_id, without ending the Session", async () => {
+  test("Stop samples usage for session_id, without ending the Session — and records turn.ended (ticket 05), usage FIRST", async () => {
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
@@ -373,7 +373,7 @@ effect = "flag"
 
     expect(response).toBeUndefined();
     const events = readSessionEvents("sess-1", home);
-    expect(events).toHaveLength(1);
+    expect(events.map((e) => e.type)).toEqual(["usage.sampled", "turn.ended"]);
     expect(events[0]).toMatchObject({
       session: "sess-1",
       type: "usage.sampled",
@@ -381,7 +381,7 @@ effect = "flag"
     });
   });
 
-  test("Stop with a transcript that yields no usage writes nothing — never a zero sample", async () => {
+  test("Stop with a transcript that yields no usage writes no usage.sampled Event — never a zero sample — but still records turn.ended (ticket 05)", async () => {
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
@@ -389,17 +389,19 @@ effect = "flag"
     });
 
     expect(response).toBeUndefined();
-    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("sess-1", home);
+    expect(events.map((e) => e.type)).toEqual(["turn.ended"]);
   });
 
-  test("Stop with no transcript_path at all degrades silently — no crash, no sample", async () => {
+  test("Stop with no transcript_path at all degrades silently — no crash, no sample, but still records turn.ended (ticket 05)", async () => {
     const response = await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "Stop",
     });
 
     expect(response).toBeUndefined();
-    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    const events = readSessionEvents("sess-1", home);
+    expect(events.map((e) => e.type)).toEqual(["turn.ended"]);
   });
 
   test("PostToolUse below the 25th call counts but writes nothing", async () => {
@@ -1360,12 +1362,12 @@ describe("touchSession wiring (ticket 14, AC3): every ordinary call bumps the Se
     expect(readSessionEvents("sess-1", home).some((e) => e.type === "usage.sampled")).toBe(false);
   });
 
-  test("a Stop call with no transcript still touches the Session — closes ticket 13's own 'Stop with no transcript' no-frame gap", async () => {
+  test("a Stop call with no transcript writes turn.ended instead of touching the Session (ticket 05 supersedes ticket 13/14's own touch here: the Event itself is now the activity signal — see handleStop's own doc comment)", async () => {
     const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "Stop" });
 
     expect(response).toBeUndefined();
-    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(true);
-    expect(readSessionEvents("sess-1", home)).toHaveLength(0);
+    expect(existsSync(sessionTouchedPath("sess-1", home))).toBe(false);
+    expect(readSessionEvents("sess-1", home).map((e) => e.type)).toEqual(["turn.ended"]);
   });
 
   test("touches are scoped per Session — a subagent's touch never lands on its parent's marker", async () => {

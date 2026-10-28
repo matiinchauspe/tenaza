@@ -1,38 +1,32 @@
 #!/usr/bin/env bash
-# Fill packaging/homebrew/tenaza.rb's version and sha256 placeholders from a
-# published GitHub Release, then (optionally) commit that file into the
-# separate tap repo matiinchauspe/homebrew-tap.
+# Fill Formula/tenaza.rb's version and sha256 values from a published
+# GitHub Release. This repo is its own Homebrew tap, so the filled formula
+# is what `brew install` reads once it lands on main: commit and push it
+# yourself — this script never touches git.
 #
 # Usage:
-#   packaging/homebrew/update-formula.sh <version> [path-to-homebrew-tap-checkout]
+#   packaging/homebrew/update-formula.sh <version>
 #
 #   <version>                   e.g. 0.1.0 — WITHOUT a leading "v"; must
 #                                match a release already tagged v<version>
 #                                with tenaza-darwin-arm64, tenaza-darwin-x64
 #                                and checksums.txt uploaded as assets.
-#   [path-to-homebrew-tap-checkout]
-#                                optional. When given, the filled formula is
-#                                also copied to
-#                                <path>/Formula/tenaza.rb. Commit and push
-#                                that repo yourself — this script never
-#                                touches git.
 #
 # Requires: gh (authenticated), sha256sum (or shasum on macOS — handled
 # below).
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <version> [path-to-homebrew-tap-checkout]" >&2
+  echo "usage: $0 <version>" >&2
   exit 1
 fi
 
 VERSION="$1"
-TAP_PATH="${2:-}"
 REPO="matiinchauspe/tenaza"
 TAG="v${VERSION}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORMULA="${SCRIPT_DIR}/tenaza.rb"
+FORMULA="${SCRIPT_DIR}/../../Formula/tenaza.rb"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -74,9 +68,4 @@ cp "${WORKDIR}/tenaza.rb.new" "$FORMULA"
 
 echo "Updated ${FORMULA}:" >&2
 grep -E 'version "|sha256 "' "$FORMULA" >&2
-
-if [[ -n "$TAP_PATH" ]]; then
-  mkdir -p "${TAP_PATH}/Formula"
-  cp "$FORMULA" "${TAP_PATH}/Formula/tenaza.rb"
-  echo "Copied to ${TAP_PATH}/Formula/tenaza.rb — commit and push that repo yourself." >&2
-fi
+echo "Commit and push Formula/tenaza.rb — brew reads it from main." >&2

@@ -52,7 +52,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list.
 Requires macOS and [Claude Code](https://code.claude.com).
 
 ```bash
-brew install matiinchauspe/tap/tenaza
+brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza
+brew install tenaza
 tenaza init
 ```
 

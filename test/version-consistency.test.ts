@@ -6,14 +6,13 @@ import { TENAZA_VERSION } from "../src/version";
 /**
  * Ticket 12 ("Version 0.2.0 in the binary, plugin and formula"): every
  * place a version is announced agrees with `src/version.ts`'s own single
- * source of truth — EXCEPT the Homebrew formula, whose `version "0.0.0"`
- * stays a placeholder `packaging/homebrew/update-formula.sh` fills from a
- * published release's own tag (the formula's own doc comment: "do not
- * hand-edit version ... below"). That script is proven NOT to disturb
- * anything else in the file by `tenaza.rb`'s own doc comment and this
- * project's manual verification (no automated seam exists for a Ruby
- * formula + a bash script that shells out to `gh`); this test instead
- * guards the one thing that IS this project's to keep in sync by hand.
+ * source of truth — EXCEPT the Homebrew formula, whose version
+ * `packaging/homebrew/update-formula.sh` fills from a published release's
+ * own tag AFTER that release ships, so on main it can trail
+ * `TENAZA_VERSION` between a bump and its release. This repo is its own
+ * tap, so `Formula/tenaza.rb` on main is what `brew install` reads: the
+ * test guards that it is installable (filled, never placeholders), not
+ * that it equals the binary's version.
  */
 
 const REPO_ROOT = path.join(import.meta.dir, "..");
@@ -37,10 +36,16 @@ describe("version consistency (ticket 12)", () => {
     }
   });
 
-  test("the Homebrew formula's version stays the placeholder update-formula.sh fills — never hand-bumped to TENAZA_VERSION", () => {
-    const formula = readFileSync(path.join(REPO_ROOT, "packaging/homebrew/tenaza.rb"), "utf8");
-    expect(formula).toContain('version "0.0.0"');
-    expect(formula).not.toContain(`version "${TENAZA_VERSION}"`);
+  test("the Homebrew formula on main is installable — a real version and real sha256s, never placeholders", () => {
+    const formula = readFileSync(path.join(REPO_ROOT, "Formula/tenaza.rb"), "utf8");
+    expect(formula).toMatch(/version "\d+\.\d+\.\d+"/);
+    expect(formula).not.toContain('version "0.0.0"');
+    const digests = [...formula.matchAll(/sha256 "([0-9a-f]+)"/g)].map((m) => m[1]);
+    expect(digests).toHaveLength(2);
+    for (const digest of digests) {
+      expect(digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(digest).not.toMatch(/^0{63}[0-9]$/);
+    }
   });
 
   test("the plugin's /tenaza command file exists and calls `tenaza open` — the thin wrapper ticket 12 calls for", () => {

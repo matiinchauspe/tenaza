@@ -43,9 +43,8 @@ describe("scripts/extract-changelog.sh", () => {
     expect(result.stdout).not.toContain("Initial release");
   });
 
-  test("the extracted 0.2.0 section matches TENAZA_VERSION — the version this run actually ships", async () => {
-    const result = await runScript(["0.2.0", REAL_CHANGELOG]);
-    expect(TENAZA_VERSION).toBe("0.2.0");
+  test("the real CHANGELOG has a section for TENAZA_VERSION — the version this run actually ships", async () => {
+    const result = await runScript([TENAZA_VERSION, REAL_CHANGELOG]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim().length).toBeGreaterThan(0);
   });

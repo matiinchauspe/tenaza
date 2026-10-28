@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.3.0] - 2026-10-28
+
+### Added
+
+- **Working vs waiting for you**: a session reads ESPERÁNDOTE the moment its turn ends, with no
+  ~60s wait for Claude Code's own idle prompt, and reads working again on your next message or
+  its next tool call. The `Stop` hook now records a `turn.ended` event (ADR 0009).
+- Background work stays visible while a session waits: "esperándote · N en segundo plano" on the
+  board and in `tenaza status` while its subagents are still running. A `run_in_background`
+  shell command fires no hook, so it is not counted.
+- README "Notifications" section: why a Tenaza notification may never show (a Focus / Do Not
+  Disturb mode suppresses it) and how to check.
+
+### Changed
+
+- A session whose process died now reads as ended. `session.started` records the runtime's pid
+  and its start time, and every read checks it (ADR 0008). A closed window, a `kill` or a crash
+  no longer leaves a session counted as "vivas" forever. Sessions recorded before 0.3.0 carry no
+  pid and keep reading alive until archived.
+- A TERMINÓ card offers archivar instead of the terminal button, and `t` ignores it.
+- This repo is its own Homebrew tap: tap it by URL (`brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza`) and\n  install by full name (`brew install matiinchauspe/tenaza/tenaza`). The
+  separate `homebrew-tap` repo is gone. The README has an upgrade guide.
+
+### Fixed
+
+- `tenaza init`'s statusline snippet works inside an existing statusline script: it re-feeds the
+  script's own input and prints Tenaza on a second line instead of being cut off.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

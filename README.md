@@ -80,6 +80,31 @@ brew services start tenaza   # runs in the background, restarts on login
 tenaza ui
 ```
 
+## Notifications
+
+Tenaza notifies you through macOS's own `osascript` — no extra dependency required to see a
+🟡/🔴 banner. Install [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) only
+if you want clicking a 🟡 to open the board:
+
+```bash
+brew install terminal-notifier
+```
+
+It's optional, documented here rather than a `brew install tenaza` dependency — macOS ships
+`osascript` with every install, and adding a required Homebrew dependency wouldn't fix the
+most common reason a notification goes unseen (below) anyway. Without it, a 🟡 click does
+nothing instead of opening the board.
+
+**Never seen a Tenaza notification at all?** Two things to check, in order:
+
+1. **Focus.** A Focus (the crescent-moon icon, Control Center) with no apps allowed mutes
+   EVERY app's notifications — Tenaza's included — with no banner and no sound, even though
+   macOS still accepts the request. Check **System Settings → Focus** for an active mode, then
+   either turn it off or add "Script Editor" to its allowed apps.
+2. **Notification permission.** `osascript`'s notifications post under "Script Editor"
+   (`com.apple.ScriptEditor2`), never under Tenaza's own name. Check **System Settings →
+   Notifications → Script Editor** has "Allow Notifications" on.
+
 ## How it works
 
 When an agent runs a reserved command, the hook denies it and tells the agent to wait for you:

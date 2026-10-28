@@ -17,20 +17,26 @@ import {
   isProcessGone,
   isStalled,
   latestArchiveTimestamps,
+  countActiveDescendants,
   nativeWaitFor,
   nodeCategory,
   readTouchedTimestamps,
   renderSessionTree,
   roleOf,
   rollupCategory,
+  turnState,
+  turnWaitSince,
+  type SessionNode,
 } from "../src/sessions";
 import {
   actionDecidedEvent,
   notificationObservedEvent,
+  promptSubmittedEvent,
   sessionArchivedEvent,
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
+  turnEndedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
 
@@ -184,6 +190,24 @@ describe("buildSessionIndex", () => {
     ]);
 
     expect(index.get("sess-1")?.lastNotification).toBeUndefined();
+  });
+
+  test("ticket 05: lastTurnEnded captures the LATEST turn.ended Event (last write wins, same convention as lastNotification)", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      { ...turnEndedEvent("sess-1"), ts: "2026-10-28T10:00:00.000Z" },
+      { ...turnEndedEvent("sess-1"), ts: "2026-10-28T10:05:00.000Z" },
+    ]);
+
+    expect(index.get("sess-1")?.lastTurnEnded).toBe("2026-10-28T10:05:00.000Z");
+  });
+
+  test("ticket 05: a Session with no turn.ended Event has lastTurnEnded undefined", async () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+
+    expect(index.get("sess-1")?.lastTurnEnded).toBeUndefined();
   });
 });
 
@@ -383,6 +407,31 @@ describe("isStalled / categoryWord", () => {
     expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
     expect(categoryWord("done", true)).toBe(categoryWord("done", false));
     expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+  });
+
+  test("ticket 05: an alive Session waiting on its Turn reads 'esperándote', never 'vivo'", () => {
+    expect(categoryWord("alive", false, "waiting")).toBe("esperándote");
+    expect(categoryWord("alive", false, "working")).toBe("vivo");
+  });
+
+  test("ticket 05: a Turn-waiting word NEVER applies outside the alive category — same rule as stalled", () => {
+    expect(categoryWord("waits", false, "waiting")).toBe(categoryWord("waits", false, "working"));
+    expect(categoryWord("done", false, "waiting")).toBe(categoryWord("done", false, "working"));
+    expect(categoryWord("ended", false, "waiting")).toBe(categoryWord("ended", false, "working"));
+  });
+
+  test("ticket 05 (AC3): background work appends ' · N en segundo plano' to the waiting word", () => {
+    expect(categoryWord("alive", false, "waiting", 2)).toBe("esperándote · 2 en segundo plano");
+    expect(categoryWord("alive", false, "waiting", 0)).toBe("esperándote");
+  });
+
+  test("ticket 05: Turn-waiting wins over stalled — a KNOWN reason for the silence is never relabeled 'sin señal'", () => {
+    expect(categoryWord("alive", true, "waiting")).toBe("esperándote");
+  });
+
+  test("ticket 05: omitting the new params keeps categoryWord's old 2-arg behavior byte-for-byte", () => {
+    expect(categoryWord("alive", false)).toBe("vivo");
+    expect(categoryWord("alive", true)).toBe(categoryWord("alive", true, "working", 0));
   });
 });
 
@@ -956,5 +1005,111 @@ describe("nativeWaitFor — TIME IS STATE: a native prompt holds only while noth
     node.lastEventTs = new Date(new Date(node.lastEventTs!).getTime() + 1000).toISOString();
 
     expect(nativeWaitFor(node)).toBeUndefined();
+  });
+});
+
+describe("turnWaitSince / turnState — TIME IS STATE: a turn.ended holds only while nothing happened since (ticket 05)", () => {
+  test("no turn.ended Event at all — working, never waiting", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(turnWaitSince(node)).toBeUndefined();
+    expect(turnState(node)).toBe("working");
+  });
+
+  test("turn.ended IS the most recent thing observed — waiting, immediately, no ~60s delay", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      turnEndedEvent("sess-1"),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(turnWaitSince(node)).toBe(node.lastTurnEnded);
+    expect(turnState(node)).toBe("waiting");
+  });
+
+  test("a LATER prompt.submitted Event (the next turn starting) supersedes the wait — working again, no second Event written for the transition", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-28T09:00:00.000Z" },
+      { ...turnEndedEvent("sess-1"), ts: "2026-10-28T10:00:00.000Z" },
+      { ...promptSubmittedEvent("sess-1"), ts: "2026-10-28T10:01:00.000Z" },
+    ]);
+    const node = index.get("sess-1")!;
+    expect(turnWaitSince(node)).toBeUndefined();
+    expect(turnState(node)).toBe("working");
+  });
+
+  test("a LATER touch-merged lastEventTs (ordinary tool activity) also supersedes the wait", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      turnEndedEvent("sess-1"),
+    ]);
+    const node = index.get("sess-1")!;
+    // Simulate `buildBoardPayload`'s own touched-file merge (daemon.ts).
+    node.lastEventTs = new Date(new Date(node.lastEventTs!).getTime() + 1000).toISOString();
+
+    expect(turnWaitSince(node)).toBeUndefined();
+    expect(turnState(node)).toBe("working");
+  });
+
+  test("a current native wait (more specific) wins — turnWaitSince stays undefined so the board never shows two badges", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-28T09:00:00.000Z" },
+      { ...turnEndedEvent("sess-1"), ts: "2026-10-28T10:00:00.000Z" },
+      { ...notificationObservedEvent("sess-1", "idle_prompt"), ts: "2026-10-28T10:01:00.000Z" },
+    ]);
+    const node = index.get("sess-1")!;
+    expect(nativeWaitFor(node)).toMatchObject({ kind: "idle_prompt" });
+    expect(turnWaitSince(node)).toBeUndefined();
+    // turnState still reads "waiting" overall — just via the MORE SPECIFIC
+    // native signal, never double-counted with the plain Stop-based one.
+    expect(turnState(node)).toBe("waiting");
+  });
+
+  test("an ENDED Session never reads as turn-waiting, however its Events happen to order", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      turnEndedEvent("sess-1"),
+      sessionEndedEvent("sess-1", "clear"),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(turnWaitSince(node)).toBeUndefined();
+    expect(turnState(node)).toBe("working");
+  });
+});
+
+describe("countActiveDescendants (ticket 05): subagents still running under a Session, recursively", () => {
+  test("no children at all — zero", () => {
+    buildSessionIndex([sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] })]);
+    const childrenOf = new Map<string, SessionNode[]>();
+    expect(countActiveDescendants("sess-1", childrenOf)).toBe(0);
+  });
+
+  test("two still-running subagents count; an ended one does not", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-2", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-3", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("agent-3", "subagent_stop"),
+    ]);
+    const childrenOf = new Map([
+      ["sess-1", [index.get("agent-1")!, index.get("agent-2")!, index.get("agent-3")!]],
+    ]);
+    expect(countActiveDescendants("sess-1", childrenOf)).toBe(2);
+  });
+
+  test("counts grandchildren too — a sub-subagent still running under an already-ended child", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionStartedEvent("agent-1a", { parent: "agent-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+      sessionEndedEvent("agent-1", "subagent_stop"),
+    ]);
+    const childrenOf = new Map([
+      ["sess-1", [index.get("agent-1")!]],
+      ["agent-1", [index.get("agent-1a")!]],
+    ]);
+    expect(countActiveDescendants("sess-1", childrenOf)).toBe(1);
   });
 });

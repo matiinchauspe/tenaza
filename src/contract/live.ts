@@ -80,6 +80,18 @@ export type TerminalReach = z.infer<typeof TerminalReachSchema>;
 export const NativeWaitKindSchema = z.enum(["permission_prompt", "idle_prompt"]);
 export type NativeWaitKind = z.infer<typeof NativeWaitKindSchema>;
 
+/**
+ * Ticket 05 ("Turn state: working vs waiting"): the shape of a Session's
+ * own plain, Stop-derived wait — `since` is `sessions.ts`'s `turnWaitSince`
+ * (the Turn's own end ts), `backgroundCount` is `countActiveDescendants`
+ * (AC3's "N en segundo plano" — 0 when nothing is running in the
+ * background). Kept as its own schema, separate from `NativeWaitKindSchema`
+ * above, because the two are mutually exclusive by `turnWaitSince`'s own
+ * gate (server-side) and the client never needs to pick between them.
+ */
+export const TurnWaitSchema = z.object({ since: z.string(), backgroundCount: z.number() });
+export type TurnWait = z.infer<typeof TurnWaitSchema>;
+
 export const ActionSummarySchema = z.object({
   kind: z.enum(["shell", "mcp"]),
   /** The runtime's own tool name (e.g. "Bash", or an MCP tool's fully-qualified name). */
@@ -154,6 +166,16 @@ export const BoardSessionSchema = z.object({
    * where nothing was ever observed at all.
    */
   nativeWait: z.object({ kind: NativeWaitKindSchema, since: z.string() }).optional(),
+  /**
+   * Ticket 05: present while this Session's own Turn ended and nothing
+   * ELSE has happened since (`sessions.ts`'s `turnWaitSince`) — `undefined`
+   * whenever a more specific `nativeWait` already covers it, or once the
+   * Session itself has ended, or when no Turn has ever ended at all. The
+   * client renders this as a plain, non-actionable badge, same convention
+   * `nativeWait` already follows and for the same reason: Tenaza never
+   * raised this and can never answer it on the agent's behalf.
+   */
+  turnWait: TurnWaitSchema.optional(),
 });
 export type BoardSession = z.infer<typeof BoardSessionSchema>;
 

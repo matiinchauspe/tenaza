@@ -263,6 +263,25 @@ const SessionArchivedData = z.object({});
 const PromptSubmittedData = z.object({});
 
 /**
+ * Ticket 05 ("Turn state: working vs waiting"): the main agent's OWN
+ * `Stop` hook — one request-response Turn just ended. A pure ACTIVITY
+ * signal, carrying no decision capability at all (same guarantee as
+ * `PromptSubmittedData` above): nothing here can ever answer back with a
+ * permission decision regardless of what this event contains (ADR 0007's
+ * "Stop's hook answer is unchanged" — this Event is appended AFTER the
+ * hook's own response is already decided, never part of it). Distinct from
+ * `usage.sampled`, which `Stop` ALSO appends when a transcript yields one
+ * (q9): a usage sample and a Turn ending are two independent facts that
+ * happen to share one hook, and conflating them (reading "the last
+ * `usage.sampled`" as "the Turn just ended") would misread every OTHER
+ * caller of `usageSampledEvent` — `SessionEnd`, `SubagentStop`, and the
+ * 25th-call `PostToolUse` sample — as a Turn boundary too. Recorded once
+ * per Turn, the same cadence `prompt.submitted` already logs at (ADR 0002:
+ * nowhere near the per-call growth the single-writer log guards against).
+ */
+const TurnEndedData = z.object({});
+
+/**
  * Ticket 14: the two `Notification` matcher values the ticket scopes
  * this to (`docs/research/claude-code-waiting-on-human-hooks.md`) — never
  * the full matcher table Claude Code carries (`auth_success`,
@@ -314,6 +333,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   envelope("session.archived", SessionArchivedData),
   envelope("prompt.submitted", PromptSubmittedData),
   envelope("notification.observed", NotificationObservedData),
+  envelope("turn.ended", TurnEndedData),
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type ActionDecidedEvent = Extract<Event, { type: "action.decided" }>;
@@ -327,6 +347,7 @@ export type RunFailedEvent = Extract<Event, { type: "run.failed" }>;
 export type SessionArchivedEvent = Extract<Event, { type: "session.archived" }>;
 export type PromptSubmittedEvent = Extract<Event, { type: "prompt.submitted" }>;
 export type NotificationObservedEvent = Extract<Event, { type: "notification.observed" }>;
+export type TurnEndedEvent = Extract<Event, { type: "turn.ended" }>;
 
 /**
  * Build an `action.decided` Event envelope with the current timestamp.
@@ -549,4 +570,19 @@ export function notificationObservedEvent(session: string, kind: NotificationKin
     type: "notification.observed",
     data: { kind },
   }) as NotificationObservedEvent;
+}
+
+/**
+ * Build a `turn.ended` Event envelope with the current timestamp (ticket
+ * 05) — appended by `adapters/claude.ts`'s `handleStop` on every `Stop`
+ * call, regardless of whether that same call also samples usage.
+ */
+export function turnEndedEvent(session: string): TurnEndedEvent {
+  return EventSchema.parse({
+    v: 1,
+    ts: new Date().toISOString(),
+    session,
+    type: "turn.ended",
+    data: {},
+  }) as TurnEndedEvent;
 }

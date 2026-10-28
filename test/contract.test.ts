@@ -10,6 +10,7 @@ import {
   sessionEndedEvent,
   sessionLabeledEvent,
   sessionStartedEvent,
+  turnEndedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
 import { BoardSessionSchema } from "../src/contract/live";
@@ -295,6 +296,30 @@ describe("Event contract", () => {
     };
 
     expect(() => EventSchema.parse(line)).toThrow();
+  });
+
+  test("ticket 05: turnEndedEvent builds a schema-valid envelope with no payload beyond the envelope itself", () => {
+    const evt = turnEndedEvent("sess-1");
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt.type).toBe("turn.ended");
+    expect(evt).toMatchObject({ session: "sess-1", data: {} });
+  });
+});
+
+describe("ticket 05: BoardSessionSchema's turnWait field", () => {
+  test("accepts a session with no turnWait at all (the default, overwhelmingly common case)", () => {
+    expect(() => BoardSessionSchema.parse(makeSession())).not.toThrow();
+  });
+
+  test("accepts a session carrying a turnWait with a background count", () => {
+    const session = makeSession({ turnWait: { since: "2026-10-28T10:00:00.000Z", backgroundCount: 2 } });
+    expect(() => BoardSessionSchema.parse(session)).not.toThrow();
+  });
+
+  test("rejects a turnWait missing backgroundCount", () => {
+    const session = makeSession({ turnWait: { since: "2026-10-28T10:00:00.000Z" } as never });
+    expect(() => BoardSessionSchema.parse(session)).toThrow();
   });
 });
 

@@ -40,7 +40,9 @@ import {
 import {
   UNKNOWN_PROJECT,
   buildSessionIndex,
+  childrenIndex,
   closeDeadProcesses,
+  countActiveDescendants,
   createCachingGitRootResolver,
   deriveProject,
   eventTypesBySession,
@@ -49,6 +51,7 @@ import {
   latestArchiveTimestamps,
   nativeWaitFor,
   readTouchedTimestamps,
+  turnWaitSince,
   UnknownSessionError,
   type SessionNode,
 } from "./sessions";
@@ -201,9 +204,15 @@ function toBoardSession(
   node: SessionNode,
   resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>,
   fullIndex: ReadonlyMap<string, SessionNode>,
+  childrenOf: ReadonlyMap<string, SessionNode[]>,
   resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardSession {
   const terminal = terminalInfoFor(node, fullIndex);
+  // Ticket 05: `turnWaitSince` already resolves against the SAME
+  // touched-merged `lastEventTs` `nativeWait` below reads, and already
+  // defers to a more specific native wait when one is current — never
+  // computed twice, never double-badged.
+  const turnWait = turnWaitSince(node);
   return {
     id: node.id,
     parentId: node.parent,
@@ -226,6 +235,10 @@ function toBoardSession(
     // CURRENT native wait apart from a stale one any later activity, ordinary
     // tool calls included, already superseded.
     nativeWait: nativeWaitFor(node),
+    // Ticket 05 (AC3): `backgroundCount` is this Session's own still-running
+    // descendants — computed only when `turnWait` is actually present, so a
+    // working/ended Session never pays for a traversal nobody will read.
+    turnWait: turnWait ? { since: turnWait, backgroundCount: countActiveDescendants(node.id, childrenOf) } : undefined,
   };
 }
 
@@ -331,6 +344,12 @@ export function buildBoardPayload(
   );
   const policy = loadPolicy(home);
   const resolutions = deriveResolutionTraceBySession(home);
+  // Ticket 05 (AC3): built ONCE per read against the FULL index — a noise or
+  // archived child is always `endedAt`-set (`isNoiseSession`'s own doc) and
+  // so never counts toward `countActiveDescendants` anyway, which is what
+  // lets this reuse the unfiltered structure safely, same convention
+  // `terminalInfoFor` above already follows for its own parent walk.
+  const childrenOf = childrenIndex([...fullIndex.values()]);
 
   return {
     v: 1,
@@ -339,7 +358,7 @@ export function buildBoardPayload(
       contextThresholdTokens: policy.thresholdTokens,
       waitSeconds: effectiveWaitSeconds(policy),
     },
-    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions, fullIndex, resolveGitRoot)),
+    sessions: visibleSessions.map((node) => toBoardSession(node, resolutions, fullIndex, childrenOf, resolveGitRoot)),
     inbox: deriveInbox(home, cache).map((row) => toBoardInboxItem(row, fullIndex, resolveGitRoot)),
   };
 }

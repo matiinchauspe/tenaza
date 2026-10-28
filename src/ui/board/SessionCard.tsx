@@ -137,6 +137,18 @@ function NativeWaitBlock({ nativeWait }: { nativeWait: NonNullable<SessionCardVi
   );
 }
 
+/** Ticket 05 ("Turn state: working vs waiting"): the plain, non-actionable line a card grows while its Turn just ended and nothing more specific (`NativeWaitBlock` above) is also current — same placement and "observed only, never actionable" rule, reusing the SAME muted "native" tone (Tenaza observes here too, and never owns a window it could act from). AC3: `backgroundCount > 0` appends "· N en segundo plano" right on the badge. */
+function TurnWaitBlock({ turnWait }: { turnWait: NonNullable<SessionCardViewModel["turnWait"]> }) {
+  return (
+    <div className="turn-wait">
+      <StatusBadge tone="native">
+        ESPERÁNDOTE{turnWait.backgroundCount > 0 ? ` · ${turnWait.backgroundCount} en segundo plano` : ""}
+      </StatusBadge>
+      <span className="turn-wait__when">hace {turnWait.age}</span>
+    </div>
+  );
+}
+
 /** The resolution trace's own line (spec "Requests vs agents") — composed straight from the already-resolved view-model fields, never re-deriving wording here. */
 function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["resolutionTrace"]> }) {
   return (
@@ -176,7 +188,7 @@ export function SessionCard({
   showArchive,
   onArchive,
 }: SessionCardProps) {
-  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}${card.nativeWait ? `, ${card.nativeWait.label.toLowerCase()}` : ""}`;
+  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}${card.nativeWait ? `, ${card.nativeWait.label.toLowerCase()}` : ""}${card.turnWait ? `, esperándote${card.turnWait.backgroundCount > 0 ? ` · ${card.turnWait.backgroundCount} en segundo plano` : ""}` : ""}`;
   return (
     <li
       id={boardCardElementId(card.id)}
@@ -199,6 +211,7 @@ export function SessionCard({
         {card.parentLabel ? ` · ${card.parentLabel}` : ""}
       </div>
       {card.nativeWait && <NativeWaitBlock nativeWait={card.nativeWait} />}
+      {card.turnWait && <TurnWaitBlock turnWait={card.turnWait} />}
       {card.resolutionTrace && <ResolutionTrace trace={card.resolutionTrace} />}
       <div className="session-card__signal" title={card.lastSignal}>
         {card.lastSignal}

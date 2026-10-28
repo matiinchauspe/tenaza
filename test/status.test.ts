@@ -7,7 +7,7 @@ import { inboxIdentityHash } from "../src/identity";
 import { appendEvent } from "../src/log";
 import { renderStatus } from "../src/status";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { sessionEndedEvent, sessionStartedEvent } from "../src/contract/event";
+import { sessionEndedEvent, sessionStartedEvent, turnEndedEvent } from "../src/contract/event";
 
 /** A single Inbox item's own display id is always the minimum 4-char prefix of its hash (decision 03, ADR 0005, ticket 06) — there's nothing else in these tests for it to collide with. */
 function shortId(session: string, line: number): string {
@@ -111,5 +111,33 @@ effect = "human"
     expect(output).toContain("Inbox:");
     // Same shift: `session.started` is line 1, the deny is line 2.
     expect(output).toContain(`${shortId("55e06de1", 2)}  Bash: gh pr merge 58`);
+  });
+
+  test("ticket 05: a Session whose Turn just ended reads 'esperándote' immediately, no ~60s delay", async () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe"] }),
+    );
+    appendEvent(home, turnEndedEvent("sess-1"));
+
+    const output = renderStatus(home);
+    const treeLine = output.split("\n").find((line) => line.includes("sess-1"))!;
+    expect(treeLine).toContain("esperándote");
+  });
+
+  test("ticket 05 (AC3): a still-running subagent under a Turn-waiting parent shows as background work", async () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe"] }),
+    );
+    appendEvent(home, turnEndedEvent("sess-1"));
+    appendEvent(
+      home,
+      sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: "/tmp/scratch", capabilities: ["observe"] }),
+    );
+
+    const output = renderStatus(home);
+    const treeLine = output.split("\n").find((line) => line.startsWith("  ") && line.includes("sess-1"))!;
+    expect(treeLine).toContain("esperándote · 1 en segundo plano");
   });
 });

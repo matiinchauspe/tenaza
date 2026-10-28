@@ -56,6 +56,7 @@ function baseCard(overrides: Partial<SessionCardViewModel> = {}): SessionCardVie
     terminalReach: "unknown",
     terminalNeedsTcc: false,
     nativeWait: undefined,
+    turnWait: undefined,
     ...overrides,
   };
 }
@@ -221,6 +222,40 @@ describe("SessionCard — native wait block (ticket 14): observed only, never ac
     const { container } = renderCard({ card: nativeWaitCard() });
     const li = container.querySelector("li");
     expect(li?.getAttribute("aria-label")).toContain("permiso nativo");
+  });
+
+  test("a card with a turnWait renders its own badge and age, distinct from native-wait", () => {
+    const { container } = renderCard({ card: baseCard({ turnWait: { age: "45s", backgroundCount: 0 } }) });
+    expect(container.querySelector(".turn-wait")).not.toBeNull();
+    expect(container.textContent).toContain("hace 45s");
+  });
+
+  test("a turnWait with background work appends the 'en segundo plano' count", () => {
+    const { container } = renderCard({ card: baseCard({ turnWait: { age: "45s", backgroundCount: 2 } }) });
+    expect(container.textContent).toContain("2 en segundo plano");
+  });
+
+  test("renders no turn-wait block at all when turnWait is undefined", () => {
+    const { container } = renderCard({ card: baseCard() });
+    expect(container.querySelector(".turn-wait")).toBeNull();
+  });
+
+  test("a turnWait card offers NO aprobar/rechazar/message-input controls — Tenaza never answers this on the agent's behalf", () => {
+    const { container } = renderCard({ card: baseCard({ turnWait: { age: "45s", backgroundCount: 0 } }) });
+    const buttons = [...container.querySelectorAll("button")].map((b) => b.textContent ?? "");
+    expect(buttons.some((text) => text.includes("aprobar"))).toBe(false);
+    expect(buttons.some((text) => text.includes("rechazar"))).toBe(false);
+  });
+
+  test("a card with BOTH a nativeWait and a turnWait never happens in practice, but renders both without crashing", () => {
+    const { container } = renderCard({
+      card: baseCard({
+        nativeWait: { kind: "idle_prompt", label: "INACTIVA", hint: "hint", age: "1m" },
+        turnWait: { age: "45s", backgroundCount: 0 },
+      }),
+    });
+    expect(container.querySelector(".native-wait")).not.toBeNull();
+    expect(container.querySelector(".turn-wait")).not.toBeNull();
   });
 
   test("a card with BOTH a liveRequest and a nativeWait renders both blocks without conflict", () => {

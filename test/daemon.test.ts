@@ -22,6 +22,7 @@ import {
   sessionArchivedEvent,
   sessionEndedEvent,
   sessionStartedEvent,
+  turnEndedEvent,
   usageSampledEvent,
 } from "../src/contract/event";
 import { readFocusRecorder } from "../src/focus";
@@ -1873,6 +1874,70 @@ describe("buildBoardPayload — ticket 14: the touched-file merge and nativeWait
   test("no notification.observed Event at all — nativeWait is undefined", () => {
     appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
     expect(buildBoardPayload(home).sessions[0]?.nativeWait).toBeUndefined();
+  });
+});
+
+describe("buildBoardPayload — ticket 05: turnWait", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-ticket05-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a Session whose Turn just ended carries a turnWait, immediately, no ~60s delay", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, turnEndedEvent("sess-1"));
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.turnWait).toMatchObject({ backgroundCount: 0 });
+  });
+
+  test("no turn.ended Event at all — turnWait is undefined", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    expect(buildBoardPayload(home).sessions[0]?.turnWait).toBeUndefined();
+  });
+
+  test("a later prompt.submitted Event (the next Turn) supersedes the wait — turnWait goes undefined again", async () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, turnEndedEvent("sess-1"));
+    await Bun.sleep(5);
+    appendEvent(home, promptSubmittedEvent("sess-1"));
+
+    expect(buildBoardPayload(home).sessions[0]?.turnWait).toBeUndefined();
+  });
+
+  test("a current native wait wins — turnWait stays undefined so the board never shows two badges for one Session", async () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, turnEndedEvent("sess-1"));
+    await Bun.sleep(5);
+    appendEvent(home, notificationObservedEvent("sess-1", "idle_prompt"));
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.nativeWait).toMatchObject({ kind: "idle_prompt" });
+    expect(session?.turnWait).toBeUndefined();
+  });
+
+  test("AC3: a still-running subagent counts as background work on its Turn-waiting parent's turnWait", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, turnEndedEvent("sess-1"));
+    appendEvent(home, sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: home, capabilities: [] }));
+
+    const session = buildBoardPayload(home).sessions.find((s) => s.id === "sess-1");
+    expect(session?.turnWait).toMatchObject({ backgroundCount: 1 });
+  });
+
+  test("an ENDED subagent never counts toward its parent's background work", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, turnEndedEvent("sess-1"));
+    appendEvent(home, sessionStartedEvent("agent-1", { parent: "sess-1", runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, sessionEndedEvent("agent-1", "subagent_stop"));
+
+    const session = buildBoardPayload(home).sessions.find((s) => s.id === "sess-1");
+    expect(session?.turnWait).toMatchObject({ backgroundCount: 0 });
   });
 });
 

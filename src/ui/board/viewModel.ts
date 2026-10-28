@@ -29,6 +29,7 @@ import type {
   ResolutionTraceEntry,
   SessionRole,
   TerminalReach,
+  TurnWait,
 } from "../../contract/live";
 
 /**
@@ -112,6 +113,21 @@ export interface NativeWaitViewModel {
   age: string;
 }
 
+/**
+ * Ticket 05 ("Turn state: working vs waiting"): the plain, non-actionable
+ * block a Session's own card grows while its Turn just ended and nothing
+ * more specific (`nativeWait` above) is also current — same placement and
+ * "observed only, never actionable" rule `NativeWaitViewModel` already
+ * follows, for the SAME reason: Tenaza never raised this and can never
+ * answer it on the agent's behalf.
+ */
+export interface TurnWaitViewModel {
+  /** "hace Ns" since the Turn ended. */
+  age: string;
+  /** AC3: how many subagents are still running under this Session — 0 renders the badge with no suffix. */
+  backgroundCount: number;
+}
+
 /** One line of a Session's resolution trace (spec "Requests vs agents") — already resolved to its es-AR symbol/text/tone; `SessionCard` only ever composes these into the final "✓ #<id> <text> · hace <age>" string, never re-derives the wording itself. */
 export interface ResolutionTraceLineViewModel {
   symbol: "✓" | "✕" | "✗";
@@ -173,6 +189,8 @@ export interface SessionCardViewModel {
    * never answer it on the agent's behalf.
    */
   nativeWait: NativeWaitViewModel | undefined;
+  /** Ticket 05: present while this Session's own Turn ended and nothing more specific is also current — `undefined` for every other card. */
+  turnWait: TurnWaitViewModel | undefined;
 }
 
 export interface BoardColumnViewModel<Card> {
@@ -271,6 +289,11 @@ function toNativeWait(nativeWait: BoardSession["nativeWait"], now: Date): Native
     hint: NATIVE_WAIT_HINT[nativeWait.kind],
     age: formatAge(nativeWait.since, now),
   };
+}
+
+function toTurnWait(turnWait: TurnWait | undefined, now: Date): TurnWaitViewModel | undefined {
+  if (!turnWait) return undefined;
+  return { age: formatAge(turnWait.since, now), backgroundCount: turnWait.backgroundCount };
 }
 
 /** Display truncation only (see `ResolutionTraceLineViewModel.shortId`'s own doc) — never a collision-safe shortest-unique-prefix. */
@@ -391,6 +414,7 @@ function toSessionCard(
     terminalReach: session.terminalReach,
     terminalNeedsTcc: session.terminalNeedsTcc,
     nativeWait: toNativeWait(session.nativeWait, now),
+    turnWait: toTurnWait(session.turnWait, now),
   };
 }
 

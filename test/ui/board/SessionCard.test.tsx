@@ -353,6 +353,13 @@ describe("SessionCard — the terminal button and TERMINÓ-only archive control 
     expect(shown.container.textContent).toContain("archivar");
   });
 
+  test("a TERMINÓ card (showArchive) offers NO terminal button — the agent is gone, and with a closed window so is its terminal", () => {
+    const { container } = renderCard({ card: baseCard({ terminalReach: "exact" }), showArchive: true });
+    expect(terminalButton(container)).toBeUndefined();
+    expect(container.textContent).not.toContain("terminal");
+    expect(container.textContent).toContain("archivar");
+  });
+
   test("clicking archivar fires onArchive and never also selects the card", () => {
     let archived = 0;
     const selected: string[] = [];

@@ -248,4 +248,32 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
       );
     });
   });
+
+  /**
+   * Ticket 02 ("a dead Session stops reading as live," AC1): the SAME rule
+   * `renderSessionTree` (sessions.test.ts) and `buildBoardPayload`
+   * (daemon.test.ts) are proven against, exercised here through the REAL
+   * `ps` read (no injection — `deriveStatuslineCounts` takes none, by this
+   * repo's own convention of leaving the real OS glue untested only at the
+   * unit layer; `closeDeadProcesses` itself already is).
+   */
+  describe("ticket 02 — a Session whose captured pid's process has exited never counts toward vivas", () => {
+    test("live while the process is up, no longer live once it exits", async () => {
+      const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+      try {
+        appendEvent(
+          home,
+          sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/a", capabilities: [], pid: proc.pid }),
+        );
+        expect(deriveStatuslineCounts(home).live).toBe(1);
+
+        proc.kill();
+        await proc.exited;
+
+        expect(deriveStatuslineCounts(home).live).toBe(0);
+      } finally {
+        proc.kill();
+      }
+    });
+  });
 });

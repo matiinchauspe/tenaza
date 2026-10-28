@@ -13,7 +13,7 @@ import { runSelfCheck } from "../health";
 import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { loadPolicy, policyWarning } from "../policy";
-import { captureTerminalLocator } from "../terminallocator";
+import { captureProcessMarker, captureTerminalLocator } from "../terminallocator";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall, touchSession } from "../toolcalls";
 
@@ -454,9 +454,18 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
  * (`handleSubagentStart`, below) — "a subagent's card focuses its parent's
  * terminal" is resolved from the PARENT's own node at click time, so a
  * subagent's `session.started` carries no `terminal` field at all.
+ *
+ * Ticket 02 ("a dead Session stops reading as live"): also captures the
+ * runtime's own `pid`/`pidStartedAt` (`captureProcessMarker`) — UNLIKE the
+ * terminal locator, this one IS also captured for a subagent
+ * (`handleSubagentStart`): a subagent shares the SAME OS process as its
+ * parent, so its own liveness check needs no parent walk the way the
+ * terminal reach does — each node just carries its own copy of the same
+ * fact.
  */
 export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
   try {
+    const marker = captureProcessMarker();
     appendEvent(
       home,
       sessionStartedEvent(payload.session_id, {
@@ -464,6 +473,8 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
         cwd: payload.cwd,
         capabilities: CLAUDE_CAPABILITIES,
         terminal: captureTerminalLocator(),
+        pid: marker.pid,
+        pidStartedAt: marker.startedAt,
       }),
     );
   } catch {
@@ -473,6 +484,7 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
 
 /** SubagentStart: its own Session, keyed by `agent_id`, parented to `session_id`. */
 export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPayload): void {
+  const marker = captureProcessMarker();
   appendEvent(
     home,
     sessionStartedEvent(payload.agent_id, {
@@ -480,6 +492,8 @@ export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPa
       runtime: "claude",
       cwd: payload.cwd,
       capabilities: CLAUDE_CAPABILITIES,
+      pid: marker.pid,
+      pidStartedAt: marker.startedAt,
     }),
   );
 }

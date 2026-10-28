@@ -140,6 +140,30 @@ const SessionStartedData = z.object({
   capabilities: z.array(CapabilitySchema),
   /** Ticket 11 — omitted entirely (never an empty `{}`) when the capture yielded nothing, same convention every other optional Event field in this file already follows. */
   terminal: TerminalLocatorSchema.optional(),
+  /**
+   * Ticket 02 ("a dead Session stops reading as live"): the runtime's own OS
+   * process id, captured ONCE here and never re-queried — the fact a LATER
+   * read (`sessions.ts`'s `closeDeadProcesses`) checks against the live
+   * process table to tell a Session whose process is simply gone apart from
+   * one that's merely idle. Omitted entirely — never written as `undefined`
+   * — when the hook's own process table couldn't be read at all (a
+   * sandboxed test env, `backfillSessionStartedIfMissing`'s own catch-up
+   * path, which never captures one): a Session with no `pid` simply never
+   * becomes a candidate for that later check, same silent-degrade
+   * convention `terminal` above already follows.
+   */
+  pid: z.number().optional(),
+  /**
+   * Ticket 02: `pid`'s own process-start marker (`ps -o lstart=`) at the
+   * exact moment `pid` was captured — an OPAQUE token, never parsed as a
+   * date. Its only job is to be compared byte-for-byte against a FRESH read
+   * of the same pid later: two reads of the SAME process always agree, a
+   * pid reused by an unrelated process after a reboot never does — the
+   * ticket's own named trap. Omitted when `pid` itself is, or when `ps`
+   * couldn't report it even though `pid` was known (degrades to trusting
+   * the bare pid alone, see `closeDeadProcesses`'s own doc).
+   */
+  pidStartedAt: z.string().optional(),
 });
 
 const SessionLabeledData = z.object({
@@ -336,7 +360,15 @@ export function actionDecidedEvent(
  */
 export function sessionStartedEvent(
   session: string,
-  data: { parent?: string; runtime: string; cwd: string; capabilities: Capability[]; terminal?: TerminalLocator },
+  data: {
+    parent?: string;
+    runtime: string;
+    cwd: string;
+    capabilities: Capability[];
+    terminal?: TerminalLocator;
+    pid?: number;
+    pidStartedAt?: string;
+  },
 ): SessionStartedEvent {
   return EventSchema.parse({
     v: 1,

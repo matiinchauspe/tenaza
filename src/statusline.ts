@@ -5,7 +5,7 @@ import { type InboxItem, deriveInbox, shortIdIndex } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
-import { buildSessionIndex, nodeCategory } from "./sessions";
+import { buildSessionIndex, closeDeadProcesses, nodeCategory } from "./sessions";
 import { describeAction } from "./status";
 
 /**
@@ -48,10 +48,16 @@ function isLive(category: ReturnType<typeof nodeCategory>): boolean {
  * reads — no state kept beside them (ADR 0002). `flagged` is gated on the
  * `measure` Capability, exactly as `formatContextColumn` (sessions.ts) gates
  * the tree row's own `⚑` — never on whether a sample happens to exist.
+ *
+ * Ticket 02: `closeDeadProcesses` runs right after `buildSessionIndex`,
+ * before `live` is counted — a Session whose runtime process is confirmed
+ * gone never counts toward "vivas" here, the SAME rule `tenaza status` and
+ * the board apply (AC1).
  */
 export function deriveStatuslineCounts(home: string = tenazaHome()): StatuslineCounts {
   const events = readAllSessionEvents(home);
   const index = buildSessionIndex(events);
+  closeDeadProcesses(index); // ticket 02, AC1: the SAME rule `tenaza status` and the board apply
   const inbox = deriveInbox(home);
   const waiting = new Set(inbox.map((row) => row.session));
   const thresholdTokens = loadPolicy(home).thresholdTokens;

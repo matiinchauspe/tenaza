@@ -555,6 +555,30 @@ describe("archiveSession", () => {
     expect(readHumanEvents(home)).toEqual([]);
   });
 
+  /**
+   * Ticket 02 ("a dead Session stops reading as live"): the board already
+   * shows a process-gone Session as TERMINÓ (`test/daemon.test.ts`) — a
+   * human who then clicks "archivar" must not be refused with `not-ended`
+   * just because no real `SessionEnd` ever arrived.
+   */
+  test("ticket 02: a Session whose captured pid's process has exited archives cleanly too, never refused with not-ended", async () => {
+    const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: proc.pid }));
+      expect(archiveSession(home, "sess-1")).toEqual({ kind: "not-ended" }); // still alive
+
+      proc.kill();
+      await proc.exited;
+
+      expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+      const events = readHumanEvents(home);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: "session.archived", session: "sess-1" });
+    } finally {
+      proc.kill();
+    }
+  });
+
   test("archiving twice is idempotent — no second Event, the second call reports alreadyArchived", () => {
     startSession(home, "sess-1");
     appendEvent(home, sessionEndedEvent("sess-1", "clear"));

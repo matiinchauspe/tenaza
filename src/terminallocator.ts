@@ -105,6 +105,38 @@ function psField(pid: string, format: string): string | undefined {
 }
 
 /**
+ * Ticket 02 ("a dead Session stops reading as live"): the hook's own
+ * runtime pid, paired with its process-start marker — captured once at
+ * SessionStart/SubagentStart so a LATER read can tell "this exact process
+ * is still running" apart from "an unrelated process now happens to reuse
+ * the same pid after a reboot" (the ticket's own named trap). `pid`
+ * defaults to the SAME target `captureTerminalLocator`'s own walk already
+ * reads at hop 0 (`process.ppid` — "the hook's parent is `claude`,"
+ * research §2): Tenaza never spawns anything of its own to watch, it only
+ * ever reads what the hook's own process table already names. `startedAt`
+ * reuses THIS module's own `psField` (never a second ps-spawning routine)
+ * rather than the bounded parent-PID walk `defaultPsWalk` does — that walk
+ * answers a different question ("which app is outermost"); this one needs
+ * exactly one field off exactly one pid.
+ */
+export interface ProcessMarker {
+  pid: number;
+  /** `ps -o lstart=`'s raw text for `pid` — opaque, never parsed as a date. `undefined` when `ps` couldn't report it (the process already gone by the time this ran, or a sandboxed test env with no real process table): `pid` is still captured, the reuse guard just can't be applied later. */
+  startedAt?: string;
+}
+
+export function captureProcessMarker(
+  pid: number = process.ppid,
+  psRead: (pid: string, format: string) => string | undefined = psField,
+): ProcessMarker {
+  try {
+    return { pid, startedAt: cleanField(psRead(String(pid), "lstart=")) };
+  } catch {
+    return { pid };
+  }
+}
+
+/**
  * Capture the full locator for THIS SessionStart call — `env`/`pid` default
  * to the hook's own (`process.env`, `process.ppid`: "the hook's parent is
  * `claude`," research §2), and `psWalk` to the real process-table read

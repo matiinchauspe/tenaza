@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { captureTerminalLocator, localeFromEnv, outermostApp } from "../src/terminallocator";
+import { captureProcessMarker, captureTerminalLocator, localeFromEnv, outermostApp } from "../src/terminallocator";
 
 /**
  * `localeFromEnv` is PURE (env vars in, locator fields out, no I/O) and
@@ -85,6 +85,34 @@ describe("captureTerminalLocator — combines the env mapping with an injectable
   test("psWalk alone (no env vars at all) still yields a locator — the generic fallback's own raise target", () => {
     const locator = captureTerminalLocator({}, 1234, () => ({ outerApp: "/Applications/Alacritty.app" }));
     expect(locator).toEqual({ outerApp: "/Applications/Alacritty.app" });
+  });
+});
+
+describe("captureProcessMarker (ticket 02) — pid + its process-start marker, via an injectable psRead", () => {
+  test("pairs the given pid with psRead's own lstart output", () => {
+    const marker = captureProcessMarker(1234, (pid, format) => {
+      expect(pid).toBe("1234");
+      expect(format).toBe("lstart=");
+      return "Wed Oct 28 10:00:00 2026";
+    });
+    expect(marker).toEqual({ pid: 1234, startedAt: "Wed Oct 28 10:00:00 2026" });
+  });
+
+  test("defaults pid to process.ppid — the SAME hop captureTerminalLocator's own walk targets", () => {
+    const marker = captureProcessMarker(undefined, () => "whatever");
+    expect(marker.pid).toBe(process.ppid);
+  });
+
+  test("psRead returning nothing (ps couldn't report lstart) still captures the bare pid", () => {
+    const marker = captureProcessMarker(1234, () => undefined);
+    expect(marker).toEqual({ pid: 1234, startedAt: undefined });
+  });
+
+  test("a throwing psRead degrades to the bare pid alone, never crashes SessionStart", () => {
+    const marker = captureProcessMarker(1234, () => {
+      throw new Error("ps unavailable in this sandbox");
+    });
+    expect(marker).toEqual({ pid: 1234 });
   });
 });
 

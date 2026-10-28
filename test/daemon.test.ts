@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { type SessionTiming, sessionColumn } from "../src/board";
 import {
   actionDecidedEvent,
   approvalResolvedEvent,
@@ -1872,5 +1873,53 @@ describe("buildBoardPayload — ticket 14: the touched-file merge and nativeWait
   test("no notification.observed Event at all — nativeWait is undefined", () => {
     appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
     expect(buildBoardPayload(home).sessions[0]?.nativeWait).toBeUndefined();
+  });
+});
+
+/**
+ * Ticket 02 ("a dead Session stops reading as live," AC1): the SAME rule
+ * `renderSessionTree`/`deriveStatuslineCounts` are proven against, exercised
+ * here through the REAL `ps` read (`buildBoardPayload` takes no injectable
+ * override either, by this repo's own convention — only `closeDeadProcesses`
+ * itself is unit-tested with a stub).
+ */
+describe("buildBoardPayload — ticket 02: a Session whose captured pid's process has exited", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-ticket02-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("reads endedAt/a DISTINCT reason once its process has exited — no real SessionEnd ever arrived", async () => {
+    const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: proc.pid }));
+
+      const whileAlive = buildBoardPayload(home).sessions[0];
+      expect(whileAlive?.endedAt).toBeUndefined();
+
+      proc.kill();
+      await proc.exited;
+
+      const afterExit = buildBoardPayload(home).sessions[0];
+      expect(afterExit?.endedAt).toBeDefined();
+      // The board's own column classification (board.ts's sessionColumn)
+      // now reads this exactly like a real SessionEnd would — AC1.
+      expect(sessionColumn(afterExit as SessionTiming, new Date(), 15)).toBe("termino");
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test("AC2: a live-but-idle Session (process up, no Events for hours) keeps endedAt undefined — only a confirmed-dead process changes category", () => {
+    const longAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: process.pid }), ts: longAgo });
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.endedAt).toBeUndefined(); // this test process itself is alive throughout
   });
 });

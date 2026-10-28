@@ -50,6 +50,10 @@ export interface SessionNode {
   lastNotification?: { kind: NotificationKind; ts: string };
   /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
   terminalLocator?: TerminalLocator;
+  /** Ticket 02: the runtime's own OS process id, captured at `session.started` (`adapters/claude.ts`'s `captureProcessMarker`) — `undefined` for a backfilled start, legacy data, or an environment `ps` couldn't be read in. UNLIKE `terminalLocator`, a subagent carries its OWN copy (same OS process as its parent), never resolved by walking to `node.parent`. */
+  pid?: number;
+  /** Ticket 02: `pid`'s own process-start marker (`ps -o lstart=`) at the moment it was captured — paired with `pid` so `closeDeadProcesses` can tell a reused pid after a reboot apart from the same process still running. `undefined` means the reuse guard can't be applied; `pid` alone is still trusted then. */
+  pidStartedAt?: string;
 }
 
 /** Thrown by every Session-scoped operation (the focus and archive write routes, `daemon.ts`/`resolve.ts`, ticket 11) when an id names no observed Session at all. */
@@ -86,6 +90,8 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.capabilities = event.data.capabilities;
       node.startedAt = event.ts;
       node.terminalLocator = event.data.terminal;
+      node.pid = event.data.pid;
+      node.pidStartedAt = event.data.pidStartedAt;
       // A start AFTER an end is the same Session running again (ticket 13):
       // SendMessage re-fires SubagentStart under the same agent_id. Only a
       // start revives it — the usage.sampled every SessionEnd/SubagentStop
@@ -201,6 +207,122 @@ export const STALL_THRESHOLD_MS = 15 * 60 * 1000;
 export function isStalled(node: SessionNode, now: Date, thresholdMs: number = STALL_THRESHOLD_MS): boolean {
   if (!node.lastEventTs) return false;
   return now.getTime() - new Date(node.lastEventTs).getTime() > thresholdMs;
+}
+
+/**
+ * Ticket 02 ("a dead Session stops reading as live"): Tenaza's OWN word for
+ * a Session closed because its runtime process is gone — written onto
+ * `endedReason` exactly where a real `SessionEnd`'s runtime-supplied reason
+ * would go, but never confusable with one (AC1: "reported as a distinct
+ * reason… so the two never blur"). Never a Rule a human would see; purely
+ * an internal marker for anything that ever reads `endedReason` later.
+ */
+export const PROCESS_GONE_REASON = "process_gone";
+
+/**
+ * Ticket 02: is `node`'s own OS process the EXACT one its `session.started`
+ * captured — never resurrected by an unrelated process that happens to
+ * reuse the same pid after a reboot (the ticket's own named trap)? A pure
+ * decision over an ALREADY-READ `startMarkers` map (`closeDeadProcesses`
+ * below does the one real `ps` read, batched across every candidate at
+ * once) — this function itself never touches the process table.
+ *
+ * `node.pid === undefined` (legacy data, a backfilled start, or an
+ * environment `ps` couldn't be read in at SessionStart) means nothing was
+ * ever captured to check — reads as "cannot tell," never "gone": this NEVER
+ * marks a Session dead on the mere ABSENCE of a pid (AC2's own "only a dead
+ * process changes category" — missing information is not evidence of
+ * death). A pid present in `startMarkers` but with no stored
+ * `pidStartedAt` to compare degrades to trusting the bare pid number alone
+ * — the best available signal, same silent-degrade convention every other
+ * optional capture in this project already follows.
+ */
+export function isProcessGone(node: SessionNode, startMarkers: ReadonlyMap<number, string>): boolean {
+  if (node.pid === undefined) return false;
+  const current = startMarkers.get(node.pid);
+  if (current === undefined) return true; // confirmed absent from the live process table
+  if (node.pidStartedAt === undefined) return false; // bare pid only, no reuse guard possible
+  return current !== node.pidStartedAt; // same pid NUMBER, a different process instance
+}
+
+/**
+ * The real process-table read (never run in a unit test — `closeDeadProcesses`'s
+ * own `readProcessStartMarkers` parameter is what a test injects instead,
+ * same shape `defaultGitRootFor`/`defaultPsWalk` already use): ONE `ps`
+ * call for every candidate pid at once (`-p` takes a comma list) — ticket
+ * 13's own lesson, never repeated here as one spawn per Session. A pid `ps`
+ * cannot find is simply ABSENT from its own output (verified against a
+ * mixed real+bogus `-p` list: `ps` drops what it can't find rather than
+ * erroring per-pid) — exactly the "confirmed gone" signal `isProcessGone`
+ * reads back. Never throws: a missing `ps` binary or a sandboxed test
+ * environment with no real process table degrades to an empty map —
+ * "nobody confirmed gone this read," never a crash.
+ */
+function defaultProcessStartMarkers(pids: readonly number[]): ReadonlyMap<number, string> {
+  const map = new Map<number, string>();
+  if (pids.length === 0) return map;
+  try {
+    const proc = Bun.spawnSync(["ps", "-o", "pid=,lstart=", "-p", pids.join(",")]);
+    for (const line of proc.stdout.toString("utf8").split("\n")) {
+      const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+      if (!match) continue;
+      map.set(Number(match[1]), match[2] as string);
+    }
+  } catch {
+    // See the doc comment above.
+  }
+  return map;
+}
+
+/**
+ * Ticket 02's own fix, applied in exactly ONE place so `tenaza status`
+ * (`renderSessionTree`), `statusline` (`deriveStatuslineCounts`) and the
+ * board (`daemon.ts`'s `buildBoardPayload`) can never disagree (AC1: "one
+ * rule, the same in all three") — each calls this right after
+ * `buildSessionIndex`, before deriving anything from `endedAt`.
+ *
+ * Closes every Session whose own runtime process is CONFIRMED gone —
+ * `endedAt`/`endedReason` set exactly as a real `SessionEnd` would read,
+ * so every existing consumer (`nodeCategory`, `board.ts`'s `sessionColumn`,
+ * `statusline.ts`'s `isLive`) treats it correctly with NO new logic of its
+ * own. Never written back to the log — a derived, read-side fact,
+ * recomputed fresh on every call (ADR 0002), and reached only from
+ * `status`/`statusline`/the board, never from a hook's own answer path
+ * (ADR 0007, the ticket's own AC4).
+ *
+ * `endedAt` is set to the node's OWN `lastEventTs` — its last confirmed
+ * activity — never to `now`: using `now` would make `endedAt` a different
+ * value on every single call (nothing persists it), which would never let
+ * `sessionColumn`'s 24h TERMINÓ window actually age the card out, and would
+ * spuriously change the board's own payload on every poll tick forever.
+ * `now` is used only as a last-resort fallback for a hand-built fixture
+ * with a `pid` but no `lastEventTs` at all — unreachable through the real
+ * pipeline, since capturing a `pid` requires a `session.started` Event,
+ * which `buildSessionIndex` already folds into `lastEventTs` first.
+ *
+ * Only a node with NO real end yet (`endedAt === undefined`) is ever a
+ * candidate — this never overwrites a real `SessionEnd`'s own reason, and
+ * a node with no `pid` at all is left exactly as it was (AC2: a live-but-
+ * idle Session, or one Tenaza never captured a pid for, keeps reading
+ * alive/"sin señal" — only a CONFIRMED-dead process ever changes category).
+ */
+export function closeDeadProcesses(
+  index: ReadonlyMap<string, SessionNode>,
+  now: Date = new Date(),
+  readProcessStartMarkers: (pids: readonly number[]) => ReadonlyMap<number, string> = defaultProcessStartMarkers,
+): void {
+  const candidates = [...index.values()].filter(
+    (node): node is SessionNode & { pid: number } => node.endedAt === undefined && node.pid !== undefined,
+  );
+  if (candidates.length === 0) return;
+
+  const startMarkers = readProcessStartMarkers([...new Set(candidates.map((node) => node.pid))]);
+
+  for (const node of candidates) {
+    if (!isProcessGone(node, startMarkers)) continue;
+    node.endedAt = node.lastEventTs ?? now.toISOString();
+    node.endedReason = PROCESS_GONE_REASON;
+  }
 }
 
 function defaultGitRootFor(cwd: string): string | undefined {
@@ -570,6 +692,7 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   if (events.length === 0) return "";
 
   const index = buildSessionIndex(events);
+  closeDeadProcesses(index, now); // ticket 02, AC1: the SAME rule statusline and the board apply
   const eventTypes = eventTypesBySession(events);
   const nodes = [...index.values()].filter(
     (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason),

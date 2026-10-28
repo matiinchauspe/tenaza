@@ -94,6 +94,28 @@ describe("Event contract", () => {
     expect((evt as { data: { parent?: string } }).data.parent).toBeUndefined();
   });
 
+  test("ticket 02: sessionStartedEvent carries pid/pidStartedAt when given", () => {
+    const evt = sessionStartedEvent("sess-1", {
+      runtime: "claude",
+      cwd: "/repo",
+      capabilities: ["observe", "block"],
+      pid: 12345,
+      pidStartedAt: "Wed Oct 28 10:00:00 2026",
+    });
+
+    expect(() => EventSchema.parse(evt)).not.toThrow();
+    expect(evt).toMatchObject({
+      data: { pid: 12345, pidStartedAt: "Wed Oct 28 10:00:00 2026" },
+    });
+  });
+
+  test("ticket 02: sessionStartedEvent omits pid/pidStartedAt entirely when not given — never written as undefined", () => {
+    const evt = sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] });
+
+    expect((evt as { data: { pid?: number } }).data.pid).toBeUndefined();
+    expect("pid" in evt.data).toBe(false);
+  });
+
   test("sessionStartedEvent carries a parent for a subagent Session", () => {
     const evt = sessionStartedEvent("agent-1", {
       parent: "sess-1",

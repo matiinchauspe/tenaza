@@ -177,6 +177,20 @@ effect = "flag"
     });
   });
 
+  /**
+   * Ticket 02 ("a dead Session stops reading as live"): `handleSessionStart`
+   * also wires up `captureProcessMarker()` — unit-tested on its own in
+   * `test/terminallocator.test.ts` (with an injected `psRead`); this
+   * confirms the END-TO-END integration against THIS test process's own
+   * real `process.ppid` (deterministic — it never changes for the life of
+   * the process, so asserting against it directly is not a flaky guess).
+   */
+  test("SessionStart also captures the runtime's own pid (ticket 02)", async () => {
+    await handleClaudeHook(home, { session_id: "sess-pid", hook_event_name: "SessionStart", cwd: "/repo" });
+    const events = readSessionEvents("sess-pid", home);
+    expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
+  });
+
   test("SubagentStart never captures a terminal locator — resolving its PARENT's is the core's own job (ticket 11)", async () => {
     await handleClaudeHook(home, {
       session_id: "sess-1",
@@ -186,6 +200,22 @@ effect = "flag"
     });
     const events = readSessionEvents("agent-1", home);
     expect((events[0] as { data: { terminal?: unknown } }).data.terminal).toBeUndefined();
+  });
+
+  /**
+   * Ticket 02: UNLIKE the terminal locator, a subagent's own `session.started`
+   * DOES carry a `pid` — it shares the same OS process as its parent, so its
+   * own liveness check needs no parent walk at read time.
+   */
+  test("SubagentStart also captures the runtime's own pid (ticket 02)", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "SubagentStart",
+      agent_id: "agent-pid",
+      cwd: "/repo",
+    });
+    const events = readSessionEvents("agent-pid", home);
+    expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
   });
 
   test("SubagentStart writes session.started keyed by agent_id, parented to session_id", async () => {

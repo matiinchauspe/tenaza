@@ -94,7 +94,8 @@ export function BoardApp() {
       if (itemId) actions.approve(itemId, message);
     },
     onFocusTerminal: (id) => {
-      if (!viewModel) return;
+      // A TERMINÓ card has no terminal button, so `t` does nothing on it either.
+      if (!viewModel || terminoSessionIds.has(id)) return;
       const sessionId = sessionIdForCard(viewModel, id);
       if (sessionId) actions.focusTerminal(sessionId);
     },

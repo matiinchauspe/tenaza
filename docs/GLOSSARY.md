@@ -24,6 +24,13 @@ _Avoid_: Record, entry, message
 An Event carrying a Session's context size (and cost when known) at a point in time.
 _Avoid_: Metric, token count
 
+**Process liveness**:
+Whether a Session's runtime process (its OS pid, captured once at `session.started` and paired
+with a start marker against pid reuse) is still running — checked fresh on every read, never
+stored and never run from a hook. A Session whose process is confirmed gone reads as closed, with
+a reason distinct from a real `SessionEnd`, even though no such Event ever arrived.
+_Avoid_: Heartbeat, ping, health check
+
 ## Runtimes
 
 **Adapter**:

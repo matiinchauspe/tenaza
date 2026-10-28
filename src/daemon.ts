@@ -40,6 +40,7 @@ import {
 import {
   UNKNOWN_PROJECT,
   buildSessionIndex,
+  closeDeadProcesses,
   createCachingGitRootResolver,
   deriveProject,
   eventTypesBySession,
@@ -304,6 +305,10 @@ export function buildBoardPayload(
     const touched = touchedAt.get(node.id);
     if (touched && (!node.lastEventTs || touched > node.lastEventTs)) node.lastEventTs = touched;
   }
+  // Ticket 02, AC1: the SAME rule `tenaza status`/`statusline` apply — run
+  // AFTER the touch merge above so a synthetic `endedAt` reflects the
+  // Session's true last-known activity, touch files included.
+  closeDeadProcesses(fullIndex);
   const eventTypes = eventTypesBySession(events);
   // Ticket 11: an archived Session's card is hidden from the BOARD alone
   // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered

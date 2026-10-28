@@ -6,7 +6,14 @@ import { LIVE_ANSWER_CUTOFF_MS } from "./live";
 import { appendHumanEvent, readSessionEvents } from "./log";
 import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import { runFailureTrailer } from "./runoutput";
-import { buildSessionIndex, cwdForSession, isArchived, latestArchiveTimestamps, UnknownSessionError } from "./sessions";
+import {
+  buildSessionIndex,
+  closeDeadProcesses,
+  cwdForSession,
+  isArchived,
+  latestArchiveTimestamps,
+  UnknownSessionError,
+} from "./sessions";
 
 /** Thrown by every resolution path when the id names no Inbox row at all. */
 export class UnknownInboxItemError extends Error {
@@ -342,9 +349,19 @@ export type ArchiveResult = ArchiveRefusal | { kind: "accepted"; alreadyArchived
  * so this never needs the full cross-Session index `buildBoardPayload`
  * builds; only the human log's own archive Events (`latestArchiveTimestamps`)
  * come from elsewhere.
+ *
+ * Ticket 02: also runs `closeDeadProcesses` over this one-node index before
+ * reading `endedAt` — a Session the board already shows closed (its
+ * runtime process confirmed gone) must be archivable too, or a human who
+ * just saw it move to TERMINÓ would click "archivar" and get refused with
+ * `not-ended`. Scoped to this Session's own `pid` alone (never a second,
+ * cross-Session `ps` read) — the SAME single-node index this function
+ * already builds, unchanged otherwise.
  */
 export function archiveSession(home: string, sessionId: string): ArchiveResult {
-  const node = buildSessionIndex(readSessionEvents(sessionId, home)).get(sessionId);
+  const index = buildSessionIndex(readSessionEvents(sessionId, home));
+  closeDeadProcesses(index);
+  const node = index.get(sessionId);
   if (!node) throw new UnknownSessionError(sessionId);
   if (node.endedAt === undefined) return { kind: "not-ended" };
 

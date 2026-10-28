@@ -4,13 +4,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
 import { appendEvent, appendHumanEvent } from "../src/log";
+import { captureProcessMarker } from "../src/terminallocator";
 import { touchSession } from "../src/toolcalls";
 import {
+  PROCESS_GONE_REASON,
   buildSessionIndex,
   categoryWord,
+  closeDeadProcesses,
   deriveProject,
   isArchived,
   isNoiseSession,
+  isProcessGone,
   isStalled,
   latestArchiveTimestamps,
   nativeWaitFor,
@@ -379,6 +383,186 @@ describe("isStalled / categoryWord", () => {
     expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
     expect(categoryWord("done", true)).toBe(categoryWord("done", false));
     expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+  });
+});
+
+describe("isProcessGone (ticket 02 — a dead Session stops reading as live)", () => {
+  test("no pid captured at all reads as 'cannot tell,' never gone (AC2: missing info is not evidence of death)", () => {
+    const node = { id: "sess-1", capabilities: [], labels: {} } as unknown as Parameters<typeof isProcessGone>[0];
+    expect(isProcessGone(node, new Map([[123, "Wed Oct 28 10:00:00 2026"]]))).toBe(false);
+  });
+
+  test("a pid absent from the live process table is CONFIRMED gone", () => {
+    const node = { id: "sess-1", capabilities: [], labels: {}, pid: 999 } as unknown as Parameters<
+      typeof isProcessGone
+    >[0];
+    expect(isProcessGone(node, new Map([[123, "Wed Oct 28 10:00:00 2026"]]))).toBe(true);
+  });
+
+  test("a pid present, no stored start marker to compare — trusts the bare pid alone (degrades to alive)", () => {
+    const node = { id: "sess-1", capabilities: [], labels: {}, pid: 123 } as unknown as Parameters<
+      typeof isProcessGone
+    >[0];
+    expect(isProcessGone(node, new Map([[123, "Wed Oct 28 10:00:00 2026"]]))).toBe(false);
+  });
+
+  test("same pid, same start marker — still the SAME process, reads alive", () => {
+    const node = {
+      id: "sess-1",
+      capabilities: [],
+      labels: {},
+      pid: 123,
+      pidStartedAt: "Wed Oct 28 10:00:00 2026",
+    } as unknown as Parameters<typeof isProcessGone>[0];
+    expect(isProcessGone(node, new Map([[123, "Wed Oct 28 10:00:00 2026"]]))).toBe(false);
+  });
+
+  test("same pid NUMBER, a DIFFERENT start marker — a reused pid after a reboot, reads gone (AC3)", () => {
+    const node = {
+      id: "sess-1",
+      capabilities: [],
+      labels: {},
+      pid: 123,
+      pidStartedAt: "Wed Oct 28 10:00:00 2026",
+    } as unknown as Parameters<typeof isProcessGone>[0];
+    expect(isProcessGone(node, new Map([[123, "Thu Oct 29 08:00:00 2026"]]))).toBe(true);
+  });
+});
+
+describe("closeDeadProcesses (ticket 02 — the ONE rule status/statusline/the board all apply, AC1)", () => {
+  test("a candidate whose pid is confirmed gone is closed exactly like a real SessionEnd — a DISTINCT reason (AC1)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map());
+    const node = index.get("sess-1")!;
+    expect(node.endedAt).toBeDefined();
+    expect(node.endedAt).toBe(node.lastEventTs);
+    expect(node.endedReason).toBe(PROCESS_GONE_REASON);
+  });
+
+  test("a candidate whose pid is still alive (matching marker) stays untouched — AC2: idle-but-alive never changes category", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map([[111, "m1"]]));
+    const node = index.get("sess-1")!;
+    expect(node.endedAt).toBeUndefined();
+    expect(node.endedReason).toBeUndefined();
+  });
+
+  test("a Session with no pid at all is left exactly as it was, whatever the process table reports", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map());
+    const node = index.get("sess-1")!;
+    expect(node.endedAt).toBeUndefined();
+  });
+
+  test("a Session that ALREADY has a real SessionEnd is never touched, even if ps reports its pid gone", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+      sessionEndedEvent("sess-1", "clear"),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map());
+    const node = index.get("sess-1")!;
+    expect(node.endedReason).toBe("clear");
+  });
+
+  test("a subagent carries its OWN pid and closes independently — no parent walk needed, unlike the terminal locator", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("parent-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+      sessionStartedEvent("child-1", {
+        parent: "parent-1",
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: [],
+        pid: 111,
+        pidStartedAt: "m1",
+      }),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map()); // the shared pid is confirmed gone
+    expect(index.get("parent-1")!.endedReason).toBe(PROCESS_GONE_REASON);
+    expect(index.get("child-1")!.endedReason).toBe(PROCESS_GONE_REASON);
+    // rollupCategory now agrees too — "done" for the child (it has a parent), "ended" for the root.
+    expect(nodeCategory(index.get("parent-1")!, new Set())).toBe("ended");
+    expect(nodeCategory(index.get("child-1")!, new Set())).toBe("done");
+  });
+
+  test("every distinct candidate pid is read in ONE batched call, never one spawn per Session (ticket 13's own lesson)", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+      sessionStartedEvent("sess-2", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 222, pidStartedAt: "m2" }),
+      sessionStartedEvent("sess-3", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+    ]);
+    let calls = 0;
+    closeDeadProcesses(index, new Date(), (pids) => {
+      calls += 1;
+      expect([...pids].sort()).toEqual([111, 222]); // deduplicated
+      return new Map([[111, "m1"]]); // 222 confirmed gone, 111 still alive
+    });
+    expect(calls).toBe(1);
+    expect(index.get("sess-1")!.endedAt).toBeUndefined();
+    expect(index.get("sess-2")!.endedAt).toBeDefined();
+    expect(index.get("sess-3")!.endedAt).toBeUndefined();
+  });
+
+  test("no candidates at all (every node already ended, or none has a pid) never calls the process-table reader", () => {
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
+    ]);
+    let called = false;
+    closeDeadProcesses(index, new Date(), () => {
+      called = true;
+      return new Map();
+    });
+    expect(called).toBe(false);
+  });
+});
+
+describe("closeDeadProcesses — real `ps` (no injection): end-to-end over an actual OS process", () => {
+  test("a Session whose captured pid belongs to a process that has since exited reads as closed", async () => {
+    const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      // The SAME capture this ticket wires into SessionStart, read for a REAL pid.
+      const marker = captureProcessMarker(proc.pid);
+      expect(marker.pid).toBe(proc.pid);
+
+      const index = buildSessionIndex([
+        sessionStartedEvent("sess-1", {
+          runtime: "claude",
+          cwd: "/repo",
+          capabilities: [],
+          pid: marker.pid,
+          pidStartedAt: marker.startedAt,
+        }),
+      ]);
+
+      // Still running: the real `ps` read must confirm it alive.
+      closeDeadProcesses(index);
+      expect(index.get("sess-1")!.endedAt).toBeUndefined();
+
+      proc.kill();
+      await proc.exited;
+
+      // Gone now: the SAME real `ps` read must confirm it dead.
+      const indexAfter = buildSessionIndex([
+        sessionStartedEvent("sess-1", {
+          runtime: "claude",
+          cwd: "/repo",
+          capabilities: [],
+          pid: marker.pid,
+          pidStartedAt: marker.startedAt,
+        }),
+      ]);
+      closeDeadProcesses(indexAfter);
+      const node = indexAfter.get("sess-1")!;
+      expect(node.endedAt).toBeDefined();
+      expect(node.endedReason).toBe(PROCESS_GONE_REASON);
+    } finally {
+      proc.kill();
+    }
   });
 });
 

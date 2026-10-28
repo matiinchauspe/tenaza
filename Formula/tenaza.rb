@@ -4,25 +4,25 @@
 # formula, no source build — the binary ships from `tenaza`'s own GitHub
 # Release (see `.github/workflows/release.yml`).
 #
-# Filled in by packaging/homebrew/update-formula.sh from a published
-# release — do not hand-edit version/url/sha256 below; edit the script's
-# inputs instead and re-run it.
+# This repo is its own tap: `brew tap matiinchauspe/tenaza
+# https://github.com/matiinchauspe/tenaza` reads this file straight from
+# main. Filled in by packaging/homebrew/update-formula.sh from a published
+# release — do not hand-edit version/url/sha256 below; re-run the script
+# and commit the result instead.
 class Tenaza < Formula
   desc "Decoupled control plane for coding agents: observe, enforce, show"
   homepage "https://github.com/matiinchauspe/tenaza"
-  version "0.0.0"
+  version "0.2.0"
   license "MIT"
 
-  # The two sha256 values below are dummy 64-char hex placeholders (ending
-  # ...1 / ...2 only so the two branches aren't byte-identical) —
-  # update-formula.sh overwrites both with the real digests from the
-  # release's checksums.txt.
+  # The two sha256 values below are the real digests from the release's
+  # checksums.txt — update-formula.sh overwrites both on every release.
   if Hardware::CPU.arm?
     url "https://github.com/matiinchauspe/tenaza/releases/download/v#{version}/tenaza-darwin-arm64"
-    sha256 "0000000000000000000000000000000000000000000000000000000000000001"
+    sha256 "831d221d051564d520575beadaa7912382c2645904ff5bedb1fe17bc2b77ae29"
   else
     url "https://github.com/matiinchauspe/tenaza/releases/download/v#{version}/tenaza-darwin-x64"
-    sha256 "0000000000000000000000000000000000000000000000000000000000000002"
+    sha256 "f207aaeed0f550468328db0c01b61b978c3ec69cd7833c64b318207ac52b2204"
   end
 
   def install

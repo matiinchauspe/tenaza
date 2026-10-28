@@ -53,9 +53,14 @@ Requires macOS and [Claude Code](https://code.claude.com).
 
 ```bash
 brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza
-brew install tenaza
+brew install matiinchauspe/tenaza/tenaza
 tenaza init
 ```
+
+Use the full name in `brew install`. Homebrew only loads formulae from taps you trust, and the
+full name is how you tell it you trust this one. A plain `brew install tenaza` fails with
+"Refusing to load formula … from untrusted tap". If you see that error, run
+`brew trust --formula matiinchauspe/tenaza/tenaza`.
 
 Then, in Claude Code:
 
@@ -158,11 +163,28 @@ a file and run later.
 | `tenaza run / done / dismiss <id>` | Resolve an Inbox item |
 | `tenaza label key=value …` | Label the current session, e.g. `ticket=API-42` |
 
+## Upgrade
+
+```bash
+brew update
+brew upgrade tenaza
+```
+
+If you installed from the old `matiinchauspe/tap`, that tap no longer exists. Move to this one:
+
+```bash
+brew uninstall tenaza
+brew untap matiinchauspe/tap
+```
+
+Then follow [Install](#install). Your `~/.tenaza` Policy and Inbox stay as they are.
+
 ## Uninstall
 
 ```bash
 brew services stop tenaza
 brew uninstall tenaza
+brew untap matiinchauspe/tenaza
 rm -rf ~/.tenaza
 ```
 

@@ -73,6 +73,10 @@ interface DerivedStatePayload {
  */
 async function connectEvents(port: number): Promise<{
   nextEvent(timeoutMs: number): Promise<DerivedStatePayload>;
+  waitForEvent(
+    predicate: (payload: DerivedStatePayload) => boolean,
+    timeoutMs: number,
+  ): Promise<DerivedStatePayload>;
   expectNoEventWithin(windowMs: number): Promise<void>;
   cancel(): Promise<void>;
 }> {
@@ -107,6 +111,45 @@ async function connectEvents(port: number): Promise<{
     ]);
   }
 
+  /**
+   * `yun-diagnose-bug`, CI flake on `daemon.test.ts:513`/`:1485` (tenaza
+   * v0.2.0 release): `startStateWatcher` is a LEVEL-triggered polling push
+   * (its own doc comment: "up to one poll interval of latency," "coalesces
+   * bursts") — it guarantees the client eventually converges on the truth,
+   * NEVER that the very next frame after a write reflects that write's full
+   * effect. A hook's own write is NOT atomic (e.g. `touchSession` lands
+   * before the Event that actually opens an Inbox item) — measured under
+   * synthetic CPU contention (Docker `--cpus=1`, reproduced the exact CI
+   * failure): a poll tick can fire IN THE MIDDLE of that sequence and push
+   * an accurate-at-that-instant but not-yet-final snapshot, which a plain
+   * `nextEvent()` (one frame = one logical change) wrongly treats as "the"
+   * answer. The product's ordering is correct — it is this plain
+   * frame-at-a-time assumption that is racy on a slow/loaded runner. Fix:
+   * keep consuming frames (never losing content truth, same `nextEvent`
+   * under the hood) until one SATISFIES the caller's own predicate, bounded
+   * by one overall deadline, so a stale intermediate frame is skipped
+   * rather than mistaken for the final state.
+   */
+  async function waitForEvent(
+    predicate: (payload: DerivedStatePayload) => boolean,
+    timeoutMs: number,
+  ): Promise<DerivedStatePayload> {
+    const deadline = Date.now() + timeoutMs;
+    let last: DerivedStatePayload | undefined;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(
+          `timed out waiting for an SSE event matching the predicate after ${timeoutMs}ms` +
+            (last ? `; last frame seen: ${JSON.stringify(last)}` : "; no frame arrived at all"),
+        );
+      }
+      last = await nextEvent(remaining);
+      if (predicate(last)) return last;
+    }
+  }
+
   /** The inverse assertion the regression test needs: NO event arrives within `windowMs` — a timeout here is success, an event is the failure. */
   async function expectNoEventWithin(windowMs: number): Promise<void> {
     let arrived = false;
@@ -121,6 +164,7 @@ async function connectEvents(port: number): Promise<{
 
   return {
     nextEvent,
+    waitForEvent,
     expectNoEventWithin,
     async cancel() {
       await reader.cancel();
@@ -509,7 +553,7 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       });
       expect(hookResult.exitCode).toBe(0);
 
-      const afterWrite = await sse.nextEvent(3000);
+      const afterWrite = await sse.waitForEvent((frame) => frame.inbox.length > 0, 3000);
       expect(afterWrite.inbox.length).toBeGreaterThan(0);
 
       await sse.cancel();
@@ -593,7 +637,7 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
         });
 
       await postToolUse();
-      const afterFirstCall = await sse.nextEvent(2000);
+      const afterFirstCall = await sse.waitForEvent((frame) => frame.sessions.length === 1, 2000);
       expect(afterFirstCall.sessions).toHaveLength(1);
       const firstSession = afterFirstCall.sessions[0] as { lastEventTs?: string };
       const firstLastEventTs = firstSession.lastEventTs;
@@ -602,7 +646,14 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       for (let i = 0; i < 9; i++) await postToolUse();
 
-      const afterMoreCalls = await sse.nextEvent(2000);
+      const afterMoreCalls = await sse.waitForEvent((frame) => {
+        const session = frame.sessions[0] as { lastEventTs?: string } | undefined;
+        return (
+          frame.sessions.length === 1 &&
+          session?.lastEventTs !== undefined &&
+          session.lastEventTs > (firstLastEventTs as string)
+        );
+      }, 2000);
       expect(afterMoreCalls.sessions).toHaveLength(1);
       const laterSession = afterMoreCalls.sessions[0] as { lastEventTs?: string };
       expect(laterSession.lastEventTs !== undefined && laterSession.lastEventTs > (firstLastEventTs as string)).toBe(
@@ -1481,7 +1532,10 @@ describe("write route — archive (ticket 11)", () => {
       });
       expect(resumeResult.exitCode).toBe(0);
 
-      const visibleAgain = await sse.nextEvent(3000);
+      const visibleAgain = await sse.waitForEvent(
+        (frame) => (frame.sessions as { id: string }[]).some((s) => s.id === "sess-1"),
+        3000,
+      );
       expect((visibleAgain.sessions as { id: string }[]).map((s) => s.id)).toContain("sess-1");
 
       await sse.cancel();

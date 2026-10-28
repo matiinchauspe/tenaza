@@ -118,27 +118,41 @@ wait_seconds = 5
     }
   });
 
-  test("reject with NO message: the agent reads a generic reason, never a blank one", async () => {
-    const daemon = await spawnDaemon(["--port", "0"], { home });
-    try {
-      const hookPromise = startHoldingHook("sess-e2e-reject-blank");
-      await Bun.sleep(150);
+  test(
+    "reject with NO message: the agent reads a generic reason, never a blank one",
+    async () => {
+      const daemon = await spawnDaemon(["--port", "0"], { home });
+      try {
+        const hookPromise = startHoldingHook("sess-e2e-reject-blank");
+        await Bun.sleep(150);
 
-      const fullId = fullIdFor("sess-e2e-reject-blank");
-      await fetch(`http://127.0.0.1:${daemon.port}/items/${fullId}/answer`, {
-        method: "POST",
-        headers: { cookie: `tenaza_token=${daemon.token}`, "content-type": "application/json" },
-        body: JSON.stringify({ answer: "reject" }),
-      });
+        const fullId = fullIdFor("sess-e2e-reject-blank");
+        await fetch(`http://127.0.0.1:${daemon.port}/items/${fullId}/answer`, {
+          method: "POST",
+          headers: { cookie: `tenaza_token=${daemon.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ answer: "reject" }),
+        });
 
-      const result = await hookPromise;
-      const output = JSON.parse(result.stdout);
-      expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
-      expect(output.hookSpecificOutput.permissionDecisionReason.length).toBeGreaterThan(0);
-    } finally {
-      await daemon.stop();
-    }
-  });
+        const result = await hookPromise;
+        const output = JSON.parse(result.stdout);
+        expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
+        expect(output.hookSpecificOutput.permissionDecisionReason.length).toBeGreaterThan(0);
+      } finally {
+        await daemon.stop();
+      }
+    },
+    // `yun-diagnose-bug`, CI flake on the v0.2.0 release run: this exercises
+    // the SAME real-subprocess-plus-real-Daemon seam as "the Daemon's own
+    // heartbeat going stale mid-wait" below (two spawned processes, an HTTP
+    // round trip, a 150ms settle and at least one of the hook's own 500ms
+    // `waitForLiveAnswer` poll ticks) — never a hang, measured under
+    // synthetic heavy CPU contention (Docker `--cpus=0.25`) to reliably
+    // finish in ~7.3–7.8s and never longer. Bun's default per-test timeout
+    // (5000ms) has no margin left for a loaded runner; this test had none of
+    // the sibling's explicit budget. Matching that sibling's own number
+    // rather than inventing a new one.
+    15_000,
+  );
 
   test("expiry (no answer within the window): the hook denies itself, with the es-AR wording, and the item stays open as pending", async () => {
     // A short window so this test doesn't actually wait 5s.

@@ -72,6 +72,17 @@ Then, in Claude Code:
 `tenaza init` writes a starter Policy to `~/.tenaza/config/policy.toml` and sets up the
 statusline. It never overwrites a Policy or a statusline you already have.
 
+### Already have a statusline?
+
+`tenaza init` leaves your own `statusLine` script alone and prints the line to paste in
+instead. If your script already reads stdin into `$input` (the common `input=$(cat)` first
+line), add this at its end. It prints Tenaza on its own line, so Claude Code's right-side
+truncation of an overflowing line never cuts it:
+
+```bash
+command -v tenaza >/dev/null && printf '\n%s' "$(echo "$input" | tenaza statusline)"
+```
+
 To get the live board, start the Daemon (optional):
 
 ```bash

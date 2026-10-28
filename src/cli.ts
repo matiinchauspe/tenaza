@@ -296,12 +296,16 @@ function runInitCommand(): number {
     process.stdout.write(`tenaza: set statusLine in ${claudeSettingsPath()} to run \`tenaza statusline\`\n`);
   } else if (result.statusLine === "already-set") {
     process.stdout.write(
-      `tenaza: statusLine already set in ${claudeSettingsPath()} — left it untouched. Paste this into your script:\n` +
+      `tenaza: statusLine already set in ${claudeSettingsPath()} — left it untouched. If your script ` +
+        `already reads stdin into \`$input\` (the common \`input=$(cat)\` first line), add this at its ` +
+        `end — it prints Tenaza on its own line, where Claude Code's right-side truncation can't cut it:\n` +
         `  ${result.pasteLine}\n`,
     );
   } else {
     process.stdout.write(
-      `tenaza: could not read ${claudeSettingsPath()} as JSON — left it untouched. Paste this into your script:\n` +
+      `tenaza: could not read ${claudeSettingsPath()} as JSON — left it untouched. If your script ` +
+        `already reads stdin into \`$input\` (the common \`input=$(cat)\` first line), add this at its ` +
+        `end — it prints Tenaza on its own line, where Claude Code's right-side truncation can't cut it:\n` +
         `  ${result.pasteLine}\n`,
     );
   }

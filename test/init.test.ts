@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import policyExampleToml from "../policy.example.toml" with { type: "text" };
 import { policyPath } from "../src/paths";
-import { runInit, STATUSLINE_PASTE_LINE } from "../src/init";
+import { runInit, STATUSLINE_PASTE_LINE, STATUSLINE_SCRIPT_SNIPPET } from "../src/init";
 
 describe("runInit (ticket 09)", () => {
   let home: string;
@@ -58,7 +58,12 @@ describe("runInit (ticket 09)", () => {
     const result = runInit(home, settingsPath);
 
     expect(result.statusLine).toBe("already-set");
-    expect(result.pasteLine).toBe(STATUSLINE_PASTE_LINE);
+    // The "already-set"/"unreadable" paths paste INTO an existing script, not
+    // straight into Claude Code's settings.json — that script already drained
+    // stdin (ticket 01, tenaza-v0-3: the common `input=$(cat)` first line), so
+    // the pasted snippet re-feeds `$input` rather than reusing the guarded
+    // bare command settings.json itself gets.
+    expect(result.pasteLine).toBe(STATUSLINE_SCRIPT_SNIPPET);
     expect(readFileSync(settingsPath, "utf8")).toBe(existing);
   });
 
@@ -83,7 +88,7 @@ describe("runInit (ticket 09)", () => {
     const result = runInit(home, settingsPath);
 
     expect(result.statusLine).toBe("unreadable");
-    expect(result.pasteLine).toBe(STATUSLINE_PASTE_LINE);
+    expect(result.pasteLine).toBe(STATUSLINE_SCRIPT_SNIPPET);
     expect(readFileSync(settingsPath, "utf8")).toBe(malformed);
   });
 
@@ -100,5 +105,18 @@ describe("runInit (ticket 09)", () => {
     expect(readFileSync(settingsPath, "utf8")).toBe(settingsAfterFirst);
     expect(first.policyWritten).toBe(true);
     expect(first.statusLine).toBe("set");
+  });
+});
+
+describe("the two statusline snippets (ticket 01, tenaza-v0-3)", () => {
+  test("STATUSLINE_PASTE_LINE — written straight into settings.json, where Tenaza's own command is the ONLY thing reading stdin — never re-pipes anything", () => {
+    expect(STATUSLINE_PASTE_LINE).toBe("command -v tenaza >/dev/null && tenaza statusline");
+  });
+
+  test("STATUSLINE_SCRIPT_SNIPPET — pasted into a script that already drained stdin into `$input` — re-feeds it, guarded the same way, on its own OUTPUT line", () => {
+    expect(STATUSLINE_SCRIPT_SNIPPET).toBe(
+      `command -v tenaza >/dev/null && printf '\\n%s' "$(echo "$input" | tenaza statusline)"`,
+    );
+    expect(STATUSLINE_SCRIPT_SNIPPET).not.toBe(STATUSLINE_PASTE_LINE);
   });
 });

@@ -87,10 +87,12 @@ function stopCardSelect(event: { stopPropagation(): void }): void {
  * slot.
  *
  * Ticket 11: "from any card" — a terminal button rides alongside
- * listo/descartar, labeled and (for "terminal desconocida") disabled
- * straight off the already-formatted `card.terminalLabel`
- * (`viewModel.ts`'s `terminalLabelFor`) — this card never re-derives the
- * wording or re-checks the reach itself.
+ * listo/descartar, labeled straight off the already-formatted
+ * `card.terminalLabel` (`viewModel.ts`'s `terminalLabelFor`) — this card
+ * never re-derives the wording itself. Ticket 07 (tenaza-v0-3): an unknown
+ * reach now renders NO terminal button at all here either — never the old
+ * greyed, disabled "terminal desconocida" button — so listo/descartar sit
+ * alone with no empty slot left behind.
  */
 export function InboxCard({
   card,
@@ -174,18 +176,19 @@ export function InboxCard({
         >
           descartar <kbd>x</kbd>
         </button>
-        <button
-          type="button"
-          className="btn"
-          disabled={card.terminalReach === "unknown"}
-          title={card.terminalNeedsTcc ? "macOS va a pedir permiso" : undefined}
-          onClick={(event) => {
-            stopCardSelect(event);
-            onFocusTerminal();
-          }}
-        >
-          {card.terminalLabel} <kbd>t</kbd>
-        </button>
+        {card.terminalReach !== "unknown" && (
+          <button
+            type="button"
+            className="btn"
+            title={card.terminalNeedsTcc ? "macOS va a pedir permiso" : undefined}
+            onClick={(event) => {
+              stopCardSelect(event);
+              onFocusTerminal();
+            }}
+          >
+            {card.terminalLabel} <kbd>t</kbd>
+          </button>
+        )}
       </div>
       {parsedOutput && parsedOutput.body.length > 0 && (
         <pre className="inbox-card__output">{parsedOutput.body}</pre>

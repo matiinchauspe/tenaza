@@ -34,14 +34,17 @@ import type {
 
 /**
  * Ticket 11 (decision 09): "Label by reach: 'ir a terminal ↗', 'abrir <App>
- * ↗', greyed 'terminal desconocida'" (ticket). The ONE place this wording
- * is picked, for both card kinds — `SessionCard`/`InboxCard` only ever
- * render whatever this returns, never re-deriving it.
+ * ↗'" (ticket). The ONE place this wording is picked, for both card kinds —
+ * `SessionCard`/`InboxCard` only ever render whatever this returns, never
+ * re-deriving it. Ticket 07 (tenaza-v0-3): an "unknown" reach renders NO
+ * terminal button at all on either card (never the old greyed "terminal
+ * desconocida" text), so this branch's return value is never actually
+ * shown — kept as an empty string, not a dead literal nobody reads.
  */
 export function terminalLabelFor(reach: TerminalReach, appLabel: string | undefined): string {
   if (reach === "exact") return "ir a terminal ↗";
   if (reach === "app") return `abrir ${appLabel ?? "la terminal"} ↗`;
-  return "terminal desconocida";
+  return "";
 }
 
 /** `label` reuses `formatContextNumber` (`contextbar.ts`) — the SAME "243k" / "⚑243k" / "—" the CLI's `status` tree already shows, so a Session never reads two different numbers in two different places. */
@@ -572,4 +575,21 @@ export function sessionIdForCard(viewModel: BoardViewModel, cardId: string): str
     (card) => card.id === cardId,
   );
   return sessionCard?.id;
+}
+
+/**
+ * Ticket 07 (tenaza-v0-3): the SAME resolution `sessionIdForCard` above
+ * already does for `cardId` — a TE NECESITA row's own item hash, or a
+ * Session card's own id — but reading its `terminalReach` instead of its
+ * Session id. Lets the board gate the `t` key on "this card has no
+ * terminal button to focus" without re-deriving which card kind `cardId`
+ * names. `undefined` only when `cardId` names nothing at all.
+ */
+export function terminalReachForCard(viewModel: BoardViewModel, cardId: string): TerminalReach | undefined {
+  const inboxCard = viewModel.teNecesita.cards.find((card) => card.id === cardId);
+  if (inboxCard) return inboxCard.terminalReach;
+  const sessionCard = [...viewModel.corriendo.cards, ...viewModel.trabada.cards, ...viewModel.termino.cards].find(
+    (card) => card.id === cardId,
+  );
+  return sessionCard?.terminalReach;
 }

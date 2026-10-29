@@ -191,12 +191,27 @@ describe("Board — render from a fixture payload", () => {
     expect(occurrences).toBe(1); // exactly the one TERMINÓ Session in this fixture payload
   });
 
-  test("ticket 11: every card, Inbox and Session alike, gets its own terminal button", () => {
+  test("ticket 07: unknown terminal reach renders no terminal button at all, on either card kind", () => {
     // This fixture's Sessions/Inbox items carry no terminal locator at all
-    // (the board fixture's own default), so every card reads "terminal
-    // desconocida" — proving the button is wired through `Board` for BOTH
-    // card kinds, not just one.
-    const occurrences = html.split("terminal desconocida").length - 1;
-    expect(occurrences).toBeGreaterThan(1);
+    // (the board fixture's own default) — so none of them render the old
+    // greyed "terminal desconocida" button, or any "ir a terminal"/"abrir"
+    // label either: there is simply no button to find.
+    expect(html).not.toContain("terminal desconocida");
+    expect(html).not.toContain("ir a terminal");
+  });
+
+  test("ticket 11: a KNOWN terminal reach still wires the button through Board for both card kinds", () => {
+    const knownPayload = buildBoardViewModel(
+      makeBoardPayload({
+        inbox: [makeInboxItem({ id: "known-inbox", terminalReach: "exact" })],
+        sessions: [makeSession({ id: "known-session", terminalReach: "exact", lastEventTs: now.toISOString() })],
+      }),
+      now,
+    );
+    const knownHtml = renderToStaticMarkup(
+      <Board viewModel={knownPayload} selectedId={undefined} onSelect={() => {}} {...NOOP_ACTION_PROPS} />,
+    );
+    const occurrences = knownHtml.split("ir a terminal ↗").length - 1;
+    expect(occurrences).toBe(2); // one Inbox card, one Session card
   });
 });

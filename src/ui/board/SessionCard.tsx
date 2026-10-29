@@ -166,7 +166,11 @@ function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["r
  * button, plus an "archivar" button on a TERMINÓ card only — `showArchive`,
  * `Board`'s own gate). A TERMINÓ card offers archivar INSTEAD of the
  * terminal button (tenaza-v0-3 ticket 02): the agent is gone, and once a
- * closed window reads as TERMINÓ, so is the terminal it ran in. No uppercase `StatusBadge`
+ * closed window reads as TERMINÓ, so is the terminal it ran in. Ticket 07
+ * (tenaza-v0-3): an UNKNOWN terminal reach renders no terminal button
+ * either, for the same reason the TERMINÓ gate reads above — there is
+ * nothing to focus — never the old greyed, disabled "terminal desconocida"
+ * button. No uppercase `StatusBadge`
  * here: the prototype signals a Session's state with a small colored dot
  * in `l1` instead — the column it sits in already names that state in
  * text (its header), so the dot is reinforcement, not the only signal.
@@ -218,11 +222,10 @@ export function SessionCard({
       </div>
       <ContextTrack display={card.context} />
       <div className="session-card__actions" onClick={stopCardSelect}>
-        {!showArchive && (
+        {!showArchive && card.terminalReach !== "unknown" && (
           <button
             type="button"
             className="btn"
-            disabled={card.terminalReach === "unknown"}
             title={card.terminalNeedsTcc ? "macOS va a pedir permiso" : undefined}
             onClick={onFocusTerminal}
           >

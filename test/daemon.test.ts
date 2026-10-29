@@ -595,7 +595,7 @@ describe("tenaza ui — the Daemon (ticket 07)", () => {
         home,
         stdin: JSON.stringify({ session_id: "sess-1", hook_event_name: "PostToolUse", cwd: home }),
       });
-      const afterBackfill = await sse.nextEvent(2000);
+      const afterBackfill = await sse.waitForEvent((frame) => frame.sessions.length === 1, 2000);
       expect(afterBackfill.sessions.length).toBe(1);
 
       // Bumps 2 through 10: ONLY `sess-1.toolcalls` grows (bytes 2..10 —

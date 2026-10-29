@@ -52,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       # First, and nothing else before it: `actions/checkout` defaults to
       # `clean: true` (a `git clean -ffdx` before checking out), which would
@@ -94,3 +95,42 @@ jobs:
             release/checksums.txt
           body_path: release/notes.md
           generate_release_notes: true
+
+      # The release above is already published by the time this runs, so a
+      # failure here is purely a fallback case, never a reason to touch the
+      # release itself: this step only opens a PR, it never pushes to main
+      # directly. Branches from origin/main (never the tag's own detached
+      # commit the earlier steps checked out) because that is what the PR
+      # targets. Reuses packaging/homebrew/update-formula.sh rather than
+      # re-implementing its hash-filling logic in YAML.
+      - name: Open the formula PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          branch="chore/formula-${version}"
+
+          git fetch origin main:refs/remotes/origin/main
+          git checkout -b "$branch" origin/main
+
+          packaging/homebrew/update-formula.sh "$version"
+
+          # A re-run of this job for a version already landed on main (the
+          # PR already merged, or the script already a no-op) must not
+          # create an empty commit or a duplicate PR — exit clean instead.
+          if git diff --quiet -- Formula/tenaza.rb; then
+            echo "Formula/tenaza.rb already points at v${version} on main — nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tenaza.rb
+          git commit -m "chore: point the formula at v${version}"
+          git push origin "$branch"
+
+          gh pr create \
+            --base main \
+            --title "chore: point the formula at v${version}" \
+            --body "Opened automatically by the release run that published v${version} (run ${GITHUB_RUN_ID}). \`Formula/tenaza.rb\` filled by \`packaging/homebrew/update-formula.sh ${version}\` from this release's own checksums.txt."

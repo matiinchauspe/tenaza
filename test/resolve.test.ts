@@ -579,6 +579,30 @@ describe("archiveSession", () => {
     }
   });
 
+  /**
+   * Ticket 06 (tenaza-v0-3, "a Session with no pid stops reading live
+   * after 24h of silence"): the ORIGINAL motivating bug — a pre-0.3.0
+   * Session that never captured a `pid` at all could never be confirmed
+   * gone, so `archiveSession` refused it with `not-ended` forever. Found
+   * 2026-10-28: 5 such Sessions never left the board.
+   */
+  test("ticket 06: a Session with no pid at all, silent past 24h, archives cleanly too — the pre-0.3.0 fallback", () => {
+    const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h, no pid at all
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: longAgo });
+
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "accepted", alreadyArchived: false });
+    const events = readHumanEvents(home);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "session.archived", session: "sess-1" });
+  });
+
+  test("ticket 06: the SAME no-pid Session, silent for LESS than 24h, still refuses with not-ended", () => {
+    const recentlyAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: recentlyAgo });
+
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "not-ended" });
+  });
+
   test("archiving twice is idempotent — no second Event, the second call reports alreadyArchived", () => {
     startSession(home, "sess-1");
     appendEvent(home, sessionEndedEvent("sess-1", "clear"));

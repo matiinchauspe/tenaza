@@ -1988,3 +1988,46 @@ describe("buildBoardPayload — ticket 02: a Session whose captured pid's proces
     expect(session?.endedAt).toBeUndefined(); // this test process itself is alive throughout
   });
 });
+
+/**
+ * Ticket 06 (tenaza-v0-3, "a Session with no pid stops reading live after
+ * 24h of silence"): the companion fallback — `closeDeadProcesses` can never
+ * confirm a pre-0.3.0 Session (no `pid` captured at all) gone, so
+ * `closeSilentPidlessSessions` takes over once it's been silent past the
+ * SAME 24h window the board's own TERMINÓ column (`TERMINO_WINDOW_MS`)
+ * uses.
+ */
+describe("buildBoardPayload — ticket 06: a Session with no pid at all, silent past 24h", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-daemon-ticket06-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("reads endedAt/a DISTINCT reason once silent for more than 24h with no pid ever captured — TERMINÓ, archivable (AC1)", () => {
+    const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h total silence
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: longAgo });
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.endedAt).toBeDefined();
+    // ADR 0010 (human's own call): `endedAt` is `lastEventTs + 24h`, the
+    // FIXED moment the silence crossed the line — so the board's own 24h
+    // TERMINÓ window reads this Session as TERMINÓ (archivable with "x")
+    // for total silence between 24h and 48h; 25h falls in that band. Past
+    // 48h it would drop off the board on its own (`test/sessions.test.ts`'s
+    // own boundary tests cover that purely).
+    expect(sessionColumn(session as SessionTiming, new Date(), 15)).toBe("termino");
+  });
+
+  test("AC2 / AC3: a no-pid Session silent for LESS than 24h stays alive — only the 24h fallback changes category, same as the real pid check never fires early", () => {
+    const recentlyAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: recentlyAgo });
+
+    const session = buildBoardPayload(home).sessions[0];
+    expect(session?.endedAt).toBeUndefined();
+  });
+});

@@ -28,7 +28,11 @@ _Avoid_: Metric, token count
 Whether a Session's runtime process (its OS pid, captured once at `session.started` and paired
 with a start marker against pid reuse) is still running — checked fresh on every read, never
 stored and never run from a hook. A Session whose process is confirmed gone reads as closed, with
-a reason distinct from a real `SessionEnd`, even though no such Event ever arrived.
+a reason distinct from a real `SessionEnd`, even though no such Event ever arrived. A Session with
+NO pid at all — every one started before `session.started` began capturing it (ADR 0008) — has
+nothing to check, so it falls back to a second, time-based rule instead (ADR 0010): silent for
+more than the board's own 24h TERMINÓ window, with no pid ever captured, reads as closed too, under
+its own distinct reason — never confusable with the pid-confirmed case above.
 _Avoid_: Heartbeat, ping, health check
 
 **Turn**:

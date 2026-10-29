@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { buildBoardViewModel, highlightedSessionId, sessionIdForCard, terminalLabelFor } from "../../../src/ui/board/viewModel";
+import {
+  buildBoardViewModel,
+  highlightedSessionId,
+  sessionIdForCard,
+  terminalLabelFor,
+  terminalReachForCard,
+} from "../../../src/ui/board/viewModel";
 import { makeBoardPayload, makeInboxItem, makeSession } from "../../support/boardFixture";
 
 const NOW = new Date("2026-01-02T00:00:00.000Z");
@@ -696,8 +702,8 @@ describe("terminalLabelFor (ticket 11, decision 09): the ONE place the button's 
     expect(terminalLabelFor("app", undefined)).toBe("abrir la terminal ↗");
   });
 
-  test("unknown reach — greyed, the ticket's own exact wording", () => {
-    expect(terminalLabelFor("unknown", undefined)).toBe("terminal desconocida");
+  test("unknown reach (ticket 07): empty — no card renders this value, the button itself is gone", () => {
+    expect(terminalLabelFor("unknown", undefined)).toBe("");
   });
 });
 
@@ -757,5 +763,26 @@ describe("sessionIdForCard (ticket 11): resolves ANY selected card id to the Ses
   test("an id naming nothing at all is undefined, never a guess", () => {
     const model = buildBoardViewModel(makeBoardPayload(), NOW);
     expect(sessionIdForCard(model, "no-such-card")).toBeUndefined();
+  });
+});
+
+describe("terminalReachForCard (ticket 07): resolves ANY selected card id to THAT card's own terminal reach", () => {
+  test("a Session card's own reach resolves directly", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "s1", terminalReach: "exact" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(terminalReachForCard(model, "s1")).toBe("exact");
+  });
+
+  test("a TE NECESITA card resolves to its OWN reach, carried verbatim from the Adapter, not its Session's", () => {
+    const payload = makeBoardPayload({
+      inbox: [makeInboxItem({ id: "p1", sessionId: "s1", terminalReach: "app", terminalAppLabel: "Warp" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(terminalReachForCard(model, "p1")).toBe("app");
+  });
+
+  test("an id naming nothing at all is undefined, never a guess", () => {
+    const model = buildBoardViewModel(makeBoardPayload(), NOW);
+    expect(terminalReachForCard(model, "no-such-card")).toBeUndefined();
   });
 });

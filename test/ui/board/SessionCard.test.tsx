@@ -172,6 +172,12 @@ describe("SessionCard — TE ESPERA block (ticket 10)", () => {
 describe("SessionCard — native wait block (ticket 14): observed only, never actionable", () => {
   function nativeWaitCard(kind: "permission_prompt" | "idle_prompt" = "permission_prompt"): SessionCardViewModel {
     return baseCard({
+      // Ticket 07: `baseCard()`'s own default reach is "unknown", which now
+      // renders NO terminal button at all — give this fixture a KNOWN reach
+      // so "still offers the terminal button" below actually exercises
+      // that claim, rather than passing by coincidence on the old greyed
+      // "terminal desconocida" text.
+      terminalReach: "exact",
       nativeWait: {
         kind,
         label: kind === "permission_prompt" ? "PERMISO NATIVO" : "INACTIVA",
@@ -342,7 +348,7 @@ describe("SessionCard — selection and cross-highlight (ticket 10)", () => {
   });
 });
 
-describe("SessionCard — the terminal button and TERMINÓ-only archive control (ticket 11)", () => {
+describe("SessionCard — the terminal button and TERMINÓ-only archive control (ticket 11, ticket 07)", () => {
   function terminalButton(container: HTMLElement): HTMLButtonElement | undefined {
     return [...container.querySelectorAll("button")].find((b) => !b.textContent?.includes("archivar")) as
       | HTMLButtonElement
@@ -354,12 +360,27 @@ describe("SessionCard — the terminal button and TERMINÓ-only archive control 
     expect(container.textContent).toContain("ir a terminal ↗");
   });
 
-  test("terminal button is disabled when reach is unknown, enabled otherwise", () => {
-    const unknown = renderCard({ card: baseCard({ terminalReach: "unknown" }) });
-    expect(terminalButton(unknown.container)?.disabled).toBe(true);
+  test("ticket 07: unknown reach renders NO terminal button at all — no empty slot or stray separator left behind", () => {
+    // Also covers "the t key does nothing on a card with unknown reach":
+    // with no button, there is no click target at all; the keyboard
+    // shortcut's own gate (`terminalReachForCard(...) === "unknown"`) lives
+    // one layer up, in `BoardApp.tsx`'s `onFocusTerminal` — the same place
+    // (and the same code-review-only coverage) the sibling TERMINÓ gate
+    // already relies on.
+    const { container } = renderCard({ card: baseCard({ terminalReach: "unknown" }) });
+    expect(terminalButton(container)).toBeUndefined();
+    expect(container.textContent).not.toContain("terminal");
+    // `showArchive` is false here, so the actions row has nothing else to
+    // show either — it must be left genuinely empty, not a hollow wrapper.
+    expect(container.querySelector(".session-card__actions")?.children.length).toBe(0);
+  });
 
+  test("known reach (exact or app) renders an always-enabled terminal button, unchanged by ticket 07", () => {
     const exact = renderCard({ card: baseCard({ terminalReach: "exact" }) });
     expect(terminalButton(exact.container)?.disabled).toBe(false);
+
+    const app = renderCard({ card: baseCard({ terminalReach: "app", terminalLabel: "abrir Warp ↗" }) });
+    expect(terminalButton(app.container)?.disabled).toBe(false);
   });
 
   test("a TCC-gated row carries the 'macOS va a pedir permiso' title", () => {

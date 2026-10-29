@@ -10,7 +10,13 @@ import { useDocumentTitle } from "./useDocumentTitle";
 import { useEventSource } from "./useEventSource";
 import { useInboxActions } from "./useInboxActions";
 import { useNow } from "./useNow";
-import { buildBoardViewModel, highlightedSessionId, sessionIdForCard, type BoardStats } from "./viewModel";
+import {
+  buildBoardViewModel,
+  highlightedSessionId,
+  sessionIdForCard,
+  terminalReachForCard,
+  type BoardStats,
+} from "./viewModel";
 
 const EVENTS_URL = "/events";
 
@@ -94,8 +100,11 @@ export function BoardApp() {
       if (itemId) actions.approve(itemId, message);
     },
     onFocusTerminal: (id) => {
-      // A TERMINÓ card has no terminal button, so `t` does nothing on it either.
-      if (!viewModel || terminoSessionIds.has(id)) return;
+      // A TERMINÓ card has no terminal button, so `t` does nothing on it
+      // either. Ticket 07 (tenaza-v0-3): neither does ANY card whose own
+      // terminal reach is unknown — same "no button, no key" rule, now
+      // covering CORRIENDO/TRABADA Session cards and TE NECESITA cards too.
+      if (!viewModel || terminoSessionIds.has(id) || terminalReachForCard(viewModel, id) === "unknown") return;
       const sessionId = sessionIdForCard(viewModel, id);
       if (sessionId) actions.focusTerminal(sessionId);
     },

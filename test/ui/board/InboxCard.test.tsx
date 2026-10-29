@@ -99,7 +99,7 @@ describe("InboxCard — action buttons (ticket 09)", () => {
   });
 });
 
-describe("InboxCard — the terminal button (ticket 11, 'from any card')", () => {
+describe("InboxCard — the terminal button (ticket 11, 'from any card'; ticket 07)", () => {
   test("renders the card's own already-formatted terminalLabel, with the t key", () => {
     const card = cardFor({ terminalReach: "exact", terminalAppLabel: "Orca" });
     const html = renderCard({ card });
@@ -113,13 +113,15 @@ describe("InboxCard — the terminal button (ticket 11, 'from any card')", () =>
     expect(html).toContain("abrir Warp ↗");
   });
 
-  test("unknown reach renders 'terminal desconocida' and the button itself as disabled", () => {
+  test("ticket 07: unknown reach renders NO terminal button at all — listo/descartar remain, no stray separator", () => {
     const html = renderCard({ card: cardFor({ terminalReach: "unknown" }) });
-    expect(html).toContain("terminal desconocida");
-    // The terminal button is the ONE disabled button on an item that still
-    // offers run/listo/descartar — `running: false` keeps the run button
-    // itself enabled here, so this count isolates the terminal one.
-    expect((html.match(/disabled/g) ?? []).length).toBe(1);
+    expect(html).not.toContain("terminal desconocida");
+    expect(html).not.toContain("<kbd>t</kbd>");
+    // `running: false` keeps the run button enabled, and the terminal
+    // button is now gone outright, so no disabled button remains at all.
+    expect(html).not.toContain("disabled");
+    expect(html).toContain("listo");
+    expect(html).toContain("descartar");
   });
 
   test("a TCC-gated row carries the 'macOS va a pedir permiso' title", () => {

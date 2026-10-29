@@ -1,7 +1,7 @@
 {
   "name": "tenaza",
   "displayName": "Tenaza",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Observes Claude Code sessions, enforces a Policy on human-reserved actions, and shows state — a decoupled control plane for coding agents.",
   "author": {
     "name": "matiinchauspe"

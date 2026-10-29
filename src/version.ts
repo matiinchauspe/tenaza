@@ -9,4 +9,4 @@
  * self-check (ADR 0007, ticket 02) reads it too, for the same reason: one
  * source of truth for "which Tenaza is this."
  */
-export const TENAZA_VERSION = "0.3.0";
+export const TENAZA_VERSION = "0.3.1";

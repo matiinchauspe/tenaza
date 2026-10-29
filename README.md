@@ -234,7 +234,12 @@ bun test
 bun run typecheck
 ```
 
-CI builds the release binaries on every `v*` tag. Design decisions live in [`docs/adr/`](docs/adr/).
+CI builds the release binaries on every `v*` tag, then opens a PR
+(`chore/formula-<version>`) that points `Formula/tenaza.rb` at the new release —
+run `packaging/homebrew/update-formula.sh <version>` by hand only if that job ever
+fails; merging the PR is still a human's step. It needs one repo setting: Settings →
+Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve
+pull requests". Design decisions live in [`docs/adr/`](docs/adr/).
 
 ## License
 

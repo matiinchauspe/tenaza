@@ -152,6 +152,46 @@ describe("sessionColumn", () => {
     const session = { endedAt: "2026-01-01T00:00:00.000Z", lastEventTs: "2025-01-01T00:00:00.000Z" };
     expect(sessionColumn(session, now, STALL_MINUTES)).toBe("termino");
   });
+
+  // Ticket 09 (tenaza-v0-3): a Session waiting for the human (a current
+  // `turnWait` or `nativeWait`) never reads as TRABADA, however long the
+  // silence that produced it has run — the board must agree with the CLI
+  // tree's own `categoryWord` (sessions.ts), which already lets "waiting"
+  // override "stalled" the same way.
+
+  test("a current turnWait keeps a silent Session CORRIENDO, never TRABADA", () => {
+    const now = new Date("2026-01-01T00:16:00.000Z"); // 16m silent, past STALL_MINUTES
+    const session = {
+      lastEventTs: "2026-01-01T00:00:00.000Z",
+      turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
+    };
+    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("corriendo");
+  });
+
+  test("a current nativeWait keeps a silent Session CORRIENDO, never TRABADA", () => {
+    const now = new Date("2026-01-01T00:16:00.000Z"); // 16m silent, past STALL_MINUTES
+    const session = {
+      lastEventTs: "2026-01-01T00:00:00.000Z",
+      nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
+    };
+    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("corriendo");
+  });
+
+  test("neither turnWait nor nativeWait — a silent Session still reads TRABADA (unchanged)", () => {
+    const now = new Date("2026-01-01T00:16:00.000Z");
+    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
+    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("trabada");
+  });
+
+  test("ended beats waiting too: an ended Session with a stale turnWait still reads TERMINÓ", () => {
+    const now = new Date("2026-01-01T12:00:00.000Z");
+    const session = {
+      endedAt: "2026-01-01T00:00:00.000Z",
+      lastEventTs: "2025-01-01T00:00:00.000Z",
+      turnWait: { since: "2025-01-01T00:00:00.000Z", backgroundCount: 0 },
+    };
+    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("termino");
+  });
 });
 
 describe("formatAge", () => {
@@ -418,6 +458,24 @@ describe("diffActivityFeed (ticket 12: the activity panel's own diff)", () => {
 
     expect(additions).toEqual([]);
     expect(next.has("s1")).toBe(false);
+  });
+
+  test("ticket 09: a waiting Session (current turnWait) never reports 'se trabó', even silent past stallMinutes", () => {
+    const t0 = new Date("2026-10-27T10:00:00.000Z");
+    const sess = session({
+      id: "s1",
+      project: "reservee",
+      lastEventTs: t0.toISOString(),
+      turnWait: { since: t0.toISOString(), backgroundCount: 0 },
+    });
+    const { next: afterFirst } = diffActivityFeed([sess], EMPTY, t0, STALL_MINUTES);
+    expect(afterFirst.get("s1")?.column).toBe("corriendo");
+
+    const t1 = new Date(t0.getTime() + 16 * 60 * 1000); // 16 min later, past the 15 min threshold
+    const { additions, next } = diffActivityFeed([sess], afterFirst, t1, STALL_MINUTES);
+
+    expect(additions).toEqual([]);
+    expect(next.get("s1")?.column).toBe("corriendo");
   });
 
   test("several Sessions diff independently in one tick — no cross-contamination", () => {

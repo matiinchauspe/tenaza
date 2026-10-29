@@ -23,11 +23,16 @@ notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appe
 
 - A session whose process died now reads as ended. `session.started` records the runtime's pid
   and its start time, and every read checks it (ADR 0008). A closed window, a `kill` or a crash
-  no longer leaves a session counted as "vivas" forever. Sessions recorded before 0.3.0 carry no
-  pid and keep reading alive until archived.
+  no longer leaves a session counted as "vivas" forever.
+- A session recorded before 0.3.0 has no pid, so it reads as ended after 24 hours with no events
+  (ADR 0010). It shows in TERMINÓ until 48 hours of silence, then leaves the board. A new event
+  brings it back.
 - A TERMINÓ card offers archivar instead of the terminal button, and `t` ignores it.
-- This repo is its own Homebrew tap: tap it by URL (`brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza`) and\n  install by full name (`brew install matiinchauspe/tenaza/tenaza`). The
-  separate `homebrew-tap` repo is gone. The README has an upgrade guide.
+- When Tenaza does not know a session's terminal, its card shows no terminal button at all
+  (before: a greyed "terminal desconocida"), and `t` ignores it.
+- This repo is its own Homebrew tap: tap it by URL
+  (`brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza`) and install by full name
+  (`brew install matiinchauspe/tenaza/tenaza`). The separate `homebrew-tap` repo is gone. The README has an upgrade guide.
 
 ### Fixed
 

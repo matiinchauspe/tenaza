@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.3.1] - 2026-10-29
+
+### Fixed
+
+- A session waiting for you no longer lands in TRABADA on the board. When its turn has ended, or
+  Claude Code is showing its own permission or idle prompt, it stays in CORRIENDO with its
+  ESPERÁNDOTE badge, however long you take. TRABADA now means only a session that was working and
+  went silent. The activity feed no longer reports "se trabó" for a waiting session either.
+  `tenaza status` already read these sessions this way.
+
 ## [0.3.0] - 2026-10-28
 
 ### Added

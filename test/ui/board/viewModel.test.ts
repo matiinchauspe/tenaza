@@ -30,6 +30,41 @@ describe("buildBoardViewModel — columns", () => {
     expect(model.corriendo.cards).toHaveLength(0);
   });
 
+  // Ticket 09 (tenaza-v0-3): a Session silent past stallMinutes stays in
+  // CORRIENDO — never TRABADA — while it carries a current turnWait or
+  // nativeWait. Before this fix, the board read a Session that had simply
+  // finished its Turn and was waiting on the human as TRABADA the instant
+  // the clock crossed stallMinutes, lying about whose move it was.
+  test("a Session silent past stallMinutes but carrying a current turnWait stays in CORRIENDO", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 — would be TRABADA without turnWait
+          turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards.map((c) => c.id)).toEqual(["a"]);
+    expect(model.trabada.cards).toHaveLength(0);
+  });
+
+  test("a Session silent past stallMinutes but carrying a current nativeWait stays in CORRIENDO", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({
+          id: "a",
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 — would be TRABADA without nativeWait
+          nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
+        }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards.map((c) => c.id)).toEqual(["a"]);
+    expect(model.trabada.cards).toHaveLength(0);
+  });
+
   test("a Session ended within 24h lands in TERMINÓ", () => {
     const payload = makeBoardPayload({
       sessions: [makeSession({ id: "a", endedAt: "2026-01-01T06:00:00.000Z" })],
@@ -369,18 +404,19 @@ describe("ticket 14: nativeWait — observed only, never actionable", () => {
     expect(model.corriendo.cards[0]?.nativeWait?.label).toBe("INACTIVA");
   });
 
-  test("a nativeWait on a TRABADA card still resolves — it is independent of the column's own stall classification", () => {
+  test("ticket 09 fix: a nativeWait keeps the Session in CORRIENDO (never TRABADA) and still resolves its own badge there", () => {
     const payload = makeBoardPayload({
       sessions: [
         makeSession({
           id: "a",
-          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 → TRABADA
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 — would be TRABADA without nativeWait
           nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
         }),
       ],
     });
     const model = buildBoardViewModel(payload, NOW);
-    expect(model.trabada.cards[0]?.nativeWait?.kind).toBe("idle_prompt");
+    expect(model.trabada.cards).toHaveLength(0);
+    expect(model.corriendo.cards[0]?.nativeWait?.kind).toBe("idle_prompt");
   });
 });
 
@@ -421,18 +457,19 @@ describe("ticket 05: turnWait — Turn state, observed only, never actionable", 
     expect(model.corriendo.cards[0]?.turnWait?.backgroundCount).toBe(2);
   });
 
-  test("a turnWait on a TRABADA card still resolves — it is independent of the column's own stall classification", () => {
+  test("ticket 09 fix: a turnWait keeps the Session in CORRIENDO (never TRABADA) and still resolves its own badge there", () => {
     const payload = makeBoardPayload({
       sessions: [
         makeSession({
           id: "a",
-          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 → TRABADA
+          lastEventTs: "2026-01-01T00:00:00.000Z", // 24h silent, stallMinutes 15 — would be TRABADA without turnWait
           turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
         }),
       ],
     });
     const model = buildBoardViewModel(payload, NOW);
-    expect(model.trabada.cards[0]?.turnWait).toBeDefined();
+    expect(model.trabada.cards).toHaveLength(0);
+    expect(model.corriendo.cards[0]?.turnWait).toBeDefined();
   });
 });
 

@@ -31,9 +31,21 @@ export type SessionColumn = "corriendo" | "trabada" | "termino";
 export interface SessionTiming {
   endedAt?: string;
   lastEventTs?: string;
+  /**
+   * Ticket 09 (tenaza-v0-3): present while a current Stop-derived wait
+   * applies (`sessions.ts`'s `turnWaitSince`, carried over SSE as
+   * `BoardSession.turnWait` — `contract/live.ts`). Only PRESENCE matters to
+   * `sessionColumn` below — the richer shape underneath (`since`,
+   * `backgroundCount`) is `viewModel.ts`'s own badge to resolve, never this
+   * file's, which is why this stays `unknown` rather than importing
+   * `TurnWait` and breaking the "zero imports" rule in this file's header.
+   */
+  turnWait?: unknown;
+  /** Same "presence only" convention as `turnWait` above, for a current native prompt (`sessions.ts`'s `nativeWaitFor`, carried as `BoardSession.nativeWait`). */
+  nativeWait?: unknown;
 }
 
-/** A Session with no Event at all (`lastEventTs` absent) is never stalled — there is nothing to measure silence against yet (mirrors `sessions.ts`'s own `isStalled`). */
+/** A Session with no Event at all (`lastEventTs` absent) is never stalled — there is nothing to measure silence against yet (mirrors `sessions.ts`'s own `isStalled`). Raw silence only: a current `turnWait`/`nativeWait` is `sessionColumn`'s own override below, never this function's — same split the CLI tree draws between `isStalled` (sessions.ts) and `categoryWord`'s turn-state check. */
 export function isSessionStalled(session: SessionTiming, now: Date, stallMinutes: number): boolean {
   if (!session.lastEventTs) return false;
   const thresholdMs = stallMinutes * 60 * 1000;
@@ -49,12 +61,24 @@ export function isSessionStalled(session: SessionTiming, now: Date, stallMinutes
  * alike, as its own independent card (spec's user story 9), so there is no
  * parent to roll up into — `parentId` is shown on the card for context
  * only (the "↳ parent" label).
+ *
+ * Ticket 09 (tenaza-v0-3): a Session between Turns (`turnWait`) or sitting
+ * behind a native prompt (`nativeWait`) never reads TRABADA, however long
+ * the silence that produced it has run — a KNOWN cause for the silence
+ * ("the agent handed back and is waiting on you") is never confused with an
+ * UNKNOWN one, the exact distinction the CLI tree already draws
+ * (`sessions.ts`'s `categoryWord`, which lets `turn === "waiting"` override
+ * `stalled` the same way). The card's own ESPERÁNDOTE / native-wait badge
+ * (`viewModel.ts`'s `toTurnWait`/`toNativeWait`) renders regardless of
+ * column, so this never hides that signal — it only stops TRABADA from
+ * lying about whose move it is.
  */
 export function sessionColumn(session: SessionTiming, now: Date, stallMinutes: number): SessionColumn | undefined {
   if (session.endedAt !== undefined) {
     const endedAgoMs = now.getTime() - new Date(session.endedAt).getTime();
     return endedAgoMs <= TERMINO_WINDOW_MS ? "termino" : undefined;
   }
+  if (session.turnWait !== undefined || session.nativeWait !== undefined) return "corriendo";
   return isSessionStalled(session, now, stallMinutes) ? "trabada" : "corriendo";
 }
 
@@ -213,7 +237,7 @@ export interface ActivityResolution {
   ts: string;
 }
 
-/** The subset of a Session this diff reads — `SessionTiming`'s own two fields (for the column classification) plus what a feed LINE needs to read (its label) and what its resolutions the diff watches for new ones. */
+/** The subset of a Session this diff reads — `SessionTiming`'s own fields (for the column classification, ticket 09's `turnWait`/`nativeWait` included — `useActivityFeed.ts` must carry them through or this diff can never tell a waiting Session from a stalled one) plus what a feed LINE needs to read (its label) and what its resolutions the diff watches for new ones. */
 export interface ActivitySession extends SessionTiming {
   id: string;
   project: string;

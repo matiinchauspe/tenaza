@@ -37,6 +37,12 @@ export function useActivityFeed(payload: BoardPayload | undefined, now: Date): r
       ticket: session.ticket,
       endedAt: session.endedAt,
       lastEventTs: session.lastEventTs,
+      // Ticket 09 (tenaza-v0-3): carried through so this diff's own internal
+      // `sessionColumn` call (board.ts) can tell a waiting Session from a
+      // stalled one — dropping these here would silently undo that fix for
+      // the activity panel alone, even with `sessionColumn` itself correct.
+      turnWait: session.turnWait,
+      nativeWait: session.nativeWait,
       resolutions: session.resolutions,
     }));
 

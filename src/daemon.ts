@@ -42,6 +42,7 @@ import {
   buildSessionIndex,
   childrenIndex,
   closeDeadProcesses,
+  closeSilentPidlessSessions,
   countActiveDescendants,
   createCachingGitRootResolver,
   deriveProject,
@@ -322,6 +323,10 @@ export function buildBoardPayload(
   // AFTER the touch merge above so a synthetic `endedAt` reflects the
   // Session's true last-known activity, touch files included.
   closeDeadProcesses(fullIndex);
+  // Ticket 06 (tenaza-v0-3): the no-pid fallback, same point — a pre-0.3.0
+  // Session `closeDeadProcesses` can never confirm gone still reaches this
+  // board for free.
+  closeSilentPidlessSessions(fullIndex);
   const eventTypes = eventTypesBySession(events);
   // Ticket 11: an archived Session's card is hidden from the BOARD alone
   // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered

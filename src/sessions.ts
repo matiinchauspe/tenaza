@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { TERMINO_WINDOW_MS } from "./board";
 import type { Action, Capability, Event, NotificationKind, TerminalLocator } from "./contract/event";
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
@@ -352,6 +353,92 @@ export function closeDeadProcesses(
     if (!isProcessGone(node, startMarkers)) continue;
     node.endedAt = node.lastEventTs ?? now.toISOString();
     node.endedReason = PROCESS_GONE_REASON;
+  }
+}
+
+/**
+ * Ticket 06 ("a Session with no pid stops reading live after 24h of
+ * silence"): Tenaza's own word for a Session closed by THIS rule —
+ * distinct from `PROCESS_GONE_REASON` (AC: "the ended reason is
+ * distinguishable from `process_gone`... so a reader can tell the two
+ * apart"). Same "purely an internal marker, never a Rule a human would see"
+ * convention `PROCESS_GONE_REASON` already follows.
+ */
+export const NO_PID_SILENT_REASON = "no_pid_silent";
+
+/**
+ * Ticket 06: is `node` a transition-era Session gone silent long enough to
+ * read as ended? Every Session started before `session.started` began
+ * capturing `pid` (ADR 0008, ticket 02 — every Session from the 0.2.0
+ * binary) carries NO `pid` at all, which means `isProcessGone`/
+ * `closeDeadProcesses` can NEVER confirm one of these gone — there is
+ * nothing to check against the live process table (`isProcessGone`'s own
+ * "missing information is not evidence of death" rule, untouched by this
+ * ticket). Found 2026-10-28: the statusline read "7 vivas" while only 2
+ * `claude` processes existed — 5 pre-0.3.0 Sessions with no `pid` could
+ * never be confirmed gone, and `archiveSession` refused to remove them
+ * (`resolve.ts`) since nothing could ever set their `endedAt` either.
+ *
+ * `windowMs` is `TERMINO_WINDOW_MS` (`board.ts`) by default — the SAME 24h
+ * the board's own TERMINÓ column already uses (AC: "reuse… never a second
+ * magic number"), not a new number invented for this rule (ADR 0010).
+ *
+ * A Session that already has a real end, or one that carries a `pid` at
+ * all (the real `closeDeadProcesses` check owns that one — AC: "a Session
+ * WITH a pid is never touched by this rule"), is never a candidate here —
+ * the two rules are mutually exclusive by construction, so they can never
+ * disagree about the same Session. A Session with no `lastEventTs` at all
+ * (no Event has ever named it) has nothing to measure silence against yet,
+ * the same convention `isStalled` already follows.
+ */
+export function isPidlessSilent(node: SessionNode, now: Date, windowMs: number = TERMINO_WINDOW_MS): boolean {
+  if (node.pid !== undefined) return false;
+  if (node.endedAt !== undefined) return false;
+  if (node.lastEventTs === undefined) return false;
+  return now.getTime() - new Date(node.lastEventTs).getTime() > windowMs;
+}
+
+/**
+ * Ticket 06: `closeDeadProcesses`'s own companion for a Session it can
+ * never confirm gone — `isPidlessSilent`'s own shape, closed the SAME way a
+ * real `SessionEnd` would read (`endedAt`/`endedReason` set, never written
+ * back to the log — ADR 0002, recomputed fresh on every call, exactly
+ * `closeDeadProcesses`'s own convention). Called right after
+ * `closeDeadProcesses` at every one of its own call sites
+ * (`renderSessionTree`, `statusline.ts`'s `deriveStatuslineCounts`,
+ * `daemon.ts`'s board payload, `resolve.ts`'s `archiveSession`) so this fix
+ * reaches every surface for free — ticket 02's own "one rule, never
+ * disagreeing" convention (AC1), extended rather than duplicated.
+ *
+ * `endedAt` is `lastEventTs` PLUS `windowMs` (ADR 0010, human's own call)
+ * — the FIXED moment this Session's silence first crossed the 24h line,
+ * never `lastEventTs` bare and never `now`. A bare `lastEventTs` would read
+ * the board's own TERMINÓ window (`board.ts`'s `sessionColumn`, the SAME
+ * `TERMINO_WINDOW_MS`) as already past its 24h the instant this rule can
+ * even fire, dropping the card before a human ever sees it. `now` was tried
+ * first and rejected: it moves on every read, so the card never ages out of
+ * TERMINÓ on its own and a human has to archive every single one by hand.
+ * This fixed stamp gives the board exactly the SAME 24h-wide TERMINÓ
+ * window every other ended Session gets, just shifted to start when the
+ * silence crossed the line rather than when the last real Event landed —
+ * the card is TERMINÓ (and archivable with "x") from 24h to 48h of total
+ * silence, then drops off the board on its own past 48h, exactly like any
+ * other ended Session ages out. A Session already silent past 48h the
+ * first time this rule ever observes it simply never shows on the board at
+ * all — accepted (ADR 0010): there is no real end moment to recover for
+ * data that stale, and `tenaza status`/the statusline still read it as
+ * ended regardless (they gate on `endedAt !== undefined` alone, never on
+ * the board's own window).
+ */
+export function closeSilentPidlessSessions(
+  index: ReadonlyMap<string, SessionNode>,
+  now: Date = new Date(),
+  windowMs: number = TERMINO_WINDOW_MS,
+): void {
+  for (const node of index.values()) {
+    if (!isPidlessSilent(node, now, windowMs) || node.lastEventTs === undefined) continue;
+    node.endedAt = new Date(new Date(node.lastEventTs).getTime() + windowMs).toISOString();
+    node.endedReason = NO_PID_SILENT_REASON;
   }
 }
 
@@ -798,6 +885,7 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
 
   const index = buildSessionIndex(events);
   closeDeadProcesses(index, now); // ticket 02, AC1: the SAME rule statusline and the board apply
+  closeSilentPidlessSessions(index, now); // ticket 06: the no-pid fallback, same point
   const eventTypes = eventTypesBySession(events);
   const nodes = [...index.values()].filter(
     (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason),

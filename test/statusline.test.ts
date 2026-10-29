@@ -101,11 +101,18 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
   });
 
   test("with two open items, the line names the most urgent (most recently opened) one and counts both (AC1)", () => {
+    // Ticket 06 (tenaza-v0-3): recent, `Date.now()`-relative timestamps, not
+    // a fixed calendar date — `deriveStatuslineCounts` takes no injectable
+    // `now`, and these Sessions carry no `pid`, so a STALE fixture date
+    // would now (correctly) read as silent past 24h and drop out of
+    // "vivas," which is not what this test is about.
+    const firstTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const secondTs = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     appendEvent(
       home,
       {
         v: 1,
-        ts: "2026-10-23T10:00:00.000Z",
+        ts: firstTs,
         session: "sess-1",
         type: "action.decided",
         data: {
@@ -119,7 +126,7 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
       home,
       {
         v: 1,
-        ts: "2026-10-23T10:05:00.000Z",
+        ts: secondTs,
         session: "sess-2",
         type: "action.decided",
         data: {
@@ -274,6 +281,30 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
       } finally {
         proc.kill();
       }
+    });
+  });
+
+  /**
+   * Ticket 06 (tenaza-v0-3, "a Session with no pid stops reading live
+   * after 24h of silence"): the companion fallback for a Session that
+   * NEVER captured a `pid` at all — every Session started under the 0.2.0
+   * binary, before `pid` capture shipped (ADR 0008). Found 2026-10-28: the
+   * statusline read "7 vivas" while only 2 `claude` processes existed —
+   * the other 5 had no `pid` to check at all.
+   */
+  describe("ticket 06 — a pre-0.3.0 Session with no pid never counts toward vivas once silent past 24h", () => {
+    test("stays live while silent for LESS than 24h — only the 24h fallback changes category", () => {
+      const recentlyAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h
+      appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/a", capabilities: [] }), ts: recentlyAgo });
+
+      expect(deriveStatuslineCounts(home).live).toBe(1);
+    });
+
+    test("no longer live once silent for MORE than 24h, with no pid ever captured", () => {
+      const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h
+      appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/a", capabilities: [] }), ts: longAgo });
+
+      expect(deriveStatuslineCounts(home).live).toBe(0);
     });
   });
 });

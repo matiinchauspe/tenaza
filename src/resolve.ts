@@ -9,6 +9,7 @@ import { runFailureTrailer } from "./runoutput";
 import {
   buildSessionIndex,
   closeDeadProcesses,
+  closeSilentPidlessSessions,
   cwdForSession,
   isArchived,
   latestArchiveTimestamps,
@@ -357,10 +358,17 @@ export type ArchiveResult = ArchiveRefusal | { kind: "accepted"; alreadyArchived
  * `not-ended`. Scoped to this Session's own `pid` alone (never a second,
  * cross-Session `ps` read) — the SAME single-node index this function
  * already builds, unchanged otherwise.
+ *
+ * Ticket 06 (tenaza-v0-3): `closeSilentPidlessSessions` runs right after,
+ * the SAME point its own other three call sites apply it — a pre-0.3.0
+ * Session with no `pid` that has gone silent past the 24h window is the
+ * ORIGINAL motivating bug here (`archiveSession` used to refuse it with
+ * `not-ended` forever, since nothing could ever set its `endedAt`).
  */
 export function archiveSession(home: string, sessionId: string): ArchiveResult {
   const index = buildSessionIndex(readSessionEvents(sessionId, home));
   closeDeadProcesses(index);
+  closeSilentPidlessSessions(index);
   const node = index.get(sessionId);
   if (!node) throw new UnknownSessionError(sessionId);
   if (node.endedAt === undefined) return { kind: "not-ended" };

@@ -2,18 +2,22 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { TERMINO_WINDOW_MS, sessionColumn } from "../src/board";
 import { decideAction } from "../src/decide";
 import { appendEvent, appendHumanEvent } from "../src/log";
 import { captureProcessMarker } from "../src/terminallocator";
 import { touchSession } from "../src/toolcalls";
 import {
+  NO_PID_SILENT_REASON,
   PROCESS_GONE_REASON,
   buildSessionIndex,
   categoryWord,
   closeDeadProcesses,
+  closeSilentPidlessSessions,
   deriveProject,
   isArchived,
   isNoiseSession,
+  isPidlessSilent,
   isProcessGone,
   isStalled,
   latestArchiveTimestamps,
@@ -612,6 +616,155 @@ describe("closeDeadProcesses — real `ps` (no injection): end-to-end over an ac
     } finally {
       proc.kill();
     }
+  });
+});
+
+describe("isPidlessSilent (ticket 06, tenaza-v0-3 — a Session with no pid stops reading live after 24h of silence)", () => {
+  test("no pid at all, silent past the 24h window, reads as silent (the pre-0.3.0 fallback)", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-01T00:00:00.000Z" },
+    ]);
+    const node = index.get("sess-1")!;
+    const now = new Date(new Date(node.lastEventTs!).getTime() + TERMINO_WINDOW_MS + 1);
+    expect(isPidlessSilent(node, now)).toBe(true);
+  });
+
+  test("silent for exactly the window (not yet PAST it) still reads alive", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-01T00:00:00.000Z" },
+    ]);
+    const node = index.get("sess-1")!;
+    const now = new Date(new Date(node.lastEventTs!).getTime() + TERMINO_WINDOW_MS);
+    expect(isPidlessSilent(node, now)).toBe(false);
+  });
+
+  test("a Session WITH a pid is never a candidate, however long it's been silent (AC: pid wins, closeDeadProcesses owns it)", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111 }), ts: "2026-10-01T00:00:00.000Z" },
+    ]);
+    const node = index.get("sess-1")!;
+    expect(isPidlessSilent(node, new Date("2026-10-28T00:00:00.000Z"))).toBe(false);
+  });
+
+  test("a Session that already has a real SessionEnd is never a candidate here either", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-01T00:00:00.000Z" },
+      sessionEndedEvent("sess-1", "clear"),
+    ]);
+    const node = index.get("sess-1")!;
+    expect(isPidlessSilent(node, new Date("2026-10-28T00:00:00.000Z"))).toBe(false);
+  });
+
+  test("no Event at all (no lastEventTs) has nothing to measure silence against yet", () => {
+    const node = { id: "sess-1", capabilities: [], labels: {} } as unknown as Parameters<typeof isPidlessSilent>[0];
+    expect(isPidlessSilent(node, new Date())).toBe(false);
+  });
+});
+
+describe("closeSilentPidlessSessions (ticket 06, tenaza-v0-3)", () => {
+  test("closes a no-pid Session silent past the 24h window with a DISTINCT reason from PROCESS_GONE_REASON", () => {
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: lastEventTs },
+    ]);
+    const now = new Date("2026-10-28T00:00:00.000Z"); // well past 24h of silence
+    closeSilentPidlessSessions(index, now);
+    const node = index.get("sess-1")!;
+    // ADR 0010 (human's own call): `endedAt` is the FIXED moment the
+    // silence first crossed the window (`lastEventTs + TERMINO_WINDOW_MS`)
+    // — never `now`, which would move on every read and never let the
+    // card age out of TERMINÓ on its own.
+    expect(node.endedAt).toBe(new Date(new Date(lastEventTs).getTime() + TERMINO_WINDOW_MS).toISOString());
+    expect(node.endedReason).toBe(NO_PID_SILENT_REASON);
+    expect(node.endedReason).not.toBe(PROCESS_GONE_REASON);
+  });
+
+  test("a Session WITH a pid is never touched by this rule (AC3) — closeDeadProcesses owns that one", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111 }), ts: "2026-10-01T00:00:00.000Z" },
+    ]);
+    closeSilentPidlessSessions(index, new Date("2026-10-28T00:00:00.000Z"));
+    expect(index.get("sess-1")!.endedAt).toBeUndefined();
+  });
+
+  test("a subagent with no pid follows the SAME rule on its own node (AC4) — nodeCategory agrees too", () => {
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("parent-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-01T00:00:00.000Z" },
+      {
+        ...sessionStartedEvent("child-1", { parent: "parent-1", runtime: "claude", cwd: "/repo", capabilities: [] }),
+        ts: "2026-10-01T00:00:00.000Z",
+      },
+    ]);
+    const now = new Date("2026-10-28T00:00:00.000Z");
+    closeSilentPidlessSessions(index, now);
+    expect(index.get("parent-1")!.endedReason).toBe(NO_PID_SILENT_REASON);
+    expect(index.get("child-1")!.endedReason).toBe(NO_PID_SILENT_REASON);
+    expect(nodeCategory(index.get("parent-1")!, new Set())).toBe("ended");
+    expect(nodeCategory(index.get("child-1")!, new Set())).toBe("done");
+  });
+
+  test("a new Event after the close makes it read alive again, derived fresh with no extra step (AC2)", () => {
+    const events = [
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: "2026-10-01T00:00:00.000Z" },
+    ];
+    const staleIndex = buildSessionIndex(events);
+    closeSilentPidlessSessions(staleIndex, new Date("2026-10-28T00:00:00.000Z"));
+    expect(staleIndex.get("sess-1")!.endedAt).toBeDefined();
+
+    // A fresh Event lands — re-derived from scratch, exactly how every real
+    // caller rebuilds the index on its next read; nothing was ever written
+    // back to the log for the synthetic close above.
+    const revived = [...events, { ...usageSampledEvent("sess-1", { context_tokens: 1000 }), ts: "2026-10-28T00:00:00.000Z" }];
+    const freshIndex = buildSessionIndex(revived);
+    closeSilentPidlessSessions(freshIndex, new Date("2026-10-28T00:00:00.001Z"));
+    expect(freshIndex.get("sess-1")!.endedAt).toBeUndefined();
+  });
+
+  /**
+   * ADR 0010 (human's own call, 2026-10-28): `endedAt` is `lastEventTs +
+   * TERMINO_WINDOW_MS`, the FIXED moment the silence crossed the 24h line
+   * — so the board's own 24h TERMINÓ window, measured from THAT stamp,
+   * covers total silence from 24h to 48h. Past 48h the card drops off the
+   * board on its own, the same way any other ended Session ages out —
+   * never a human archiving every single one by hand.
+   */
+  test("between 24h and 48h of total silence, the board reads the Session as TERMINÓ, archivable with x", () => {
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: lastEventTs },
+    ]);
+    // 36h of total silence: past the 24h threshold that fires this rule,
+    // still inside the SECOND 24h window the board measures from the
+    // synthesized endedAt (lastEventTs + 24h).
+    const now = new Date(new Date(lastEventTs).getTime() + 36 * 60 * 60 * 1000);
+    closeSilentPidlessSessions(index, now);
+    const node = index.get("sess-1")!;
+    expect(sessionColumn({ endedAt: node.endedAt, lastEventTs: node.lastEventTs }, now, 15)).toBe("termino");
+  });
+
+  test("at exactly 48h of total silence, still (inclusively) TERMINÓ — the same <= boundary every TERMINÓ card gets", () => {
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: lastEventTs },
+    ]);
+    const now = new Date(new Date(lastEventTs).getTime() + 2 * TERMINO_WINDOW_MS);
+    closeSilentPidlessSessions(index, now);
+    const node = index.get("sess-1")!;
+    expect(sessionColumn({ endedAt: node.endedAt, lastEventTs: node.lastEventTs }, now, 15)).toBe("termino");
+  });
+
+  test("past 48h of total silence, the board drops the card — never rendered, the accepted trade (AC1)", () => {
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const index = buildSessionIndex([
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: lastEventTs },
+    ]);
+    const now = new Date(new Date(lastEventTs).getTime() + 2 * TERMINO_WINDOW_MS + 1);
+    closeSilentPidlessSessions(index, now);
+    const node = index.get("sess-1")!;
+    // Still "ended" on tenaza status / the statusline — those gate on
+    // `endedAt !== undefined` alone, never on the board's own window.
+    expect(node.endedAt).toBeDefined();
+    expect(sessionColumn({ endedAt: node.endedAt, lastEventTs: node.lastEventTs }, now, 15)).toBeUndefined();
   });
 });
 

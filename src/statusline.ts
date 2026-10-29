@@ -5,7 +5,7 @@ import { type InboxItem, deriveInbox, shortIdIndex } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
-import { buildSessionIndex, closeDeadProcesses, nodeCategory } from "./sessions";
+import { buildSessionIndex, closeDeadProcesses, closeSilentPidlessSessions, nodeCategory } from "./sessions";
 import { describeAction } from "./status";
 
 /**
@@ -58,6 +58,7 @@ export function deriveStatuslineCounts(home: string = tenazaHome()): StatuslineC
   const events = readAllSessionEvents(home);
   const index = buildSessionIndex(events);
   closeDeadProcesses(index); // ticket 02, AC1: the SAME rule `tenaza status` and the board apply
+  closeSilentPidlessSessions(index); // ticket 06 (tenaza-v0-3): the no-pid fallback, same point
   const inbox = deriveInbox(home);
   const waiting = new Set(inbox.map((row) => row.session));
   const thresholdTokens = loadPolicy(home).thresholdTokens;

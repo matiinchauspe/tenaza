@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildBoardViewModel,
   highlightedSessionId,
+  resolveBoardKeyAction,
   sessionIdForCard,
   terminalLabelFor,
   terminalReachForCard,
@@ -821,5 +822,104 @@ describe("terminalReachForCard (ticket 07): resolves ANY selected card id to THA
   test("an id naming nothing at all is undefined, never a guess", () => {
     const model = buildBoardViewModel(makeBoardPayload(), NOW);
     expect(terminalReachForCard(model, "no-such-card")).toBeUndefined();
+  });
+});
+
+describe("resolveBoardKeyAction (deepening ticket 04): one key x card-kind table — BoardApp only ever dispatches what this returns", () => {
+  test("d on an Inbox card resolves to done, targeting the card's own id", () => {
+    const payload = makeBoardPayload({ inbox: [makeInboxItem({ id: "inbox-1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "inbox-1", "d")).toEqual({ kind: "done", id: "inbox-1" });
+  });
+
+  test("d on a Session card, in any column, resolves to nothing", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({ id: "running", lastEventTs: NOW.toISOString() }),
+        makeSession({ id: "ended", endedAt: "2026-01-01T12:00:00.000Z" }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "running", "d")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "ended", "d")).toBeUndefined();
+  });
+
+  test("x on an Inbox card resolves to dismiss, targeting the card's own id", () => {
+    const payload = makeBoardPayload({ inbox: [makeInboxItem({ id: "inbox-1" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "inbox-1", "x")).toEqual({ kind: "dismiss", id: "inbox-1" });
+  });
+
+  test("x on a TERMINÓ Session card resolves to archive, targeting the card's own id", () => {
+    const payload = makeBoardPayload({ sessions: [makeSession({ id: "s1", endedAt: "2026-01-01T12:00:00.000Z" })] });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "s1", "x")).toEqual({ kind: "archive", id: "s1" });
+  });
+
+  test("x on a CORRIENDO or TRABADA Session card resolves to nothing", () => {
+    const payload = makeBoardPayload({
+      sessions: [
+        makeSession({ id: "running", lastEventTs: NOW.toISOString() }),
+        makeSession({ id: "stalled", lastEventTs: "2026-01-01T00:00:00.000Z" }),
+      ],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "running", "x")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "stalled", "x")).toBeUndefined();
+  });
+
+  test("a on a Session card carrying a live Inbox item resolves to answer, targeting the ITEM's own id — never the Session's (ticket 12's bug, now structurally impossible)", () => {
+    const payload = makeBoardPayload({
+      policy: { stallMinutes: 15, contextThresholdTokens: 200_000, waitSeconds: 180 },
+      sessions: [makeSession({ id: "sess-1", lastEventTs: NOW.toISOString() })],
+      inbox: [makeInboxItem({ id: "item-1", sessionId: "sess-1", decision: "held", ts: NOW.toISOString() })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "sess-1", "a")).toEqual({ kind: "answer", id: "item-1" });
+  });
+
+  test("a elsewhere — a Session card with no live Inbox item, or a TE NECESITA card itself — resolves to nothing", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "sess-1", lastEventTs: NOW.toISOString() })],
+      inbox: [makeInboxItem({ id: "pending-1" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "sess-1", "a")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "pending-1", "a")).toBeUndefined();
+  });
+
+  test("t resolves to focusTerminal against the OWNING Session's id, from any card kind whose own terminal reach isn't unknown", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "sess-1", terminalReach: "exact", lastEventTs: NOW.toISOString() })],
+      inbox: [makeInboxItem({ id: "inbox-1", sessionId: "sess-1", terminalReach: "app", terminalAppLabel: "Warp" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "sess-1", "t")).toEqual({ kind: "focusTerminal", id: "sess-1" });
+    // The TE NECESITA card's own id resolves to its OWNING Session, never the item's own id.
+    expect(resolveBoardKeyAction(model, "inbox-1", "t")).toEqual({ kind: "focusTerminal", id: "sess-1" });
+  });
+
+  test("t never fires on a TERMINÓ card, even with a known terminal reach", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "s1", endedAt: "2026-01-01T12:00:00.000Z", terminalReach: "exact" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "s1", "t")).toBeUndefined();
+  });
+
+  test("t never fires when the card's own terminal reach is unknown", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "s1", terminalReach: "unknown", lastEventTs: NOW.toISOString() })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(resolveBoardKeyAction(model, "s1", "t")).toBeUndefined();
+  });
+
+  test("every key resolves to nothing for an id naming no card at all", () => {
+    const model = buildBoardViewModel(makeBoardPayload(), NOW);
+    expect(resolveBoardKeyAction(model, "no-such-card", "d")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "no-such-card", "x")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "no-such-card", "a")).toBeUndefined();
+    expect(resolveBoardKeyAction(model, "no-such-card", "t")).toBeUndefined();
   });
 });

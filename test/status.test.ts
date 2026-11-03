@@ -183,4 +183,53 @@ effect = "human"
     expect(treeLine).not.toContain("esperándote");
     expect(treeLine).toContain("vivo");
   });
+
+  test("deepening ticket 02: a custom [live] stall_minutes governs the CLI's own stall read, not the old hardcoded 15 min", () => {
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      `
+[[rule]]
+match = "gh pr merge"
+effect = "human"
+
+[live]
+stall_minutes = 30
+`,
+    );
+    appendEvent(home, {
+      ...sessionStartedEvent("under-threshold", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+      ts: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    });
+    appendEvent(home, {
+      ...sessionStartedEvent("over-threshold", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+      ts: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+    });
+
+    const output = renderStatus(home);
+    const underLine = output.split("\n").find((line) => line.includes("under-threshold"))!;
+    const overLine = output.split("\n").find((line) => line.includes("over-threshold"))!;
+
+    expect(underLine).not.toContain("sin señal");
+    expect(underLine).toContain("vivo");
+    expect(overLine).toContain("sin señal");
+  });
+
+  test("deepening ticket 02: with no [live] stall_minutes configured, the CLI still reads the Policy's own default of 15 min", () => {
+    // beforeEach's policy.toml carries no [live] section at all.
+    appendEvent(home, {
+      ...sessionStartedEvent("under-threshold", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+      ts: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+    appendEvent(home, {
+      ...sessionStartedEvent("over-threshold", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+      ts: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+    });
+
+    const output = renderStatus(home);
+    const underLine = output.split("\n").find((line) => line.includes("under-threshold"))!;
+    const overLine = output.split("\n").find((line) => line.includes("over-threshold"))!;
+
+    expect(underLine).not.toContain("sin señal");
+    expect(overLine).toContain("sin señal");
+  });
 });

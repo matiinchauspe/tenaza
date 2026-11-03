@@ -228,14 +228,16 @@ export function categoryWord(
 }
 
 /**
- * No recent Event past this age reads as stalled — an implementation choice
- * the ticket explicitly leaves to the code, not the spec. 15 minutes: long
- * enough that an ordinary pause between tool calls never trips it, short
- * enough to flag a Session that has genuinely gone quiet.
+ * Deepening ticket 02: `thresholdMs` is never defaulted here — same
+ * convention `board.ts`'s own `isSessionStalled` already follows, and for
+ * the same reason (the doc comment at the top of that file). It always
+ * comes from the ONE place the Policy is read (`policy.ts`'s
+ * `DEFAULT_STALL_MINUTES`, via `loadPolicy(home).stallMinutes` in
+ * `renderSessionTree` below); a second hardcoded default here is exactly
+ * what let the CLI tree and the board disagree on when a Session reads
+ * stalled.
  */
-export const STALL_THRESHOLD_MS = 15 * 60 * 1000;
-
-export function isStalled(node: SessionNode, now: Date, thresholdMs: number = STALL_THRESHOLD_MS): boolean {
+export function isStalled(node: SessionNode, now: Date, thresholdMs: number): boolean {
   if (!node.lastEventTs) return false;
   return now.getTime() - new Date(node.lastEventTs).getTime() > thresholdMs;
 }
@@ -933,13 +935,14 @@ function renderNode(
   waiting: ReadonlySet<string>,
   now: Date,
   thresholdTokens: number,
+  stallThresholdMs: number,
   prefix: string,
   isLast: boolean,
   isRoot: boolean,
   lines: string[],
 ): void {
   const category = rollupCategory(node, childrenOf, waiting);
-  const stalled = isStalled(node, now);
+  const stalled = isStalled(node, now, stallThresholdMs);
   // Ticket 05: this node's OWN Turn state and background count — never
   // rolled up from descendants (unlike `category` above), since each one
   // already renders its own row right below its parent's.
@@ -959,6 +962,7 @@ function renderNode(
       waiting,
       now,
       thresholdTokens,
+      stallThresholdMs,
       isRoot ? "  " : prefix + (isLast ? "  " : "│ "),
       i === children.length - 1,
       false,
@@ -1001,14 +1005,30 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   const childrenOf = childrenIndex(nodes);
   const waiting = new Set(deriveInbox(home).map((row) => row.session));
   const groups = groupRootsByProject(nodes, projectOf);
-  const thresholdTokens = loadPolicy(home).thresholdTokens;
+  const policy = loadPolicy(home);
+  const thresholdTokens = policy.thresholdTokens;
+  // Deepening ticket 02: the Policy's own `stallMinutes` — the SAME field
+  // the board reads (`policy.ts`'s `DEFAULT_STALL_MINUTES` when absent) —
+  // never a second hardcoded threshold here.
+  const stallThresholdMs = policy.stallMinutes * 60 * 1000;
 
   const lines: string[] = [];
   for (const project of [...groups.keys()].sort()) {
     lines.push(project);
     const roots = groups.get(project) ?? [];
     roots.forEach((root, i) =>
-      renderNode(root, childrenOf, waiting, now, thresholdTokens, "", i === roots.length - 1, true, lines),
+      renderNode(
+        root,
+        childrenOf,
+        waiting,
+        now,
+        thresholdTokens,
+        stallThresholdMs,
+        "",
+        i === roots.length - 1,
+        true,
+        lines,
+      ),
     );
     lines.push("");
   }

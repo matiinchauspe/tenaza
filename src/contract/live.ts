@@ -127,7 +127,8 @@ export type ResolutionTraceEntry = z.infer<typeof ResolutionTraceEntrySchema>;
  * (`deriveProject`, `sessions.ts`) server-side, since that shells out to
  * `git` and is never shippable to a browser bundle. Everything else here
  * is a plain fact the client's pure functions classify against a ticking
- * clock: `sessionColumn`, `isSessionStalled` and `formatAge` (`board.ts`).
+ * clock: `sessionColumn` and `formatAge` (`board.ts`, leaning on
+ * `sessionstate.ts` for the state itself).
  */
 export const BoardSessionSchema = z.object({
   id: z.string(),

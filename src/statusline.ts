@@ -5,7 +5,7 @@ import { type InboxItem, deriveInbox, shortIdIndex } from "./inbox";
 import { readAllSessionEvents } from "./log";
 import { tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
-import { buildSessionIndex, closeDeadProcesses, closeSilentPidlessSessions, nodeCategory } from "./sessions";
+import { closedOutSessionIndex, nodeCategory, readTouchedTimestamps } from "./sessions";
 import { describeAction } from "./status";
 
 /**
@@ -49,16 +49,18 @@ function isLive(category: ReturnType<typeof nodeCategory>): boolean {
  * `measure` Capability, exactly as `formatContextColumn` (sessions.ts) gates
  * the tree row's own `⚑` — never on whether a sample happens to exist.
  *
- * Ticket 02: `closeDeadProcesses` runs right after `buildSessionIndex`,
- * before `live` is counted — a Session whose runtime process is confirmed
- * gone never counts toward "vivas" here, the SAME rule `tenaza status` and
- * the board apply (AC1).
+ * Reads `closedOutSessionIndex` (deepening ticket 01) — the SAME closed-out
+ * index `tenaza status` and the board build, Activity touch merged in
+ * before `closeDeadProcesses`/`closeSilentPidlessSessions` run — so a
+ * Session whose runtime process is confirmed gone, or that went silent with
+ * no pid at all, never counts toward "vivas" here either (ticket 02 AC1 /
+ * ticket 06, the SAME rule every surface now applies), and ordinary
+ * tool-call activity with no Event keeps a Session counted live exactly as
+ * the board already did.
  */
 export function deriveStatuslineCounts(home: string = tenazaHome()): StatuslineCounts {
   const events = readAllSessionEvents(home);
-  const index = buildSessionIndex(events);
-  closeDeadProcesses(index); // ticket 02, AC1: the SAME rule `tenaza status` and the board apply
-  closeSilentPidlessSessions(index); // ticket 06 (tenaza-v0-3): the no-pid fallback, same point
+  const index = closedOutSessionIndex(events, readTouchedTimestamps(home));
   const inbox = deriveInbox(home);
   const waiting = new Set(inbox.map((row) => row.session));
   const thresholdTokens = loadPolicy(home).thresholdTokens;

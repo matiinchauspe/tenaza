@@ -17,8 +17,14 @@ _Avoid_: Tag, metadata, annotation
 
 **Event**:
 One line in a Session's append-only log, in the contract's envelope (`v`, `ts`, `session`, `type`,
-`data`). State is always derived from Events, never stored beside them.
+`data`). State is always derived from Events — and a Session's Activity touch — never stored
+beside them.
 _Avoid_: Record, entry, message
+
+**Activity touch**:
+A per-Session marker outside the log whose timestamp records the Session's latest ordinary tool
+call — the activity that writes no Event.
+_Avoid_: Heartbeat, ping, touched file
 
 **Usage sample**:
 An Event carrying a Session's context size (and cost when known) at a point in time.
@@ -46,6 +52,12 @@ nobody has typed the next prompt yet) and from a native prompt (`permission_prom
 ticket 14's own signal) — a Turn ending is read IMMEDIATELY, with none of the ~60s a native
 `idle_prompt` takes to fire.
 _Avoid_: Round, cycle, request
+
+**Stalled**:
+An alive Session that is not waiting for the human, with no Event for longer than the Policy's
+stall threshold — silence with no cause Tenaza can name. TRABADA (the board) and "sin señal" (the
+CLI tree) are its labels, not other concepts.
+_Avoid_: Stuck, idle, hung
 
 ## Runtimes
 

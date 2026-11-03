@@ -12,6 +12,7 @@ import {
   PROCESS_GONE_REASON,
   buildSessionIndex,
   categoryWord,
+  closedOutSessionIndex,
   closeDeadProcesses,
   closeSilentPidlessSessions,
   deriveProject,
@@ -19,11 +20,11 @@ import {
   isNoiseSession,
   isPidlessSilent,
   isProcessGone,
-  isStalled,
   latestArchiveTimestamps,
   countActiveDescendants,
   nativeWaitFor,
   nodeCategory,
+  readSessionTouchedTimestamp,
   readTouchedTimestamps,
   renderSessionTree,
   roleOf,
@@ -394,48 +395,38 @@ describe("roleOf", () => {
   });
 });
 
-describe("isStalled / categoryWord", () => {
-  test("no recent Event past the threshold reads as stalled", async () => {
-    const index = buildSessionIndex([
-      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
-    ]);
-    const node = index.get("sess-1")!;
-    const started = new Date(node.startedAt!);
-    const farLater = new Date(started.getTime() + 60 * 60 * 1000); // 1h later
-    expect(isStalled(node, farLater, 15 * 60 * 1000)).toBe(true);
-    expect(isStalled(node, new Date(started.getTime() + 1000), 15 * 60 * 1000)).toBe(false);
-  });
-
-  test("categoryWord only swaps to the stalled word for the alive category", async () => {
-    expect(categoryWord("alive", true)).not.toBe(categoryWord("alive", false));
-    expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
-    expect(categoryWord("done", true)).toBe(categoryWord("done", false));
-    expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+// Deepening ticket 03: the raw Stalled silence math and the precedence
+// between a current Turn wait and Stalled both moved to `sessionstate.ts`
+// (`test/sessionstate.test.ts` proves them, one case per rung). What stays
+// here is `categoryWord`'s own job: the LABEL for whichever already-
+// resolved state it's handed, never the precedence itself — a "stalled
+// AND waiting at once" case is no longer even expressible at this seam.
+describe("categoryWord", () => {
+  test("stalled only ever swaps the word for the alive category", () => {
+    expect(categoryWord("alive", "stalled")).not.toBe(categoryWord("alive", "working"));
+    expect(categoryWord("waits", "stalled")).toBe(categoryWord("waits", "working"));
+    expect(categoryWord("done", "stalled")).toBe(categoryWord("done", "working"));
+    expect(categoryWord("ended", "stalled")).toBe(categoryWord("ended", "working"));
   });
 
   test("ticket 05: an alive Session waiting on its Turn reads 'esperándote', never 'vivo'", () => {
-    expect(categoryWord("alive", false, "waiting")).toBe("esperándote");
-    expect(categoryWord("alive", false, "working")).toBe("vivo");
+    expect(categoryWord("alive", "waiting")).toBe("esperándote");
+    expect(categoryWord("alive", "working")).toBe("vivo");
   });
 
-  test("ticket 05: a Turn-waiting word NEVER applies outside the alive category — same rule as stalled", () => {
-    expect(categoryWord("waits", false, "waiting")).toBe(categoryWord("waits", false, "working"));
-    expect(categoryWord("done", false, "waiting")).toBe(categoryWord("done", false, "working"));
-    expect(categoryWord("ended", false, "waiting")).toBe(categoryWord("ended", false, "working"));
+  test("ticket 05: the waiting word NEVER applies outside the alive category — same rule as stalled", () => {
+    expect(categoryWord("waits", "waiting")).toBe(categoryWord("waits", "working"));
+    expect(categoryWord("done", "waiting")).toBe(categoryWord("done", "working"));
+    expect(categoryWord("ended", "waiting")).toBe(categoryWord("ended", "working"));
   });
 
   test("ticket 05 (AC3): background work appends ' · N en segundo plano' to the waiting word", () => {
-    expect(categoryWord("alive", false, "waiting", 2)).toBe("esperándote · 2 en segundo plano");
-    expect(categoryWord("alive", false, "waiting", 0)).toBe("esperándote");
+    expect(categoryWord("alive", "waiting", 2)).toBe("esperándote · 2 en segundo plano");
+    expect(categoryWord("alive", "waiting", 0)).toBe("esperándote");
   });
 
-  test("ticket 05: Turn-waiting wins over stalled — a KNOWN reason for the silence is never relabeled 'sin señal'", () => {
-    expect(categoryWord("alive", true, "waiting")).toBe("esperándote");
-  });
-
-  test("ticket 05: omitting the new params keeps categoryWord's old 2-arg behavior byte-for-byte", () => {
-    expect(categoryWord("alive", false)).toBe("vivo");
-    expect(categoryWord("alive", true)).toBe(categoryWord("alive", true, "working", 0));
+  test("state and activeDescendants default to plain working, no background suffix", () => {
+    expect(categoryWord("alive")).toBe("vivo");
   });
 });
 
@@ -765,6 +756,66 @@ describe("closeSilentPidlessSessions (ticket 06, tenaza-v0-3)", () => {
     // `endedAt !== undefined` alone, never on the board's own window.
     expect(node.endedAt).toBeDefined();
     expect(sessionColumn({ endedAt: node.endedAt, lastEventTs: node.lastEventTs }, now, 15)).toBeUndefined();
+  });
+});
+
+describe("closedOutSessionIndex (deepening ticket 01 — 'every surface reads one closed-out Session index') — the fixed order: build → merge the Activity touch → closeDeadProcesses → closeSilentPidlessSessions", () => {
+  test("a pid-less Session with a recent Activity touch is not closed for silence — the touch merges BEFORE closeSilentPidlessSessions reads lastEventTs", () => {
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const events = [
+      { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }), ts: lastEventTs },
+    ];
+    // 36h past the raw Event alone — well past the 24h pidless window —
+    // but touched 1 minute before `now`, same shape the board's own fixture
+    // already proves (daemon.test.ts's ticket 14 suite).
+    const now = new Date(new Date(lastEventTs).getTime() + 36 * 60 * 60 * 1000);
+    const recentTouch = new Date(now.getTime() - 60_000).toISOString();
+
+    const index = closedOutSessionIndex(events, new Map([["sess-1", recentTouch]]), now);
+
+    expect(index.get("sess-1")!.endedAt).toBeUndefined();
+    expect(index.get("sess-1")!.lastEventTs).toBe(recentTouch);
+  });
+
+  test("a dead process's derived end is its last activity, touch included — the merge runs BEFORE closeDeadProcesses reads lastEventTs", () => {
+    const events = [
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+    ];
+    // Strictly later than session.started's own ts, same as a busy agent's
+    // last ordinary tool call landing after its last real Event.
+    const touched = new Date(Date.now() + 60_000).toISOString();
+
+    const index = closedOutSessionIndex(events, new Map([["sess-1", touched]]), new Date(), () => new Map()); // pid confirmed gone
+
+    const node = index.get("sess-1")!;
+    expect(node.endedReason).toBe(PROCESS_GONE_REASON);
+    expect(node.endedAt).toBe(touched);
+  });
+
+  test("a Session with a real session.ended is left alone — neither the touch merge nor either close ever overwrites a real end", () => {
+    const ended = sessionEndedEvent("sess-1", "clear");
+    const events = [
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [], pid: 111, pidStartedAt: "m1" }),
+      ended,
+    ];
+    const realEndedAt = ended.ts;
+    const touched = new Date(Date.now() + 60_000).toISOString();
+
+    // `ps` would report the pid gone too, and the Session is well past the
+    // pidless window either way — neither close gets a chance to run,
+    // since `endedAt` is already set from the real `session.ended`.
+    const index = closedOutSessionIndex(events, new Map([["sess-1", touched]]), new Date(), () => new Map());
+
+    const node = index.get("sess-1")!;
+    expect(node.endedReason).toBe("clear");
+    expect(node.endedAt).toBe(realEndedAt);
+  });
+
+  test("omitting the touch map and the injected reads keeps buildSessionIndex's own byte-for-byte result for every caller that never had an Activity touch to merge", () => {
+    const events = [sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] })];
+    const plain = buildSessionIndex(events);
+    const closedOut = closedOutSessionIndex(events);
+    expect(closedOut.get("sess-1")).toEqual(plain.get("sess-1"));
   });
 });
 
@@ -1128,6 +1179,30 @@ describe("readTouchedTimestamps (ticket 14, AC3 — the board's own 'last ordina
     writeFileSync(path.join(home, "state", "sessions", "sess-1.toolcalls"), "x");
 
     expect(readTouchedTimestamps(home).size).toBe(0);
+  });
+});
+
+describe("readSessionTouchedTimestamp (deepening ticket 01 — archive's own single-Session read, never the whole directory)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-touched-one-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("undefined when this Session was never touched", () => {
+    expect(readSessionTouchedTimestamp("sess-1", home)).toBeUndefined();
+  });
+
+  test("names THIS Session's own touch, ignoring every other Session's — the scoped read `readTouchedTimestamps` scans the whole directory for", () => {
+    touchSession(home, "sess-1");
+    touchSession(home, "sess-2");
+
+    expect(readSessionTouchedTimestamp("sess-1", home)).toBeDefined();
+    expect(readSessionTouchedTimestamp("sess-1", home)).toBe(readTouchedTimestamps(home).get("sess-1"));
   });
 });
 

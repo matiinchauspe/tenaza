@@ -10,13 +10,7 @@ import { useDocumentTitle } from "./useDocumentTitle";
 import { useEventSource } from "./useEventSource";
 import { useInboxActions } from "./useInboxActions";
 import { useNow } from "./useNow";
-import {
-  buildBoardViewModel,
-  highlightedSessionId,
-  sessionIdForCard,
-  terminalReachForCard,
-  type BoardStats,
-} from "./viewModel";
+import { buildBoardViewModel, highlightedSessionId, resolveBoardKeyAction, type BoardStats } from "./viewModel";
 
 const EVENTS_URL = "/events";
 
@@ -49,16 +43,17 @@ const STALE_TOKEN_MESSAGE =
  * (ticket 09), `a`/`r` (ticket 10), now `t` (go to
  * terminal) and `x`'s second job (archive a TERMINÓ card, ticket 11).
  *
- * `d`/`x` only ever dispatch against an id this render actually knows is
- * an Inbox card (`inboxIds`, below); `a` only ever dispatches against a
- * Session card that actually carries a `liveRequest` right now, and
- * against THAT request's own item id — never the Session's
- * (`liveRequestItemIdBySessionId`, below; ticket 12 follow-up fixed a bug
- * where this forwarded the Session's id instead) — `useBoardKeyboard`
- * itself stays ignorant of card kinds, so every one of these gates is
- * this container's to draw, never the hook's. `r` carries no gate at
- * all: it only ever focuses a message input that may or may not exist
- * (see that hook's own doc).
+ * Deepening ticket 04: `d`/`x`/`a`/`t` each dispatch against whatever
+ * `resolveBoardKeyAction` (`viewModel.ts`) resolves for the current
+ * selection — this container holds no card-kind lookup of its own any
+ * more (no `inboxIds`, no `terminoSessionIds`, no
+ * `liveRequestItemIdBySessionId`; `a`'s old bug — forwarding the
+ * Session's id instead of the live item's own — is now structurally
+ * impossible, since the resolver's own `id` field already IS the right
+ * one to dispatch). `useBoardKeyboard` itself stays ignorant of card
+ * kinds, same as before this ticket. `r` carries no gate at all: it only
+ * ever focuses a message input that may or may not exist (see that
+ * hook's own doc).
  */
 export function BoardApp() {
   const { payload, connectionState } = useEventSource(EVENTS_URL);
@@ -71,45 +66,26 @@ export function BoardApp() {
   const [activityOpen, setActivityOpen] = useState(false);
   const activityFeed = useActivityFeed(payload, now);
 
-  const inboxIds = new Set(viewModel?.teNecesita.cards.map((card) => card.id) ?? []);
-  // Ticket 12 follow-up (verified bug): keyed by the SESSION's own id
-  // (what `useBoardKeyboard`'s `selectedId` carries for a Session card),
-  // valued by the live item's OWN identity hash — the id `/items/<id>/answer`
-  // actually expects. A plain Set of session ids (this file's own prior
-  // shape) let a correctly-GATED keyboard `a` still POST the wrong id;
-  // `SessionCard.tsx`'s own mouse buttons never had this bug — they call
-  // `onApprove(liveRequest.id, draft)` directly, never through this map.
-  const liveRequestItemIdBySessionId = new Map(
-    [...(viewModel?.corriendo.cards ?? []), ...(viewModel?.trabada.cards ?? []), ...(viewModel?.termino.cards ?? [])]
-      .flatMap((card) => (card.liveRequest ? [[card.id, card.liveRequest.id] as const] : [])),
-  );
-  // Ticket 11: `x` archives ONLY a TERMINÓ Session card — "x on any other
-  // Session card does nothing" (ticket), enforced here the SAME way
-  // `inboxIds` already gates `onDismiss`: a set this render actually knows
-  // is the TERMINÓ column's own cards, never CORRIENDO/TRABADA.
-  const terminoSessionIds = new Set(viewModel?.termino.cards.map((card) => card.id) ?? []);
   const { selectedId, select } = useBoardKeyboard(orderedIds, {
     onDone: (id) => {
-      if (inboxIds.has(id)) actions.done(id);
+      const resolved = viewModel && resolveBoardKeyAction(viewModel, id, "d");
+      if (resolved?.kind === "done") actions.done(resolved.id);
     },
     onDismiss: (id) => {
-      if (inboxIds.has(id)) actions.dismiss(id);
+      const resolved = viewModel && resolveBoardKeyAction(viewModel, id, "x");
+      if (resolved?.kind === "dismiss") actions.dismiss(resolved.id);
     },
     onApprove: (id, message) => {
-      const itemId = liveRequestItemIdBySessionId.get(id);
-      if (itemId) actions.approve(itemId, message);
+      const resolved = viewModel && resolveBoardKeyAction(viewModel, id, "a");
+      if (resolved?.kind === "answer") actions.approve(resolved.id, message);
     },
     onFocusTerminal: (id) => {
-      // A TERMINÓ card has no terminal button, so `t` does nothing on it
-      // either. Ticket 07 (tenaza-v0-3): neither does ANY card whose own
-      // terminal reach is unknown — same "no button, no key" rule, now
-      // covering CORRIENDO/TRABADA Session cards and TE NECESITA cards too.
-      if (!viewModel || terminoSessionIds.has(id) || terminalReachForCard(viewModel, id) === "unknown") return;
-      const sessionId = sessionIdForCard(viewModel, id);
-      if (sessionId) actions.focusTerminal(sessionId);
+      const resolved = viewModel && resolveBoardKeyAction(viewModel, id, "t");
+      if (resolved?.kind === "focusTerminal") actions.focusTerminal(resolved.id);
     },
     onArchive: (id) => {
-      if (terminoSessionIds.has(id)) actions.archive(id);
+      const resolved = viewModel && resolveBoardKeyAction(viewModel, id, "x");
+      if (resolved?.kind === "archive") actions.archive(resolved.id);
     },
     onToggleActivity: () => setActivityOpen((open) => !open),
     onCloseActivity: () => setActivityOpen(false),

@@ -125,7 +125,7 @@ export function buildInboxOpenedNotification(
 
   return {
     tag: `inbox-${row.id}`,
-    title: `🟡 Tenaza · ${categoryWord("waits", false)} · inbox ${shortId}`,
+    title: `🟡 Tenaza · ${categoryWord("waits")} · inbox ${shortId}`,
     subtitle: `${context.project} / ${context.role} / sesión ${row.session}`,
     message,
     openUrl,

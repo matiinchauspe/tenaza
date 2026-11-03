@@ -593,3 +593,85 @@ export function terminalReachForCard(viewModel: BoardViewModel, cardId: string):
   );
   return sessionCard?.terminalReach;
 }
+
+/** The keys `resolveBoardKeyAction` answers for — the same four `BoardApp.tsx:91-116` used to gate by hand before this ticket. */
+export type BoardKey = "d" | "x" | "a" | "t";
+
+/**
+ * What `resolveBoardKeyAction` returns for a key that applies to the
+ * selected card: which write to dispatch, and the id it actually targets —
+ * the selected card's own id for every kind except `answer` and
+ * `focusTerminal` below.
+ */
+export interface BoardKeyAction {
+  kind: "done" | "dismiss" | "archive" | "answer" | "focusTerminal";
+  /**
+   * The id the dispatched write actually targets. `answer` targets the
+   * live Inbox item's OWN id, never the selected Session card's id —
+   * `0cdd485` shipped exactly that bug once, by hand; this field makes it
+   * structurally impossible to repeat. `focusTerminal` targets the
+   * OWNING Session's id, which for a TE NECESITA card is a DIFFERENT id
+   * than the one selected (`sessionIdForCard`, above). Every other kind
+   * targets the selected card's own id, unchanged.
+   */
+  id: string;
+}
+
+/**
+ * Deepening ticket 04: "what does key K do on card X" (ticket) — the ONE
+ * table `BoardApp` dispatches through now, replacing the per-key gates it
+ * used to compute by hand (`inboxIds`, `terminoSessionIds`,
+ * `liveRequestItemIdBySessionId`, plus `sessionIdForCard`/
+ * `terminalReachForCard` for `t`). `BoardApp` only ever dispatches what
+ * this returns; it holds no card-kind lookup of its own any more.
+ * `useBoardKeyboard` stays ignorant of card kinds exactly as before this
+ * ticket — it still only maps a raw keypress to WHICH key this is asked
+ * about, never to whether the selected card is the right kind for it.
+ *
+ * `undefined` for a key that does not apply to the selected card at all —
+ * including a `selectedId` naming no card on this board (should not
+ * happen in practice; `selectedId` always came from `orderedIds`, same
+ * convention `sessionIdForCard`/`terminalReachForCard` already follow).
+ *
+ * `r` (reject) carries no gate at all — it only ever focuses a message
+ * input, a pure DOM move `useBoardKeyboard` still owns directly — so it is
+ * not one of this table's keys.
+ */
+export function resolveBoardKeyAction(
+  viewModel: BoardViewModel,
+  selectedId: string,
+  key: BoardKey,
+): BoardKeyAction | undefined {
+  switch (key) {
+    case "d":
+      return viewModel.teNecesita.cards.some((card) => card.id === selectedId)
+        ? { kind: "done", id: selectedId }
+        : undefined;
+
+    case "x": {
+      if (viewModel.teNecesita.cards.some((card) => card.id === selectedId)) {
+        return { kind: "dismiss", id: selectedId };
+      }
+      return viewModel.termino.cards.some((card) => card.id === selectedId)
+        ? { kind: "archive", id: selectedId }
+        : undefined;
+    }
+
+    case "a": {
+      // The selected card's own live Inbox item (its `liveRequest` field —
+      // renaming that field elsewhere is out of scope for this ticket), if
+      // it is currently docked on a Session card at all.
+      const sessionCard = [...viewModel.corriendo.cards, ...viewModel.trabada.cards, ...viewModel.termino.cards].find(
+        (card) => card.id === selectedId,
+      );
+      return sessionCard?.liveRequest ? { kind: "answer", id: sessionCard.liveRequest.id } : undefined;
+    }
+
+    case "t": {
+      if (viewModel.termino.cards.some((card) => card.id === selectedId)) return undefined;
+      if (terminalReachForCard(viewModel, selectedId) === "unknown") return undefined;
+      const sessionId = sessionIdForCard(viewModel, selectedId);
+      return sessionId ? { kind: "focusTerminal", id: sessionId } : undefined;
+    }
+  }
+}

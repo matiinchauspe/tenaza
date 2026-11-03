@@ -1809,6 +1809,12 @@ describe("buildBoardPayload — ticket 14: the touched-file merge and nativeWait
     rmSync(home, { recursive: true, force: true });
   });
 
+  /**
+   * AC3's full ordering proof (the merge runs before either close, never
+   * shrinks `lastEventTs`, …) moved to `test/sessions.test.ts`'s own
+   * `closedOutSessionIndex` suite (deepening ticket 01) — this is now a
+   * WIRING test only: the board surface still reaches that shared merge.
+   */
   test("AC3: a Session's own .touched file moves lastEventTs forward past its latest Event", () => {
     appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
     const beforeTouch = buildBoardPayload(home).sessions[0]?.lastEventTs;
@@ -1821,17 +1827,6 @@ describe("buildBoardPayload — ticket 14: the touched-file merge and nativeWait
     const afterTouch = buildBoardPayload(home).sessions[0]?.lastEventTs;
     expect(afterTouch).toBeDefined();
     expect(afterTouch! > (beforeTouch as string)).toBe(true);
-  });
-
-  test("AC3: the touch never shrinks lastEventTs — a touch OLDER than the latest Event changes nothing", () => {
-    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
-    const started = buildBoardPayload(home).sessions[0]?.lastEventTs;
-
-    touchSession(home, "sess-1");
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(sessionTouchedPath("sess-1", home), past, past);
-
-    expect(buildBoardPayload(home).sessions[0]?.lastEventTs).toBe(started);
   });
 
   test("a native permission_prompt is the most recent thing observed — nativeWait is present", () => {

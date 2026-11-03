@@ -1,10 +1,12 @@
 /**
  * The Live surface's own domain logic (ticket 08, decision 04): which
- * column a Session belongs in, whether it's stalled, how its age reads,
- * and the pure list math the board's keyboard selection moves over. Zero
- * imports, on purpose — same reasoning as `contextbar.ts`: the React client
- * bundles this file directly, so it must never pull in a node builtin
- * transitively.
+ * column a Session belongs in, how its age reads, and the pure list math
+ * the board's keyboard selection moves over. Zero imports of its own, on
+ * purpose — same reasoning as `contextbar.ts`: the React client bundles
+ * this file directly, so it must never pull in a node builtin
+ * transitively. It may still import another zero-import file:
+ * `sessionstate.ts` (deepening ticket 03) is exactly that, and owns the
+ * precedence ladder this file used to carry its own copy of.
  *
  * TIME IS STATE: every function here that classifies anything time-based
  * takes `now` as a plain argument and does nothing with `Date.now()`
@@ -21,6 +23,8 @@
  * apart on, exactly what the ticket's "never hardcoded in the client"
  * rules out.
  */
+
+import { sessionState } from "./sessionstate";
 
 /** TERMINÓ shows a Session ended within this window (spec: "the last 24 h") — not configurable, unlike `stallMinutes`. */
 export const TERMINO_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -45,13 +49,6 @@ export interface SessionTiming {
   nativeWait?: unknown;
 }
 
-/** A Session with no Event at all (`lastEventTs` absent) is never stalled — there is nothing to measure silence against yet (mirrors `sessions.ts`'s own `isStalled`). Raw silence only: a current `turnWait`/`nativeWait` is `sessionColumn`'s own override below, never this function's — same split the CLI tree draws between `isStalled` (sessions.ts) and `categoryWord`'s turn-state check. */
-export function isSessionStalled(session: SessionTiming, now: Date, stallMinutes: number): boolean {
-  if (!session.lastEventTs) return false;
-  const thresholdMs = stallMinutes * 60 * 1000;
-  return now.getTime() - new Date(session.lastEventTs).getTime() > thresholdMs;
-}
-
 /**
  * Which board column a Session belongs in RIGHT NOW, or `undefined` when it
  * belongs in none (an ended Session past the 24h TERMINÓ window — the
@@ -62,24 +59,33 @@ export function isSessionStalled(session: SessionTiming, now: Date, stallMinutes
  * parent to roll up into — `parentId` is shown on the card for context
  * only (the "↳ parent" label).
  *
- * Ticket 09 (tenaza-v0-3): a Session between Turns (`turnWait`) or sitting
- * behind a native prompt (`nativeWait`) never reads TRABADA, however long
- * the silence that produced it has run — a KNOWN cause for the silence
- * ("the agent handed back and is waiting on you") is never confused with an
- * UNKNOWN one, the exact distinction the CLI tree already draws
- * (`sessions.ts`'s `categoryWord`, which lets `turn === "waiting"` override
- * `stalled` the same way). The card's own ESPERÁNDOTE / native-wait badge
- * (`viewModel.ts`'s `toTurnWait`/`toNativeWait`) renders regardless of
- * column, so this never hides that signal — it only stops TRABADA from
- * lying about whose move it is.
+ * Deepening ticket 03: the ladder itself — ended beats a current
+ * `turnWait`/`nativeWait`, which beats Stalled, which beats working — is
+ * `sessionstate.ts`'s `sessionState` now, the SAME function
+ * `sessions.ts`'s `renderNode` calls for the CLI tree. This function's own
+ * job is only the LABEL each of those four states gets on the board
+ * (CORRIENDO covers both "waiting" and "working" — the board has no
+ * separate waiting column, the card's own ESPERÁNDOTE / native-wait badge
+ * (`viewModel.ts`'s `toTurnWait`/`toNativeWait`) renders on top of it
+ * regardless) and the 24h TERMINÓ window, which decides whether an ended
+ * Session's card still shows at all — neither of which `sessionstate.ts`
+ * owns.
  */
 export function sessionColumn(session: SessionTiming, now: Date, stallMinutes: number): SessionColumn | undefined {
-  if (session.endedAt !== undefined) {
+  const state = sessionState(
+    {
+      ended: session.endedAt !== undefined,
+      waitingForHuman: session.turnWait !== undefined || session.nativeWait !== undefined,
+      lastEventTs: session.lastEventTs,
+    },
+    now,
+    stallMinutes * 60 * 1000,
+  );
+  if (state === "ended" && session.endedAt !== undefined) {
     const endedAgoMs = now.getTime() - new Date(session.endedAt).getTime();
     return endedAgoMs <= TERMINO_WINDOW_MS ? "termino" : undefined;
   }
-  if (session.turnWait !== undefined || session.nativeWait !== undefined) return "corriendo";
-  return isSessionStalled(session, now, stallMinutes) ? "trabada" : "corriendo";
+  return state === "stalled" ? "trabada" : "corriendo";
 }
 
 /**

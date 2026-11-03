@@ -7,6 +7,7 @@ import { deriveInbox } from "./inbox";
 import { readAllSessionEvents, readHumanEvents, readSessionEvents } from "./log";
 import { sessionTouchedPath, sessionsDir, tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
+import { sessionState, type SessionState } from "./sessionstate";
 
 /**
  * The four states the ticket names for a Session's row (and what a parent
@@ -41,7 +42,7 @@ export interface SessionNode {
   startedAt?: string;
   endedAt?: string;
   endedReason?: string;
-  /** The latest `ts` across every Event naming this Session — the basis for `age` and `isStalled`. */
+  /** The latest `ts` across every Event naming this Session — the basis for `age` and the Session-state classifier's Stalled math (`sessionstate.ts`'s `sessionState`). */
   lastEventTs?: string;
   /** The context size from the LATEST `usage.sampled` Event this Session has (q9). `undefined` means never sampled, never zero. */
   contextTokens?: number;
@@ -192,7 +193,7 @@ const WORD: Record<SessionCategory, string> = {
   ended: "cerró",
 };
 const STALLED_WORD = "sin señal";
-/** Ticket 05: the tree's own word for an alive Session between Turns — never a fifth category or a new glyph (same "word override on alive" convention this file's own `isStalled`/`STALLED_WORD` already established), just rendered through `categoryWord` below instead of "vivo". */
+/** Ticket 05: the tree's own word for an alive Session between Turns — never a fifth category or a new glyph (same "word override on alive" convention this file's own `STALLED_WORD` already established), just rendered through `categoryWord` below instead of "vivo". */
 const WAITING_WORD = "esperándote";
 
 export function glyphFor(category: SessionCategory): string {
@@ -207,39 +208,26 @@ function backgroundSuffix(activeDescendants: number): string {
 /**
  * Stalled and Turn state only ever override the "alive" word — a
  * waiting(-for-Inbox)/done/ended Session already reads unambiguously.
- * Ticket 05: a Turn that ended wins over stalled whenever both would
- * otherwise apply — silence with a KNOWN cause ("esperándote," the human
- * just hasn't typed the next prompt yet) is never relabeled "sin señal"
- * (an UNKNOWN cause), however long that silence runs; "sin señal" stays
- * reserved for a Session that went quiet for no reason this file can name
- * at all. `turn`/`activeDescendants` default to "working"/0 so every
- * pre-ticket-05 2-arg call (`notify.ts`, every existing test) is unaffected
- * byte-for-byte.
+ *
+ * Deepening ticket 03: `state` is already resolved by `sessionstate.ts`'s
+ * `sessionState` (`renderNode` below), which is where the precedence
+ * between a current Turn wait and Stalled now lives — this function picks
+ * only the WORD for whichever of the two `state` already settled on, never
+ * the precedence itself. For the "alive" category, `state` is never
+ * `"ended"` (an ended node rolls up to `done`/`ended` before this is ever
+ * reached, in `nodeCategory`), so only `"waiting"` and `"stalled"` are
+ * ever live choices here, with `"working"` as the fallthrough.
+ * `activeDescendants` defaults to 0 so a caller with no background count to
+ * report (`notify.ts`) never has to pass one.
  */
 export function categoryWord(
   category: SessionCategory,
-  stalled: boolean,
-  turn: TurnState = "working",
+  state: SessionState = "working",
   activeDescendants: number = 0,
 ): string {
   if (category !== "alive") return WORD[category];
-  if (turn === "waiting") return `${WAITING_WORD}${backgroundSuffix(activeDescendants)}`;
-  return stalled ? STALLED_WORD : WORD.alive;
-}
-
-/**
- * Deepening ticket 02: `thresholdMs` is never defaulted here — same
- * convention `board.ts`'s own `isSessionStalled` already follows, and for
- * the same reason (the doc comment at the top of that file). It always
- * comes from the ONE place the Policy is read (`policy.ts`'s
- * `DEFAULT_STALL_MINUTES`, via `loadPolicy(home).stallMinutes` in
- * `renderSessionTree` below); a second hardcoded default here is exactly
- * what let the CLI tree and the board disagree on when a Session reads
- * stalled.
- */
-export function isStalled(node: SessionNode, now: Date, thresholdMs: number): boolean {
-  if (!node.lastEventTs) return false;
-  return now.getTime() - new Date(node.lastEventTs).getTime() > thresholdMs;
+  if (state === "waiting") return `${WAITING_WORD}${backgroundSuffix(activeDescendants)}`;
+  return state === "stalled" ? STALLED_WORD : WORD.alive;
 }
 
 /**
@@ -942,16 +930,24 @@ function renderNode(
   lines: string[],
 ): void {
   const category = rollupCategory(node, childrenOf, waiting);
-  const stalled = isStalled(node, now, stallThresholdMs);
   // Ticket 05: this node's OWN Turn state and background count — never
   // rolled up from descendants (unlike `category` above), since each one
   // already renders its own row right below its parent's.
   const turn = turnState(node);
+  // Deepening ticket 03: the SAME classifier the board calls
+  // (`board.ts`'s `sessionColumn`) decides ended/waiting/Stalled/working
+  // here too — `categoryWord` below only picks the word for whichever of
+  // the four this settles on, never the precedence between them.
+  const state: SessionState = sessionState(
+    { ended: node.endedAt !== undefined, waitingForHuman: turn === "waiting", lastEventTs: node.lastEventTs },
+    now,
+    stallThresholdMs,
+  );
   const activeDescendants = countActiveDescendants(node.id, childrenOf);
   const head = isRoot ? "  " : `${prefix}${isLast ? "└ " : "├ "}`;
   const contextColumn = formatContextColumn(node, thresholdTokens);
   lines.push(
-    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${contextColumn}  ${categoryWord(category, stalled, turn, activeDescendants)}  ${formatAge(node, now)}`,
+    `${head}${glyphFor(category)} ${roleOf(node)}  ${node.id}  ${contextColumn}  ${categoryWord(category, state, activeDescendants)}  ${formatAge(node, now)}`,
   );
 
   const children = childrenOf.get(node.id) ?? [];

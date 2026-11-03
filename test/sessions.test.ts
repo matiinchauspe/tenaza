@@ -20,7 +20,6 @@ import {
   isNoiseSession,
   isPidlessSilent,
   isProcessGone,
-  isStalled,
   latestArchiveTimestamps,
   countActiveDescendants,
   nativeWaitFor,
@@ -396,48 +395,38 @@ describe("roleOf", () => {
   });
 });
 
-describe("isStalled / categoryWord", () => {
-  test("no recent Event past the threshold reads as stalled", async () => {
-    const index = buildSessionIndex([
-      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/repo", capabilities: [] }),
-    ]);
-    const node = index.get("sess-1")!;
-    const started = new Date(node.startedAt!);
-    const farLater = new Date(started.getTime() + 60 * 60 * 1000); // 1h later
-    expect(isStalled(node, farLater, 15 * 60 * 1000)).toBe(true);
-    expect(isStalled(node, new Date(started.getTime() + 1000), 15 * 60 * 1000)).toBe(false);
-  });
-
-  test("categoryWord only swaps to the stalled word for the alive category", async () => {
-    expect(categoryWord("alive", true)).not.toBe(categoryWord("alive", false));
-    expect(categoryWord("waits", true)).toBe(categoryWord("waits", false));
-    expect(categoryWord("done", true)).toBe(categoryWord("done", false));
-    expect(categoryWord("ended", true)).toBe(categoryWord("ended", false));
+// Deepening ticket 03: the raw Stalled silence math and the precedence
+// between a current Turn wait and Stalled both moved to `sessionstate.ts`
+// (`test/sessionstate.test.ts` proves them, one case per rung). What stays
+// here is `categoryWord`'s own job: the LABEL for whichever already-
+// resolved state it's handed, never the precedence itself — a "stalled
+// AND waiting at once" case is no longer even expressible at this seam.
+describe("categoryWord", () => {
+  test("stalled only ever swaps the word for the alive category", () => {
+    expect(categoryWord("alive", "stalled")).not.toBe(categoryWord("alive", "working"));
+    expect(categoryWord("waits", "stalled")).toBe(categoryWord("waits", "working"));
+    expect(categoryWord("done", "stalled")).toBe(categoryWord("done", "working"));
+    expect(categoryWord("ended", "stalled")).toBe(categoryWord("ended", "working"));
   });
 
   test("ticket 05: an alive Session waiting on its Turn reads 'esperándote', never 'vivo'", () => {
-    expect(categoryWord("alive", false, "waiting")).toBe("esperándote");
-    expect(categoryWord("alive", false, "working")).toBe("vivo");
+    expect(categoryWord("alive", "waiting")).toBe("esperándote");
+    expect(categoryWord("alive", "working")).toBe("vivo");
   });
 
-  test("ticket 05: a Turn-waiting word NEVER applies outside the alive category — same rule as stalled", () => {
-    expect(categoryWord("waits", false, "waiting")).toBe(categoryWord("waits", false, "working"));
-    expect(categoryWord("done", false, "waiting")).toBe(categoryWord("done", false, "working"));
-    expect(categoryWord("ended", false, "waiting")).toBe(categoryWord("ended", false, "working"));
+  test("ticket 05: the waiting word NEVER applies outside the alive category — same rule as stalled", () => {
+    expect(categoryWord("waits", "waiting")).toBe(categoryWord("waits", "working"));
+    expect(categoryWord("done", "waiting")).toBe(categoryWord("done", "working"));
+    expect(categoryWord("ended", "waiting")).toBe(categoryWord("ended", "working"));
   });
 
   test("ticket 05 (AC3): background work appends ' · N en segundo plano' to the waiting word", () => {
-    expect(categoryWord("alive", false, "waiting", 2)).toBe("esperándote · 2 en segundo plano");
-    expect(categoryWord("alive", false, "waiting", 0)).toBe("esperándote");
+    expect(categoryWord("alive", "waiting", 2)).toBe("esperándote · 2 en segundo plano");
+    expect(categoryWord("alive", "waiting", 0)).toBe("esperándote");
   });
 
-  test("ticket 05: Turn-waiting wins over stalled — a KNOWN reason for the silence is never relabeled 'sin señal'", () => {
-    expect(categoryWord("alive", true, "waiting")).toBe("esperándote");
-  });
-
-  test("ticket 05: omitting the new params keeps categoryWord's old 2-arg behavior byte-for-byte", () => {
-    expect(categoryWord("alive", false)).toBe("vivo");
-    expect(categoryWord("alive", true)).toBe(categoryWord("alive", true, "working", 0));
+  test("state and activeDescendants default to plain working, no background suffix", () => {
+    expect(categoryWord("alive")).toBe("vivo");
   });
 });
 

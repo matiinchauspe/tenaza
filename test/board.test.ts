@@ -4,7 +4,6 @@ import {
   type ActivitySnapshots,
   diffActivityFeed,
   formatAge,
-  isSessionStalled,
   liveItemPhase,
   liveWaitRemainingFraction,
   moveSelection,
@@ -75,50 +74,38 @@ describe("worktreeLabel", () => {
   });
 });
 
-describe("isSessionStalled", () => {
-  test("no Event at all is never stalled", () => {
-    expect(isSessionStalled({}, new Date(), STALL_MINUTES)).toBe(false);
-  });
-
-  test("silent exactly at the threshold is not yet stalled", () => {
-    const now = new Date("2026-01-01T00:15:00.000Z");
-    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
-    expect(isSessionStalled(session, now, STALL_MINUTES)).toBe(false);
-  });
-
-  test("silent past the threshold is stalled", () => {
-    const now = new Date("2026-01-01T00:15:01.000Z");
-    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
-    expect(isSessionStalled(session, now, STALL_MINUTES)).toBe(true);
-  });
-
-  test("a custom stallMinutes (from the Policy, never hardcoded) moves the line", () => {
-    const now = new Date("2026-01-01T00:05:01.000Z");
-    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
-    expect(isSessionStalled(session, now, 5)).toBe(true);
-    expect(isSessionStalled(session, now, 15)).toBe(false);
-  });
-});
-
+// Deepening ticket 03: the precedence ladder (ended > waiting for the
+// human > Stalled > working) and the Stalled silence math both moved to
+// `sessionstate.ts`'s `sessionState` — proven once, per rung, in
+// `test/sessionstate.test.ts`. What stays here is this function's OWN
+// job: the LABEL each state gets on the board (`isSessionStalled` is gone
+// — `sessionColumn` calls the classifier directly now) and the 24h
+// TERMINÓ window, which the classifier doesn't own at all.
 describe("sessionColumn", () => {
-  test("a running Session with a recent Event is CORRIENDO", () => {
+  test("working maps to CORRIENDO", () => {
     const now = new Date("2026-01-01T00:01:00.000Z");
     const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
     expect(sessionColumn(session, now, STALL_MINUTES)).toBe("corriendo");
   });
 
-  test("a running Session silent past stallMinutes is TRABADA", () => {
+  test("stalled maps to TRABADA", () => {
     const now = new Date("2026-01-01T00:16:00.000Z");
     const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
     expect(sessionColumn(session, now, STALL_MINUTES)).toBe("trabada");
   });
 
-  test("TIME IS STATE: the SAME session, read again later with no new Event, flips from CORRIENDO to TRABADA on the clock alone", () => {
-    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
-    const stillFresh = new Date("2026-01-01T00:05:00.000Z");
-    const nowStale = new Date("2026-01-01T00:20:00.000Z");
-    expect(sessionColumn(session, stillFresh, STALL_MINUTES)).toBe("corriendo");
-    expect(sessionColumn(session, nowStale, STALL_MINUTES)).toBe("trabada");
+  test("waiting for the human (a current turnWait or nativeWait) maps to CORRIENDO too — the board has no separate waiting column, only the card's own badge (viewModel.ts) shows it", () => {
+    const now = new Date("2026-01-01T00:01:00.000Z"); // well within STALL_MINUTES either way
+    const turnWaiting = {
+      lastEventTs: "2026-01-01T00:00:00.000Z",
+      turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
+    };
+    const nativeWaiting = {
+      lastEventTs: "2026-01-01T00:00:00.000Z",
+      nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
+    };
+    expect(sessionColumn(turnWaiting, now, STALL_MINUTES)).toBe("corriendo");
+    expect(sessionColumn(nativeWaiting, now, STALL_MINUTES)).toBe("corriendo");
   });
 
   test("an ended Session within the 24h window is TERMINÓ", () => {
@@ -145,52 +132,6 @@ describe("sessionColumn", () => {
     const justPast = new Date("2026-01-02T00:00:01.000Z");
     expect(sessionColumn(session, stillWithin, STALL_MINUTES)).toBe("termino");
     expect(sessionColumn(session, justPast, STALL_MINUTES)).toBeUndefined();
-  });
-
-  test("ended beats stalled: an ended Session is never read as trabada even with no recent Event", () => {
-    const now = new Date("2026-01-01T12:00:00.000Z");
-    const session = { endedAt: "2026-01-01T00:00:00.000Z", lastEventTs: "2025-01-01T00:00:00.000Z" };
-    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("termino");
-  });
-
-  // Ticket 09 (tenaza-v0-3): a Session waiting for the human (a current
-  // `turnWait` or `nativeWait`) never reads as TRABADA, however long the
-  // silence that produced it has run — the board must agree with the CLI
-  // tree's own `categoryWord` (sessions.ts), which already lets "waiting"
-  // override "stalled" the same way.
-
-  test("a current turnWait keeps a silent Session CORRIENDO, never TRABADA", () => {
-    const now = new Date("2026-01-01T00:16:00.000Z"); // 16m silent, past STALL_MINUTES
-    const session = {
-      lastEventTs: "2026-01-01T00:00:00.000Z",
-      turnWait: { since: "2026-01-01T00:00:00.000Z", backgroundCount: 0 },
-    };
-    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("corriendo");
-  });
-
-  test("a current nativeWait keeps a silent Session CORRIENDO, never TRABADA", () => {
-    const now = new Date("2026-01-01T00:16:00.000Z"); // 16m silent, past STALL_MINUTES
-    const session = {
-      lastEventTs: "2026-01-01T00:00:00.000Z",
-      nativeWait: { kind: "idle_prompt", since: "2026-01-01T00:00:00.000Z" },
-    };
-    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("corriendo");
-  });
-
-  test("neither turnWait nor nativeWait — a silent Session still reads TRABADA (unchanged)", () => {
-    const now = new Date("2026-01-01T00:16:00.000Z");
-    const session = { lastEventTs: "2026-01-01T00:00:00.000Z" };
-    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("trabada");
-  });
-
-  test("ended beats waiting too: an ended Session with a stale turnWait still reads TERMINÓ", () => {
-    const now = new Date("2026-01-01T12:00:00.000Z");
-    const session = {
-      endedAt: "2026-01-01T00:00:00.000Z",
-      lastEventTs: "2025-01-01T00:00:00.000Z",
-      turnWait: { since: "2025-01-01T00:00:00.000Z", backgroundCount: 0 },
-    };
-    expect(sessionColumn(session, now, STALL_MINUTES)).toBe("termino");
   });
 });
 

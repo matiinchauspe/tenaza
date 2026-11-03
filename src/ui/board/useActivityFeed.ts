@@ -3,7 +3,6 @@ import {
   ACTIVITY_FEED_CAPACITY,
   diffActivityFeed,
   type ActivityFeedEntry,
-  type ActivitySession,
   type ActivitySnapshot,
   type ActivitySnapshots,
 } from "../../board";
@@ -24,6 +23,15 @@ import type { BoardPayload } from "../../contract/live";
  * every other time-based thing on this board (`useNow`) must also drive
  * this diff, or a stall transition would simply never appear in the
  * panel until SOME OTHER change happened to push a new payload first.
+ *
+ * Deepening ticket 03: `payload.sessions` (`BoardSession[]`) passes
+ * straight through to `diffActivityFeed`, which only ever reads
+ * `ActivitySession`'s fields — structural typing, no `.map()` copy. Ticket
+ * 09 once needed a hand-written field list here to carry `turnWait`/
+ * `nativeWait` through (so this diff's own `sessionColumn` call could tell
+ * a waiting Session from a stalled one); a field the classifier needs
+ * could silently be dropped from that list again. Passing the payload's
+ * own Sessions directly means there is no list left to drop one from.
  */
 export function useActivityFeed(payload: BoardPayload | undefined, now: Date): readonly ActivityFeedEntry[] {
   const [entries, setEntries] = useState<readonly ActivityFeedEntry[]>([]);
@@ -31,22 +39,12 @@ export function useActivityFeed(payload: BoardPayload | undefined, now: Date): r
 
   useEffect(() => {
     if (!payload) return;
-    const sessions: ActivitySession[] = payload.sessions.map((session) => ({
-      id: session.id,
-      project: session.project,
-      ticket: session.ticket,
-      endedAt: session.endedAt,
-      lastEventTs: session.lastEventTs,
-      // Ticket 09 (tenaza-v0-3): carried through so this diff's own internal
-      // `sessionColumn` call (board.ts) can tell a waiting Session from a
-      // stalled one — dropping these here would silently undo that fix for
-      // the activity panel alone, even with `sessionColumn` itself correct.
-      turnWait: session.turnWait,
-      nativeWait: session.nativeWait,
-      resolutions: session.resolutions,
-    }));
-
-    const { additions, next } = diffActivityFeed(sessions, snapshotRef.current, now, payload.policy.stallMinutes);
+    const { additions, next } = diffActivityFeed(
+      payload.sessions,
+      snapshotRef.current,
+      now,
+      payload.policy.stallMinutes,
+    );
     snapshotRef.current = next;
 
     if (additions.length > 0) {

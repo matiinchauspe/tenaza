@@ -5,7 +5,7 @@ import type { Action, Capability, Event, NotificationKind, TerminalLocator } fro
 import { formatContextBar, formatContextNumber } from "./contextbar";
 import { deriveInbox } from "./inbox";
 import { readAllSessionEvents, readHumanEvents, readSessionEvents } from "./log";
-import { sessionsDir, tenazaHome } from "./paths";
+import { sessionTouchedPath, sessionsDir, tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 
 /**
@@ -306,11 +306,16 @@ function defaultProcessStartMarkers(pids: readonly number[]): ReadonlyMap<number
 }
 
 /**
- * Ticket 02's own fix, applied in exactly ONE place so `tenaza status`
- * (`renderSessionTree`), `statusline` (`deriveStatuslineCounts`) and the
- * board (`daemon.ts`'s `buildBoardPayload`) can never disagree (AC1: "one
- * rule, the same in all three") — each calls this right after
- * `buildSessionIndex`, before deriving anything from `endedAt`.
+ * Ticket 02's own fix. Originally called directly, right after
+ * `buildSessionIndex`, by each of `tenaza status` (`renderSessionTree`),
+ * `statusline` (`deriveStatuslineCounts`) and the board (`daemon.ts`'s
+ * `buildBoardPayload`) so the three could never disagree (AC1: "one rule,
+ * the same in all three"). Deepening ticket 01 ("every surface reads one
+ * closed-out Session index") moved that single call site INTO
+ * `closedOutSessionIndex` below, which now also folds in `archiveSession`
+ * (`resolve.ts`) as a fourth caller — this function itself is unchanged,
+ * only ever reached through that shared seam now, never from a hook's own
+ * answer path (ADR 0007, ticket 02's own AC4).
  *
  * Closes every Session whose own runtime process is CONFIRMED gone —
  * `endedAt`/`endedReason` set exactly as a real `SessionEnd` would read,
@@ -403,12 +408,13 @@ export function isPidlessSilent(node: SessionNode, now: Date, windowMs: number =
  * never confirm gone — `isPidlessSilent`'s own shape, closed the SAME way a
  * real `SessionEnd` would read (`endedAt`/`endedReason` set, never written
  * back to the log — ADR 0002, recomputed fresh on every call, exactly
- * `closeDeadProcesses`'s own convention). Called right after
- * `closeDeadProcesses` at every one of its own call sites
- * (`renderSessionTree`, `statusline.ts`'s `deriveStatuslineCounts`,
- * `daemon.ts`'s board payload, `resolve.ts`'s `archiveSession`) so this fix
- * reaches every surface for free — ticket 02's own "one rule, never
- * disagreeing" convention (AC1), extended rather than duplicated.
+ * `closeDeadProcesses`'s own convention). Originally called right after
+ * `closeDeadProcesses` at each of its own three call sites directly;
+ * deepening ticket 01 moved that pairing INTO `closedOutSessionIndex`
+ * below, now reached from four surfaces (`archiveSession` joins the
+ * original three) without this function knowing any of them exist —
+ * ticket 02's own "one rule, never disagreeing" convention (AC1), extended
+ * rather than duplicated.
  *
  * `endedAt` is `lastEventTs` PLUS `windowMs` (ADR 0010, human's own call)
  * — the FIXED moment this Session's silence first crossed the 24h line,
@@ -440,6 +446,67 @@ export function closeSilentPidlessSessions(
     node.endedAt = new Date(new Date(node.lastEventTs).getTime() + windowMs).toISOString();
     node.endedReason = NO_PID_SILENT_REASON;
   }
+}
+
+/**
+ * Deepening ticket 01 ("every surface reads one closed-out Session
+ * index"): the ONE function `tenaza status` (`renderSessionTree`),
+ * `statusline` (`deriveStatuslineCounts`), the board (`daemon.ts`'s
+ * `buildBoardPayload`) and archive (`resolve.ts`'s `archiveSession`) all
+ * call now, in place of re-assembling `buildSessionIndex` +
+ * `closeDeadProcesses` + `closeSilentPidlessSessions` by hand at each call
+ * site — exactly the drift that let this bug happen: only the board ever
+ * folded in the Activity touch (`daemon.ts:317`, pre-ticket-01), so a
+ * Session busy with ordinary tool calls and no Event for a while read
+ * "sin señal" in the CLI while the board still showed it running, and a
+ * native prompt the human already answered kept reading "esperándote" in
+ * the CLI after later activity had already superseded it on the board.
+ *
+ * The order is FIXED, in exactly this sequence, inside this one function:
+ *   1. `buildSessionIndex` — the pure fold over `Event[]`, unchanged.
+ *   2. merge `touchedAt` into `lastEventTs` — BEFORE either close, so a
+ *      derived `endedAt` (step 3/4) reflects the Session's true last
+ *      activity, touch included (the reasoning originally at
+ *      `daemon.ts:322-324`, now lives here for every caller).
+ *   3. `closeDeadProcesses` — reads the touch-merged `lastEventTs`.
+ *   4. `closeSilentPidlessSessions` — same.
+ * Reordering 2 after 3/4 would let a dead or silence-closed Session's
+ * `endedAt` miss activity the touch alone recorded — the exact class of
+ * staleness this ticket closes.
+ *
+ * `touchedAt` is a plain `ReadonlyMap`, never read from disk in here: the
+ * CALLER decides how to produce it, which is what lets archive merge only
+ * its OWN Session's touch (`readSessionTouchedTimestamp`, one `statSync`)
+ * while the other three merge every Session's at once
+ * (`readTouchedTimestamps`, one `readdirSync`) — this function is
+ * indifferent to which, and a caller with no touch signal at all (or a
+ * fixture that predates ticket 14) simply omits it, leaving every node's
+ * `lastEventTs` exactly as `buildSessionIndex` derived it.
+ *
+ * `readProcessStartMarkers` and `windowMs` are threaded straight through
+ * to `closeDeadProcesses`/`closeSilentPidlessSessions` — the SAME
+ * injectable seams those two already exposed, so a test proves the ORDER
+ * (touch merges before either close reads `lastEventTs`) without ever
+ * touching the real process table or the real clock.
+ */
+export function closedOutSessionIndex(
+  events: Event[],
+  touchedAt: ReadonlyMap<string, string> = new Map(),
+  now: Date = new Date(),
+  readProcessStartMarkers: (pids: readonly number[]) => ReadonlyMap<number, string> = defaultProcessStartMarkers,
+  windowMs: number = TERMINO_WINDOW_MS,
+): Map<string, SessionNode> {
+  const index = buildSessionIndex(events);
+
+  for (const node of index.values()) {
+    const touched = touchedAt.get(node.id);
+    if (touched && (!node.lastEventTs || touched > node.lastEventTs)) node.lastEventTs = touched;
+  }
+
+  closeDeadProcesses(index, now, readProcessStartMarkers);
+  closeSilentPidlessSessions(index, now, windowMs);
+
+  return index;
 }
 
 function defaultGitRootFor(cwd: string): string | undefined {
@@ -595,11 +662,21 @@ export function isArchived(archivedAt: string | undefined, lastEventTs: string |
  * as `latestArchiveTimestamps` above; a file that vanishes between the
  * directory listing and the stat (a race with its own writer, vanishingly
  * rare and harmless either way) is simply absent from this read, never a
- * crash. Used ONLY by `daemon.ts`'s board payload — `buildSessionIndex`
- * itself stays a pure function of `Event[]` and has no reason to know
- * this file exists; `tenaza status`/`statusline` (one-shot CLI reads the
- * human already asked for AT that exact moment) have no need for it
- * either, which is why this stays out of `renderSessionTree`'s own path.
+ * crash.
+ *
+ * `buildSessionIndex` itself stays a pure function of `Event[]` and has no
+ * reason to know this file exists — the merge happens one layer up, in
+ * `closedOutSessionIndex`. FALSIFIED as of deepening ticket 01 ("every
+ * surface reads one closed-out Session index"): this doc comment used to
+ * claim `tenaza status`/`statusline` had "no need" for this signal at all,
+ * on the theory that a one-shot CLI read needed no board-style freshness.
+ * That was the bug — a Session busy with ordinary tool calls and no Event
+ * for a while read "sin señal" in the CLI tree while the board (the only
+ * caller that merged this) still showed it running, and the statusline
+ * undercounted "vivas" the same way. Every reader of a Session's state —
+ * `tenaza status`, the statusline, the board, and archive (which uses
+ * `readSessionTouchedTimestamp` below instead, scoped to its own Session)
+ * — needs this signal equally; none of them gets to skip it.
  */
 export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, string> {
   const map = new Map<string, string>();
@@ -616,6 +693,26 @@ export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, 
     }
   }
   return map;
+}
+
+/**
+ * Deepening ticket 01: one Session's own Activity touch — the SAME
+ * `.touched` mtime `readTouchedTimestamps` scans the whole directory for,
+ * read here for a single, already-known Session id. `archiveSession`
+ * (`resolve.ts`) already knows which Session it's archiving, so scanning
+ * every OTHER Session's `.touched` file just to throw the result away
+ * would be pure waste — a directory listing that only grows with every
+ * Session Tenaza has ever observed, paid on every single archive click.
+ * `undefined` when the file was never written, or vanished between the
+ * existence check and the stat (a race with its own writer, same
+ * silent-degrade convention `readTouchedTimestamps` already follows).
+ */
+export function readSessionTouchedTimestamp(session: string, home: string = tenazaHome()): string | undefined {
+  try {
+    return new Date(statSync(sessionTouchedPath(session, home)).mtimeMs).toISOString();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -878,14 +975,19 @@ function renderNode(
  * — or when every observed Session was noise (ticket 05, `isNoiseSession`)
  * — so it adds nothing to a fresh `status` (ticket 01/02's own output stays
  * unchanged).
+ *
+ * Deepening ticket 01: reads `closedOutSessionIndex` — the SAME closed-out
+ * index the board builds, Activity touch merged in before either close —
+ * rather than `buildSessionIndex` + the two closes by hand. This is the fix
+ * itself: before this ticket, the CLI tree never merged the touch at all,
+ * so a Session busy with ordinary tool calls read "sin señal" here while
+ * the board still showed it running.
  */
 export function renderSessionTree(home: string = tenazaHome(), now: Date = new Date()): string {
   const events = readAllSessionEvents(home);
   if (events.length === 0) return "";
 
-  const index = buildSessionIndex(events);
-  closeDeadProcesses(index, now); // ticket 02, AC1: the SAME rule statusline and the board apply
-  closeSilentPidlessSessions(index, now); // ticket 06: the no-pid fallback, same point
+  const index = closedOutSessionIndex(events, readTouchedTimestamps(home), now);
   const eventTypes = eventTypesBySession(events);
   const nodes = [...index.values()].filter(
     (node) => !isNoiseSession(eventTypes.get(node.id) ?? new Set(), node.endedReason),

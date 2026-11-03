@@ -16,6 +16,7 @@ import {
 } from "../src/resolve";
 import { parseRunOutput, RUN_FAILURE_MARKER } from "../src/runoutput";
 import { UnknownSessionError } from "../src/sessions";
+import { touchSession } from "../src/toolcalls";
 
 /** When `openItem` is the ONLY Event written for "sess-1", its `action.decided` lands on line 1. */
 const ID = inboxIdentityHash("sess-1", 1);
@@ -599,6 +600,22 @@ describe("archiveSession", () => {
   test("ticket 06: the SAME no-pid Session, silent for LESS than 24h, still refuses with not-ended", () => {
     const recentlyAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h
     appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: recentlyAgo });
+
+    expect(archiveSession(home, "sess-1")).toEqual({ kind: "not-ended" });
+  });
+
+  /**
+   * Deepening ticket 01 ("every surface reads one closed-out Session
+   * index"): archive now merges this Session's OWN Activity touch too —
+   * the SAME signal the board already folded in — so a Session with
+   * ordinary tool-call activity but no Event for 24h is no longer
+   * refused-then-silently-closed out from under a human who never saw it
+   * reach TERMINÓ on the board either.
+   */
+  test("deepening ticket 01: a no-pid Session silent past 24h by Events alone, but touched recently, still refuses with not-ended — archive now reads the SAME Activity touch the board already did", () => {
+    const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h, no pid at all
+    appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }), ts: longAgo });
+    touchSession(home, "sess-1");
 
     expect(archiveSession(home, "sess-1")).toEqual({ kind: "not-ended" });
   });

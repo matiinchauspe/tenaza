@@ -1,13 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decideAction } from "../src/decide";
 import { inboxIdentityHash } from "../src/identity";
 import { appendEvent } from "../src/log";
+import { sessionTouchedPath } from "../src/paths";
 import { renderStatus } from "../src/status";
+import { touchSession } from "../src/toolcalls";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { sessionEndedEvent, sessionStartedEvent, turnEndedEvent } from "../src/contract/event";
+import {
+  notificationObservedEvent,
+  sessionEndedEvent,
+  sessionStartedEvent,
+  turnEndedEvent,
+} from "../src/contract/event";
 
 /** A single Inbox item's own display id is always the minimum 4-char prefix of its hash (decision 03, ADR 0005, ticket 06) — there's nothing else in these tests for it to collide with. */
 function shortId(session: string, line: number): string {
@@ -139,5 +146,41 @@ effect = "human"
     const output = renderStatus(home);
     const treeLine = output.split("\n").find((line) => line.startsWith("  ") && line.includes("sess-1"))!;
     expect(treeLine).toContain("esperándote · 1 en segundo plano");
+  });
+
+  test("deepening ticket 01: an Activity touch 1 min ago keeps a 20-min-silent Session off 'sin señal' — the CLI now reads the SAME closed-out index the board already did", () => {
+    const twentyMinAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    appendEvent(home, {
+      ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+      ts: twentyMinAgo,
+    });
+    touchSession(home, "sess-1");
+    const oneMinAgo = new Date(Date.now() - 60 * 1000);
+    utimesSync(sessionTouchedPath("sess-1", home), oneMinAgo, oneMinAgo);
+
+    const output = renderStatus(home);
+    const treeLine = output.split("\n").find((line) => line.includes("sess-1"))!;
+    expect(treeLine).not.toContain("sin señal");
+    expect(treeLine).toContain("vivo");
+  });
+
+  test("deepening ticket 01: a native prompt followed by a later Activity touch stops reading 'esperándote' — ordinary tool-call activity already superseded it, the board's own rule", () => {
+    appendEvent(
+      home,
+      sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/scratch", capabilities: [] }),
+    );
+    appendEvent(home, notificationObservedEvent("sess-1", "idle_prompt"));
+
+    const beforeTouch = renderStatus(home);
+    expect(beforeTouch.split("\n").find((line) => line.includes("sess-1"))).toContain("esperándote");
+
+    touchSession(home, "sess-1");
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(sessionTouchedPath("sess-1", home), future, future);
+
+    const afterTouch = renderStatus(home);
+    const treeLine = afterTouch.split("\n").find((line) => line.includes("sess-1"))!;
+    expect(treeLine).not.toContain("esperándote");
+    expect(treeLine).toContain("vivo");
   });
 });

@@ -15,6 +15,7 @@ import { inboxIdentityHash } from "../src/identity";
 import { shortIdIndex } from "../src/inbox";
 import { appendEvent } from "../src/log";
 import { deriveStatuslineCounts, firstWords, formatStatusline } from "../src/statusline";
+import { touchSession } from "../src/toolcalls";
 
 describe("firstWords (pure)", () => {
   test("joins the first 3 words of a command", () => {
@@ -305,6 +306,21 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
       appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/a", capabilities: [] }), ts: longAgo });
 
       expect(deriveStatuslineCounts(home).live).toBe(0);
+    });
+
+    /**
+     * Deepening ticket 01 ("every surface reads one closed-out Session
+     * index"): the statusline now merges the Activity touch too — the SAME
+     * signal `tenaza status` and the board already read — so a Session
+     * busy with ordinary tool calls but no Event for 25h still counts
+     * toward "vivas" instead of silently dropping out.
+     */
+    test("deepening ticket 01: stays live past 25h of Event-silence when touched recently, no pid ever captured", () => {
+      const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h
+      appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: "/tmp/a", capabilities: [] }), ts: longAgo });
+      touchSession(home, "sess-1");
+
+      expect(deriveStatuslineCounts(home).live).toBe(1);
     });
   });
 });

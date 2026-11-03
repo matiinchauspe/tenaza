@@ -41,8 +41,7 @@ import {
   UNKNOWN_PROJECT,
   buildSessionIndex,
   childrenIndex,
-  closeDeadProcesses,
-  closeSilentPidlessSessions,
+  closedOutSessionIndex,
   countActiveDescendants,
   createCachingGitRootResolver,
   deriveProject,
@@ -303,30 +302,16 @@ export function buildBoardPayload(
   resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardPayload {
   const events = cache ? readAllSessionEventsCached(home, cache).events : readAllSessionEvents(home);
-  const fullIndex = buildSessionIndex(events);
-  // Ticket 14 (AC3): fold each Session's own "last ordinary activity" touch
-  // (`toolcalls.ts`'s `touchSession`, bumped on every PreToolUse/PostToolUse/
-  // Stop call, matched or not — never an Event) into its `lastEventTs` here,
-  // the ONE place the Event-sourced timeline and this file-sourced signal
-  // ever merge. `buildSessionIndex` itself stays a pure function of
-  // `Event[]` — it has no reason to know `.touched` files exist at all.
-  // This is also what lets `nativeWaitFor` (`toBoardSession`, below) tell a
-  // CURRENT native prompt apart from one any later ordinary activity has
-  // already superseded, with no second Event ever written for that
-  // transition.
-  const touchedAt = readTouchedTimestamps(home);
-  for (const node of fullIndex.values()) {
-    const touched = touchedAt.get(node.id);
-    if (touched && (!node.lastEventTs || touched > node.lastEventTs)) node.lastEventTs = touched;
-  }
-  // Ticket 02, AC1: the SAME rule `tenaza status`/`statusline` apply — run
-  // AFTER the touch merge above so a synthetic `endedAt` reflects the
-  // Session's true last-known activity, touch files included.
-  closeDeadProcesses(fullIndex);
-  // Ticket 06 (tenaza-v0-3): the no-pid fallback, same point — a pre-0.3.0
-  // Session `closeDeadProcesses` can never confirm gone still reaches this
-  // board for free.
-  closeSilentPidlessSessions(fullIndex);
+  // Deepening ticket 01 ("every surface reads one closed-out Session
+  // index"): `closedOutSessionIndex` folds each Session's own "last
+  // ordinary activity" touch (`toolcalls.ts`'s `touchSession`) into its
+  // `lastEventTs` BEFORE `closeDeadProcesses`/`closeSilentPidlessSessions`
+  // run (ticket 14 AC3 / ticket 02 AC1 / ticket 06, now one fixed order
+  // instead of three call sites re-assembling it by hand). This is also
+  // what lets `nativeWaitFor` (`toBoardSession`, below) tell a CURRENT
+  // native prompt apart from one any later ordinary activity has already
+  // superseded, with no second Event ever written for that transition.
+  const fullIndex = closedOutSessionIndex(events, readTouchedTimestamps(home));
   const eventTypes = eventTypesBySession(events);
   // Ticket 11: an archived Session's card is hidden from the BOARD alone
   // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered

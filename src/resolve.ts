@@ -7,12 +7,11 @@ import { appendHumanEvent, readSessionEvents } from "./log";
 import { effectiveWaitSeconds, loadPolicy } from "./policy";
 import { runFailureTrailer } from "./runoutput";
 import {
-  buildSessionIndex,
-  closeDeadProcesses,
-  closeSilentPidlessSessions,
+  closedOutSessionIndex,
   cwdForSession,
   isArchived,
   latestArchiveTimestamps,
+  readSessionTouchedTimestamp,
   UnknownSessionError,
 } from "./sessions";
 
@@ -344,31 +343,32 @@ export type ArchiveResult = ArchiveRefusal | { kind: "accepted"; alreadyArchived
  * `isArchived` (`sessions.ts`) judges that against this Session's own
  * `lastEventTs`, so a resumed-then-reended Session always gets a FRESH
  * archive Event here rather than being silently treated as already done.
- * Reading just THIS Session's own log is enough to know whether it has
- * ended and when it last did anything at all — `session.ended` (and every
- * resumed Session's later Events) are written there, not the human log —
- * so this never needs the full cross-Session index `buildBoardPayload`
- * builds; only the human log's own archive Events (`latestArchiveTimestamps`)
- * come from elsewhere.
+ * Reading just THIS Session's own log (plus, deepening ticket 01, its own
+ * `.touched` file alone — `readSessionTouchedTimestamp`, never the whole
+ * directory `readTouchedTimestamps` scans for the other three surfaces) is
+ * enough to know whether it has ended and when it last did anything at
+ * all — `session.ended` (and every resumed Session's later Events) are
+ * written there, not the human log — so this never needs the full
+ * cross-Session index `buildBoardPayload` builds; only the human log's own
+ * archive Events (`latestArchiveTimestamps`) come from elsewhere.
  *
- * Ticket 02: also runs `closeDeadProcesses` over this one-node index before
- * reading `endedAt` — a Session the board already shows closed (its
- * runtime process confirmed gone) must be archivable too, or a human who
- * just saw it move to TERMINÓ would click "archivar" and get refused with
- * `not-ended`. Scoped to this Session's own `pid` alone (never a second,
- * cross-Session `ps` read) — the SAME single-node index this function
- * already builds, unchanged otherwise.
- *
- * Ticket 06 (tenaza-v0-3): `closeSilentPidlessSessions` runs right after,
- * the SAME point its own other three call sites apply it — a pre-0.3.0
- * Session with no `pid` that has gone silent past the 24h window is the
- * ORIGINAL motivating bug here (`archiveSession` used to refuse it with
- * `not-ended` forever, since nothing could ever set its `endedAt`).
+ * `closedOutSessionIndex` (deepening ticket 01) folds in both closes a
+ * Session the board already shows closed needs to be archivable too:
+ * ticket 02's `closeDeadProcesses` (its runtime process confirmed gone)
+ * and ticket 06's `closeSilentPidlessSessions` (a pre-0.3.0 Session with no
+ * `pid` at all, silent past the 24h window) — a human who just saw either
+ * case move to TERMINÓ on the board must not click "archivar" here and get
+ * refused with `not-ended`. Scoped to this Session's own `pid` and touch
+ * alone (never a second, cross-Session `ps` or directory read) — the SAME
+ * single-node index this function already built before this ticket,
+ * unchanged otherwise.
  */
 export function archiveSession(home: string, sessionId: string): ArchiveResult {
-  const index = buildSessionIndex(readSessionEvents(sessionId, home));
-  closeDeadProcesses(index);
-  closeSilentPidlessSessions(index);
+  const touched = readSessionTouchedTimestamp(sessionId, home);
+  const index = closedOutSessionIndex(
+    readSessionEvents(sessionId, home),
+    touched ? new Map([[sessionId, touched]]) : undefined,
+  );
   const node = index.get(sessionId);
   if (!node) throw new UnknownSessionError(sessionId);
   if (node.endedAt === undefined) return { kind: "not-ended" };

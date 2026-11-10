@@ -92,8 +92,9 @@ function isStateDirWritable(home: string): boolean {
  * command, not at it: `systemMessage` already warns per CALL (ticket 01),
  * but a session that starts and never happens to run a Policy-matching
  * command would otherwise never hear about it. Returns `undefined` when
- * every check passes, so a healthy SessionStart stays silent — the same
- * "nothing to say, say nothing" convention `handlePreToolUse` already
+ * every check passes, so a healthy SessionStart adds no warning to the
+ * announce declaration it always carries (announce-declaration/01) — the
+ * same "nothing to say, say nothing" convention `handlePreToolUse` already
  * follows.
  *
  *   - **binary version**: `version` (the one literal every build bakes in,

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { handleClaudeHook } from "../../src/adapters/claude";
+import { ANNOUNCE_DECLARATION, handleClaudeHook, LABEL_NOT_RECORDED, parseLabelCommand } from "../../src/adapters/claude";
 import { liveAnsweredEvent, sessionEndedEvent } from "../../src/contract/event";
 import { writeAlive } from "../../src/daemonlink";
 import { decideAction } from "../../src/decide";
@@ -139,7 +139,7 @@ effect = "flag"
       cwd: "/repo",
     });
 
-    expect(response).toBeUndefined();
+    expect(response).toEqual({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: ANNOUNCE_DECLARATION } });
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
@@ -226,7 +226,7 @@ effect = "flag"
       cwd: "/repo",
     });
 
-    expect(response).toBeUndefined();
+    expect(response).toEqual({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: ANNOUNCE_DECLARATION } });
     expect(readSessionEvents("sess-1", home)).toHaveLength(0);
     const events = readSessionEvents("agent-1", home);
     expect(events).toHaveLength(1);
@@ -498,6 +498,104 @@ effect = "human"
     const events = readSessionEvents("sess-1", home);
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("session.labeled");
+  });
+
+  /**
+   * announce-declaration/01 (the Policy bypass, engram #1736): only a PURE
+   * label command skips the Policy. One chained, piped, substituted or
+   * redirected is not an announce — it falls through to `decideAction`
+   * whole, so a reserved command riding behind a label still hits its Rule.
+   */
+  test("a reserved command chained after `tenaza label` still hits its Rule — and labels nothing", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label project=acme && gh pr merge 1" },
+    });
+
+    expect(response?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(LABEL_NOT_RECORDED);
+    expect(readSessionEvents("sess-1", home).some((event) => event.type === "session.labeled")).toBe(false);
+  });
+
+  test("a label inside a harmless non-pure command is not recorded — and the agent is told, with no permission decision", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /repo && tenaza label project=acme" },
+    });
+
+    expect(response).toEqual({
+      hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: LABEL_NOT_RECORDED },
+    });
+    expect(readSessionEvents("sess-1", home).some((event) => event.type === "session.labeled")).toBe(false);
+  });
+
+  test.each(["/opt/homebrew/bin/tenaza label project=acme", 'tenaza label verdict="needs work"'])(
+    "a path-qualified or multi-word label is told it was not recorded too: %p",
+    async (command) => {
+      const response = await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+      });
+
+      expect(response?.hookSpecificOutput?.additionalContext).toBe(LABEL_NOT_RECORDED);
+      expect(response?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    },
+  );
+
+  test("a command that never mentions a label gets no label notice", async () => {
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /repo && ls" },
+    });
+
+    expect(response).toBeUndefined();
+  });
+
+  test.each([
+    ['tenaza label ticket="API-42"', { ticket: "API-42" }],
+    ["tenaza label project='acme' verdict=pass", { project: "acme", verdict: "pass" }],
+    ["tenaza label a=b\tc=d", { a: "b", c: "d" }],
+    ["  tenaza   label a=b  ", { a: "b" }],
+  ])("parseLabelCommand still takes a pure label: %p", (command, labels) => {
+    expect(parseLabelCommand(command)).toEqual(labels);
+  });
+
+  test.each([
+    "./tenaza label a=b",
+    "/tmp/x/tenaza label a=b",
+    "/tmp/*/tenaza label a=b",
+    "/opt/homebrew/bin/tenaza label a=b",
+    "tenaza label a=(b",
+    "tenaza label a=b < in.txt",
+    "tenaza label a=b \\",
+    "tenaza label verdict='needs work'",
+    'tenaza label a="b',
+    "tenaza label a=b'",
+  ])("parseLabelCommand rejects a path-qualified, unbalanced or escaped label: %p", (command) => {
+    expect(parseLabelCommand(command)).toBeUndefined();
+  });
+
+  test.each([
+    "tenaza label project=acme && gh pr merge 1",
+    "tenaza label project=acme; gh pr merge 1",
+    "tenaza label project=acme || gh pr merge 1",
+    "tenaza label project=acme | sh",
+    "tenaza label project=$(gh pr merge 1)",
+    "tenaza label project=`gh pr merge 1`",
+    "tenaza label project=acme > out.txt",
+    "tenaza label project=acme\ngh pr merge 1",
+    'tenaza label verdict="needs work"',
+    "tenaza label project=acme &",
+  ])("parseLabelCommand rejects a command that is not a pure label: %p", (command) => {
+    expect(parseLabelCommand(command)).toBeUndefined();
   });
 
   test("`tenaza label` with no key=value pairs writes nothing — degrades silently, never a crash", async () => {

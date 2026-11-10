@@ -184,8 +184,9 @@ export interface ClaudeHookResponse {
   systemMessage?: string;
   hookSpecificOutput: {
     hookEventName: "PreToolUse";
-    permissionDecision: "allow" | "deny";
-    permissionDecisionReason: string;
+    /** Absent only on a decision-less answer that carries `additionalContext` alone (`LABEL_NOT_RECORDED`) — never an implicit allow. */
+    permissionDecision?: "allow" | "deny";
+    permissionDecisionReason?: string;
     /** Ticket 10: set only on a live-answering APPROVE that carried a message — "next to the tool result" (code.claude.com/docs/en/hooks' own `additionalContext` field, inside `hookSpecificOutput` alongside `permissionDecision`). */
     additionalContext?: string;
   };
@@ -199,6 +200,43 @@ export interface ClaudeHookResponse {
  * Session (q9).
  */
 const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block", "measure"];
+
+/**
+ * announce-declaration/01: the one line every observed Session gets in its
+ * own context (SessionStart, and SubagentStart for each subagent), so a
+ * caller finds the announce by its shape and never has to name Tenaza (ADR
+ * 0003). Worded as an offer, not an order — most Sessions have no caller
+ * that labels them. "Its own shell command" with "single-word values"
+ * because `parseLabelCommand` captures only a pure label command.
+ */
+export const ANNOUNCE_DECLARATION =
+  "A session observer is watching this session, and a caller may label it by running `tenaza label <key>=<value> …` as its own shell command with single-word values — `project` groups sessions, and any other key is shown as given.";
+
+/**
+ * Shell syntax that makes a command more than a pure label call — see
+ * `parseLabelCommand`. Quotes are not in it: on their own they run nothing,
+ * so a value wrapped in one matched pair is unwrapped instead.
+ */
+const SHELL_SYNTAX = /[;&|<>$`()\\\n]/;
+
+/** One `key=value` token, its value optionally wrapped in one matched pair of quotes holding no quote itself. */
+const LABEL_PAIR = /^([^=\s'"]+)=(?:"([^"]*)"|'([^']*)'|([^'"]*))$/;
+
+/** A `tenaza label` named anywhere in a command — the shape that earns `LABEL_NOT_RECORDED` when it is not a pure one. */
+const MENTIONS_LABEL = /(?:^|[\s;&|(`/])tenaza\s+label\b/;
+
+/**
+ * What the agent is told when a command carried a `tenaza label` that was
+ * not a pure label command, so it was not recorded (announce-declaration/01)
+ * — the CLI's own `label` is a no-op, so without this the drop is silent.
+ */
+export const LABEL_NOT_RECORDED =
+  "The `tenaza label` in this command was not recorded: a label counts only when `tenaza label <key>=<value> …` runs as its own shell command, with single-word values.";
+
+/** The `additionalContext` answer SessionStart and SubagentStart give — context only, no decision. */
+function declarationResponse(hookEventName: "SessionStart" | "SubagentStart"): ClaudeHookOutput {
+  return { hookSpecificOutput: { hookEventName, additionalContext: ANNOUNCE_DECLARATION } };
+}
 
 /**
  * Normalize a PreToolUse payload into a runtime-neutral Action (ticket 04,
@@ -222,27 +260,39 @@ export function normalizeClaudeAction(payload: ClaudeHookPayload): Action | unde
 }
 
 /**
- * Recognize `tenaza label key=value …` and parse its pairs — the Yunque
- * announce mechanism (ADR 0003). Matches the binary by its bare or
- * path-qualified name so `tenaza label …`, `/opt/homebrew/bin/tenaza label
- * …` and similar all recognize; anything else (a different `tenaza`
- * subcommand, an unrelated command) returns `undefined`, never throws. A
- * token with no `=`, or an empty key, is skipped rather than failing the
- * whole command — one malformed pair never loses the rest. Returns
+ * Recognize `tenaza label key=value …` and parse its pairs — the announce
+ * mechanism (ADR 0003). Matches the BARE binary name only: a path-qualified
+ * `./tenaza` or `/tmp/x/tenaza` runs whatever file sits there, so it is not
+ * provably the label call (announce-declaration/01); anything else (a
+ * different `tenaza` subcommand, an unrelated command) returns `undefined`,
+ * never throws. A token with no `=`, or an empty key, is skipped rather than
+ * failing the whole command — one malformed pair never loses the rest. Returns
  * `undefined` (not an empty object) when nothing usable was found, so a
  * caller can tell "not a label command" apart from "a label command with
  * nothing in it" without checking size itself.
+ *
+ * Only a PURE label command is one (announce-declaration/01, the Policy
+ * bypass): any shell syntax that could run something else — chaining,
+ * pipes, substitution, redirection, a background `&`, quoting — makes it
+ * not a label at all, so `handlePreToolUse` hands the whole command to the
+ * Policy instead of skipping it. That is also why values are single words: a
+ * quote left unbalanced once split on whitespace (`verdict="needs work"`)
+ * makes the whole command not a label, rather than a cut value.
  */
 export function parseLabelCommand(command: string): Record<string, string> | undefined {
-  const match = command.trim().match(/^(?:\S*\/)?tenaza\s+label(?:\s+(.*))?$/);
+  if (SHELL_SYNTAX.test(command)) return undefined;
+  const match = command.trim().match(/^tenaza\s+label(?:\s+(.*))?$/);
   if (!match) return undefined;
 
   const labels: Record<string, string> = {};
-  for (const pair of (match[1] ?? "").trim().split(/\s+/)) {
-    if (!pair) continue;
-    const eq = pair.indexOf("=");
-    if (eq <= 0) continue;
-    labels[pair.slice(0, eq)] = pair.slice(eq + 1);
+  for (const token of (match[1] ?? "").trim().split(/\s+/)) {
+    if (!token) continue;
+    const pair = token.match(LABEL_PAIR);
+    if (pair) {
+      labels[pair[1] as string] = pair[2] ?? pair[3] ?? pair[4] ?? "";
+      continue;
+    }
+    if (/['"]/.test(token)) return undefined;
   }
   return Object.keys(labels).length > 0 ? labels : undefined;
 }
@@ -349,7 +399,7 @@ function backfillSessionStartedIfMissing(
 async function handlePreToolUse(
   home: string,
   payload: ClaudeHookPayload,
-): Promise<ClaudeHookOutput | undefined> {
+): Promise<ClaudePreToolUseOutput | undefined> {
   // `agent_id` names a subagent's OWN Session, never its parent's
   // `session_id` (ticket 05, M2 — #1423's own fix: v0.1 logged every
   // subagent decision under the PARENT's log instead of the subagent's
@@ -375,6 +425,43 @@ async function handlePreToolUse(
     }
   }
 
+  const unrecorded = action.kind === "shell" && isUnrecordedLabel(action.command);
+  const response = await decidePreToolUse(home, session, action);
+  return unrecorded ? withLabelNotRecorded(response) : response;
+}
+
+/**
+ * A command that names `tenaza label` but is not shaped like a pure one — so
+ * its label was dropped. A pure-shaped `tenaza label` with no usable pair is
+ * not one of these: it was run as told, and degrades silently.
+ */
+function isUnrecordedLabel(command: string): boolean {
+  if (!MENTIONS_LABEL.test(command)) return false;
+  const pureShaped = !SHELL_SYNTAX.test(command) && /^tenaza\s+label(?:\s+[^'"]*)?$/.test(command.trim());
+  return !pureShaped;
+}
+
+/**
+ * Tell the agent its `tenaza label` was not recorded (announce-declaration/01)
+ * on top of whatever the Policy answered — beside a deny's reason, or as a
+ * decision-less `additionalContext` that leaves Claude Code's own permission
+ * checks exactly where they were (decision 07: never an implicit allow).
+ */
+function withLabelNotRecorded(response: ClaudePreToolUseOutput | undefined): ClaudePreToolUseOutput {
+  const specific = response?.hookSpecificOutput;
+  const additionalContext = [specific?.additionalContext, LABEL_NOT_RECORDED].filter(Boolean).join(" ");
+  return {
+    ...(response ?? {}),
+    hookSpecificOutput: { ...(specific ?? { hookEventName: "PreToolUse" }), additionalContext },
+  };
+}
+
+/** The Policy's answer for one Action that is not a pure label command. */
+async function decidePreToolUse(
+  home: string,
+  session: string,
+  action: Action,
+): Promise<ClaudePreToolUseOutput | undefined> {
   const result = await decideAction(home, session, action, CLAUDE_CAPABILITIES);
   const skippedLines = result.logged ? result.skippedLines : undefined;
 
@@ -483,20 +570,29 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
   }
 }
 
-/** SubagentStart: its own Session, keyed by `agent_id`, parented to `session_id`. */
+/**
+ * SubagentStart: its own Session, keyed by `agent_id`, parented to
+ * `session_id`. Swallows a failed write the way `handleSessionStart` does,
+ * so a subagent keeps its announce declaration exactly when a top-level
+ * Session would (announce-declaration/01).
+ */
 export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPayload): void {
-  const marker = captureProcessMarker();
-  appendEvent(
-    home,
-    sessionStartedEvent(payload.agent_id, {
-      parent: payload.session_id,
-      runtime: "claude",
-      cwd: payload.cwd,
-      capabilities: CLAUDE_CAPABILITIES,
-      pid: marker.pid,
-      pidStartedAt: marker.startedAt,
-    }),
-  );
+  try {
+    const marker = captureProcessMarker();
+    appendEvent(
+      home,
+      sessionStartedEvent(payload.agent_id, {
+        parent: payload.session_id,
+        runtime: "claude",
+        cwd: payload.cwd,
+        capabilities: CLAUDE_CAPABILITIES,
+        pid: marker.pid,
+        pidStartedAt: marker.startedAt,
+      }),
+    );
+  } catch {
+    // See the doc comment above.
+  }
 }
 
 /**
@@ -704,10 +800,15 @@ export function handleNotification(home: string, payload: ClaudeNotificationPayl
 
 /**
  * Dispatch one Claude Code hook call by its `hook_event_name`. Only
- * PreToolUse ever answers back with a permission decision; every other
- * event (lifecycle, Stop, PostToolUse, and ticket 14's UserPromptSubmit/
- * Notification) just appends what it has and tells the host nothing.
+ * PreToolUse ever answers back with a permission decision; SessionStart and
+ * SubagentStart answer with context only — the announce declaration
+ * (announce-declaration/01); every other event (SubagentStop, SessionEnd,
+ * Stop, PostToolUse, and ticket 14's UserPromptSubmit/Notification) just
+ * appends what it has and tells the host nothing. Overloaded so a PreToolUse
+ * caller gets PreToolUse's own output shape, never the context-only one.
  */
+export async function handleClaudeHook(home: string, payload: ClaudeHookPayload): Promise<ClaudePreToolUseOutput | undefined>;
+export async function handleClaudeHook(home: string, payload: ClaudeHookInput): Promise<ClaudeHookOutput | undefined>;
 export async function handleClaudeHook(
   home: string,
   payload: ClaudeHookInput,
@@ -717,10 +818,10 @@ export async function handleClaudeHook(
       return await handlePreToolUse(home, payload);
     case "SessionStart":
       handleSessionStart(home, payload);
-      return undefined;
+      return declarationResponse("SessionStart");
     case "SubagentStart":
       handleSubagentStart(home, payload);
-      return undefined;
+      return declarationResponse("SubagentStart");
     case "SubagentStop":
       handleSubagentStop(home, payload);
       return undefined;
@@ -749,14 +850,25 @@ export async function handleClaudeHook(
  * widened so `hookSpecificOutput` becomes OPTIONAL (ADR 0007, ticket 01) —
  * `runClaudeHookSafely` below needs to print a bare `{ systemMessage }`
  * with NO permission decision at all, which `ClaudeHookResponse` itself
- * cannot express. `handleClaudeHook` keeps returning the narrower,
- * unchanged `ClaudeHookResponse`, so every existing caller's type checking
- * against IT is unaffected; only this wider type is used for what
- * actually reaches stdout.
+ * cannot express — and so it may also be SessionStart/SubagentStart's
+ * context-only answer (announce-declaration/01), discriminated on
+ * `hookEventName`. Only this wider type is used for what actually reaches
+ * stdout; a PreToolUse caller sees `ClaudePreToolUseOutput` below.
  */
 export interface ClaudeHookOutput {
   systemMessage?: string;
+  hookSpecificOutput?: ClaudeHookResponse["hookSpecificOutput"] | ClaudeContextOutput;
+}
+
+/** PreToolUse's own answer: a permission decision or nothing, never context-only output. */
+export interface ClaudePreToolUseOutput extends ClaudeHookOutput {
   hookSpecificOutput?: ClaudeHookResponse["hookSpecificOutput"];
+}
+
+/** SessionStart/SubagentStart's own `hookSpecificOutput`: context for the Session, never a decision (announce-declaration/01). */
+export interface ClaudeContextOutput {
+  hookEventName: "SessionStart" | "SubagentStart";
+  additionalContext: string;
 }
 
 export interface HookOutcome {
@@ -810,18 +922,18 @@ function withPolicyDegradation(home: string, response: ClaudeHookOutput | undefi
 
 /**
  * Compose the SessionStart self-check (ADR 0007, ticket 02) onto whatever
- * `handleClaudeHook` already did for this event — today, always nothing:
- * `handleSessionStart` only ever appends an Event and returns void. Mirrors
- * `withPolicyDegradation`'s own shape for PreToolUse: every check passing
- * stays silent, any check failing becomes BOTH this call's `systemMessage`
- * and the `degraded` report `runHookClaude` (cli.ts) writes to
- * `state/health.json` — and, when it's grave, fires the macOS notification
- * through the same report.
+ * `handleClaudeHook` already answered for this event — the announce
+ * declaration (announce-declaration/01), which a failing check never
+ * removes. Mirrors `withPolicyDegradation`'s own shape for PreToolUse:
+ * every check passing adds nothing, any check failing becomes BOTH this
+ * call's `systemMessage` and the `degraded` report `runHookClaude` (cli.ts)
+ * writes to `state/health.json` — and, when it's grave, fires the macOS
+ * notification through the same report.
  */
-function withSelfCheck(home: string): HookOutcome {
+function withSelfCheck(home: string, response: ClaudeHookOutput | undefined): HookOutcome {
   const fault = runSelfCheck(home);
-  if (!fault) return { output: undefined };
-  return { output: { systemMessage: fault.message }, degraded: fault };
+  if (!fault) return { output: response };
+  return { output: { ...(response ?? {}), systemMessage: fault.message }, degraded: fault };
 }
 
 /**
@@ -851,7 +963,7 @@ export async function runClaudeHookSafely(home: string, raw: string): Promise<Ho
       return withPolicyDegradation(home, response);
     }
     if (payload?.hook_event_name === "SessionStart") {
-      return withSelfCheck(home);
+      return withSelfCheck(home, response);
     }
 
     return { output: response };

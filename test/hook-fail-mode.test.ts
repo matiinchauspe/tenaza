@@ -2,11 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ANNOUNCE_DECLARATION } from "../src/adapters/claude";
 import { readHealth } from "../src/health";
 import { readSessionEvents } from "../src/log";
 import { readNotificationRecorder } from "../src/notify";
 import { healthPath, policyPath, sessionLogPath } from "../src/paths";
 import { runCli } from "./support/cli";
+
+/** The exact SessionStart/SubagentStart answer of a healthy call (announce-declaration/01). */
+const declaration = (hookEventName: "SessionStart" | "SubagentStart") => ({
+  hookSpecificOutput: { hookEventName, additionalContext: ANNOUNCE_DECLARATION },
+});
 
 /**
  * Black-box seam the ticket names: `tenaza hook claude` in a temporary
@@ -233,11 +239,11 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     return runCli(["hook", "claude"], { home, stdin: sessionStartPayload(sessionId) });
   }
 
-  test("a fresh, healthy home: SessionStart prints nothing, writes no health.json, and notifies nobody", async () => {
+  test("a fresh, healthy home: SessionStart warns nothing, writes no health.json, and notifies nobody", async () => {
     const result = await sessionStart();
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(declaration("SessionStart")); // the announce declaration alone (announce-declaration/01)
     expect(existsSync(healthPath(home))).toBe(false);
     expect(readNotificationRecorder(home)).toHaveLength(0);
   });
@@ -261,7 +267,7 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(result.exitCode).toBe(0);
     const response = JSON.parse(result.stdout);
     expect(response.systemMessage).toContain("using the last valid policy");
-    expect(response.hookSpecificOutput).toBeUndefined();
+    expect(response.hookSpecificOutput).toEqual(declaration("SessionStart").hookSpecificOutput); // context, never a decision
 
     expect(readHealth(home)).toMatchObject({ grave: false });
     expect(readNotificationRecorder(home)).toHaveLength(0); // not grave — no macOS notification
@@ -275,7 +281,7 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(result.exitCode).toBe(0);
     const response = JSON.parse(result.stdout);
     expect(response.systemMessage).toContain("no Rules are active");
-    expect(response.hookSpecificOutput).toBeUndefined();
+    expect(response.hookSpecificOutput).toEqual(declaration("SessionStart").hookSpecificOutput); // context, never a decision
 
     expect(readHealth(home)).toMatchObject({ grave: true });
 
@@ -377,7 +383,7 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(declaration("SubagentStart"));
     expect(existsSync(healthPath(home))).toBe(false);
     expect(readNotificationRecorder(home)).toHaveLength(0);
   });

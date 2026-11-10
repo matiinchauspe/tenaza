@@ -197,7 +197,7 @@ a file and run later.
 | `tenaza ui` | Start the Daemon in the foreground |
 | `tenaza open` | Open the board (what `/tenaza` runs) |
 | `tenaza run / done / dismiss <id>` | Resolve an Inbox item |
-| `tenaza label key=value …` | Label the current session, e.g. `ticket=API-42` |
+| `tenaza label key=value …` | Label the current session, e.g. `ticket=API-42`. Run it as its own command, with single-word values. Every Claude Code session Tenaza observes is told how in its context |
 
 ## Upgrade
 

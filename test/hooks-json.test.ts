@@ -126,3 +126,60 @@ describe("the missing-binary guard, run for real with a PATH that lacks tenaza",
     }
   });
 });
+
+/**
+ * announce-declaration/01, AC6: SessionStart and SubagentStart carry the
+ * announce declaration, so with the binary missing they must stay SILENT —
+ * no declaration, no warning, exit 0 — rather than an exec-form spawn
+ * failure Claude Code shows as a `hook error` on every session and subagent.
+ * PreToolUse's own guard already warns once; these two add nothing to it.
+ */
+describe("the declaring events' missing-binary guard", () => {
+  async function runGuard(event: string, pathDir: string) {
+    const command = entriesFor(event)[0]?.hooks[0]?.command ?? "";
+    const proc = Bun.spawn(["/bin/sh", "-c", command], {
+      env: { PATH: pathDir },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  for (const event of ["SessionStart", "SubagentStart"]) {
+    test(`${event} is shell-form: a guard, then \`exec tenaza hook claude\``, () => {
+      const hook = entriesFor(event)[0]?.hooks[0];
+      expect(hook?.command).toContain("command -v tenaza");
+      expect(hook?.command).toContain("exec tenaza hook claude");
+      expect(hook?.args).toBeUndefined();
+    });
+
+    test(`${event} with no tenaza on PATH prints nothing and exits 0`, async () => {
+      const emptyBin = mkdtempSync(path.join(tmpdir(), "tenaza-missing-path-"));
+      try {
+        expect(await runGuard(event, emptyBin)).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+      } finally {
+        rmSync(emptyBin, { recursive: true, force: true });
+      }
+    });
+
+    test(`${event} falls through to \`exec tenaza hook claude\` when tenaza IS on PATH`, async () => {
+      const bin = mkdtempSync(path.join(tmpdir(), "tenaza-present-path-"));
+      try {
+        const fakeTenaza = path.join(bin, "tenaza");
+        writeFileSync(fakeTenaza, '#!/bin/sh\nprintf \'ran:%s\' "$*"\n');
+        Bun.spawnSync(["chmod", "+x", fakeTenaza]);
+        const result = await runGuard(event, bin);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toBe("ran:hook claude");
+      } finally {
+        rmSync(bin, { recursive: true, force: true });
+      }
+    });
+  }
+});

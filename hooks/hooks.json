@@ -2,12 +2,12 @@
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+        "hooks": [{ "type": "command", "command": "command -v tenaza >/dev/null 2>&1 || exit 0; exec tenaza hook claude" }]
       }
     ],
     "SubagentStart": [
       {
-        "hooks": [{ "type": "command", "command": "tenaza", "args": ["hook", "claude"] }]
+        "hooks": [{ "type": "command", "command": "command -v tenaza >/dev/null 2>&1 || exit 0; exec tenaza hook claude" }]
       }
     ],
     "PreToolUse": [

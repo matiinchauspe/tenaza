@@ -802,7 +802,7 @@ function readLabels(home: string, session: string): Record<string, string> {
   }
 }
 
-/** The latest sample, not the max: a reading that falls after a compaction stops the nudge. */
+/** The latest sample, not the max: once a compaction lowers the reading, the next sample stops the nudge. */
 function checkpointNudge(home: string, session: string): ClaudeContextOutput | undefined {
   if (!isDispatchedRun(readLabels(home, session))) return undefined;
   if (!shouldNudgeCheckpoint(readLatestUsageSample(home, session), loadPolicy(home).thresholdTokens)) return undefined;

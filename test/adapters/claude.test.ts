@@ -905,6 +905,19 @@ describe("a verdict=parked announce fires the one notification the human needs",
 
     expect(readNotificationRecorder(home)).toHaveLength(1);
   });
+
+  test("a verdict=parked already in the log, with no marker, still blocks a second notification", async () => {
+    appendEvent(home, sessionLabeledEvent("sess-1", { verdict: "parked" }));
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label verdict=parked" },
+    });
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
 });
 
 describe("Live answering wiring (ticket 10): the adapter's own permission decision", () => {
@@ -1644,6 +1657,38 @@ describe("PostToolUse checkpoint nudge: nag a dispatched run past the threshold,
     expect(response).toEqual({
       hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: CHECKPOINT_NUDGE },
     });
+  });
+
+  test("a later sample below the threshold stops the nudge — the latest reading counts, never the max", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+    const nudged = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+    expect(nudged?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+    for (let i = 26; i < 50; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
   });
 
   test("an UNLABELED Session past the threshold is never nudged — this walk's own interactive session included", async () => {

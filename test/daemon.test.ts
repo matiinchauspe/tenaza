@@ -21,6 +21,7 @@ import {
   promptSubmittedEvent,
   sessionArchivedEvent,
   sessionEndedEvent,
+  sessionLabeledEvent,
   sessionStartedEvent,
   turnEndedEvent,
   usageSampledEvent,
@@ -1933,6 +1934,14 @@ describe("buildBoardPayload — ticket 05: turnWait", () => {
 
     const session = buildBoardPayload(home).sessions.find((s) => s.id === "sess-1");
     expect(session?.turnWait).toMatchObject({ backgroundCount: 0 });
+  });
+
+  test("a Session's verdict label reaches the board payload", () => {
+    appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [] }));
+    appendEvent(home, sessionLabeledEvent("sess-1", { verdict: "parked" }));
+
+    const session = buildBoardPayload(home).sessions.find((s) => s.id === "sess-1");
+    expect(session?.verdict).toBe("parked");
   });
 });
 

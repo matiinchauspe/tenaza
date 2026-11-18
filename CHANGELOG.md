@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.4.0] - 2026-11-18
+
+### Added
+
+- **Labels any caller can find**: every session and subagent is told, in its own context, how to
+  label itself with `tenaza label <key>=<value> …`. A harness finds the command there without
+  naming Tenaza. A command that mentions `tenaza label` but is not a pure label call gets a notice
+  that its label was not recorded.
+- **Checkpoint nudge**: a session labelled with both `ticket` and `base` (a dispatched run) is told
+  to write its checkpoint and end the run once its latest context sample crosses
+  `[flag] threshold_tokens`. It is context only, never a block, and other sessions never get it.
+- **Run outcomes on the board**: a TERMINÓ card shows TE ESPERA for a session labelled
+  `verdict=parked` and CONTINÚA for `verdict=checkpoint`.
+- A `verdict=parked` label sends one notification ("#<ticket> espera tu respuesta"), never a
+  second for the same session.
+
+### Changed
+
+- Only a pure `tenaza label` command skips the Policy: the bare binary, no shell syntax, and
+  single-word values. A command chained after a label is now checked like any other.
+
+### Fixed
+
+- `tenaza status` reads `[live] stall_minutes` from the Policy, like the board, instead of a fixed
+  15 minutes.
+- `tenaza status`, the statusline, the board and archive now agree on a session's state. A session
+  busy with ordinary tool calls no longer reads "sin señal" in the CLI while the board shows it
+  running, and a prompt you already answered no longer keeps reading "esperándote" there.
+
 ## [0.3.1] - 2026-10-29
 
 ### Fixed

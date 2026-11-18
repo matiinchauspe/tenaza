@@ -13,7 +13,7 @@ import {
 import { decideAction } from "../decide";
 import { runSelfCheck } from "../health";
 import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
-import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
+import { maxUsageSample, notifyParked, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { sessionLabelsMarkerPath, usageSampleMarkerPath } from "../paths";
 import { loadPolicy, policyWarning } from "../policy";
 import { captureProcessMarker, captureTerminalLocator } from "../terminallocator";
@@ -439,6 +439,8 @@ async function handlePreToolUse(
       // so it's never logged as one (ADR 0003).
       appendEvent(home, sessionLabeledEvent(session, labels));
       recordLabels(home, session, labels);
+      // Only `parked` needs the human; `checkpoint`/`done`/`fail-fast` notify nobody.
+      if (labels.verdict === "parked") notifyParked(home, session);
       return undefined;
     }
   }

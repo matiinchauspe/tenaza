@@ -830,6 +830,66 @@ effect = "human"
   });
 });
 
+describe("a verdict=parked announce fires the one notification the human needs", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-parked-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("verdict=parked, labelled with a ticket, notifies naming that ticket", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=run-outcomes/02 base=main" },
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label verdict=parked" },
+    });
+
+    const notifications = readNotificationRecorder(home);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({ tag: "parked-sess-1", title: "🔴 Tenaza · te espera" });
+    expect(notifications[0]?.message).toBe("#run-outcomes/02 espera tu respuesta");
+  });
+
+  test("verdict=checkpoint sends nothing — only `parked` needs the human", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label verdict=checkpoint" },
+    });
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("verdict=done and verdict=fail-fast send nothing either", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label verdict=done" },
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-2",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label verdict=fail-fast" },
+    });
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+});
+
 describe("Live answering wiring (ticket 10): the adapter's own permission decision", () => {
   let home: string;
 

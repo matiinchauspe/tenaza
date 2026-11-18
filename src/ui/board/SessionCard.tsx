@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ContextTrack } from "./ContextTrack";
 import type { ColumnTone } from "./Column";
-import { StatusBadge } from "./StatusBadge";
+import { StatusBadge, type BadgeTone } from "./StatusBadge";
 import { boardCardElementId, liveMessageInputElementId } from "./useBoardKeyboard";
-import type { SessionCardViewModel } from "./viewModel";
+import type { SessionCardViewModel, VerdictBadgeKind } from "./viewModel";
 
 export interface SessionCardProps {
   card: SessionCardViewModel;
@@ -149,6 +149,20 @@ function TurnWaitBlock({ turnWait }: { turnWait: NonNullable<SessionCardViewMode
   );
 }
 
+/** No new color for either verdict. */
+const VERDICT_BADGE_TONE: Record<VerdictBadgeKind, BadgeTone> = {
+  parked: "ran",
+  checkpoint: "inbox",
+};
+
+function VerdictBadge({ verdictBadge }: { verdictBadge: NonNullable<SessionCardViewModel["verdictBadge"]> }) {
+  return (
+    <div className="verdict-badge">
+      <StatusBadge tone={VERDICT_BADGE_TONE[verdictBadge.kind]}>{verdictBadge.label}</StatusBadge>
+    </div>
+  );
+}
+
 /** The resolution trace's own line (spec "Requests vs agents") — composed straight from the already-resolved view-model fields, never re-deriving wording here. */
 function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["resolutionTrace"]> }) {
   return (
@@ -192,7 +206,7 @@ export function SessionCard({
   showArchive,
   onArchive,
 }: SessionCardProps) {
-  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.liveRequest ? ", te espera" : ""}${card.nativeWait ? `, ${card.nativeWait.label.toLowerCase()}` : ""}${card.turnWait ? `, esperándote${card.turnWait.backgroundCount > 0 ? ` · ${card.turnWait.backgroundCount} en segundo plano` : ""}` : ""}`;
+  const ariaLabel = `${statusLabel}: ${card.project}${card.ticket ? ` ${card.ticket}` : ""}${card.verdictBadge ? `, ${card.verdictBadge.label.toLowerCase()}` : ""}${card.liveRequest ? ", te espera" : ""}${card.nativeWait ? `, ${card.nativeWait.label.toLowerCase()}` : ""}${card.turnWait ? `, esperándote${card.turnWait.backgroundCount > 0 ? ` · ${card.turnWait.backgroundCount} en segundo plano` : ""}` : ""}`;
   return (
     <li
       id={boardCardElementId(card.id)}
@@ -214,6 +228,7 @@ export function SessionCard({
         {card.worktree ? ` · ${card.worktree}` : ""} · <span title={card.id}>{card.shortId}</span>
         {card.parentLabel ? ` · ${card.parentLabel}` : ""}
       </div>
+      {card.verdictBadge && <VerdictBadge verdictBadge={card.verdictBadge} />}
       {card.nativeWait && <NativeWaitBlock nativeWait={card.nativeWait} />}
       {card.turnWait && <TurnWaitBlock turnWait={card.turnWait} />}
       {card.resolutionTrace && <ResolutionTrace trace={card.resolutionTrace} />}

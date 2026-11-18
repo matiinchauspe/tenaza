@@ -204,16 +204,18 @@ export interface ClaudeHookResponse {
  */
 const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block", "measure"];
 
+/** What `parseLabelCommand` captures, told to the agent in both texts below. */
+const PURE_LABEL_RULE =
+  "a label counts only when `tenaza label <key>=<value> …` runs as its own shell command, with single-word values";
+
 /**
  * announce-declaration/01: the one line every observed Session gets in its
  * own context (SessionStart, and SubagentStart for each subagent), so a
  * caller finds the announce by its shape and never has to name Tenaza (ADR
  * 0003). Worded as an offer, not an order — most Sessions have no caller
- * that labels them. "Its own shell command" with "single-word values"
- * because `parseLabelCommand` captures only a pure label command.
+ * that labels them.
  */
-export const ANNOUNCE_DECLARATION =
-  "A session observer is watching this session, and a caller may label it by running `tenaza label <key>=<value> …` as its own shell command with single-word values — `project` groups sessions, and any other key is shown as given.";
+export const ANNOUNCE_DECLARATION = `A session observer is watching this session, and a caller may label it: ${PURE_LABEL_RULE} — \`project\` groups sessions, and any other key is shown as given.`;
 
 /**
  * Shell syntax that makes a command more than a pure label call — see
@@ -233,8 +235,7 @@ const MENTIONS_LABEL = /(?:^|[\s;&|(`/])tenaza\s+label\b/;
  * not a pure label command, so it was not recorded (announce-declaration/01)
  * — the CLI's own `label` is a no-op, so without this the drop is silent.
  */
-export const LABEL_NOT_RECORDED =
-  "The `tenaza label` in this command was not recorded: a label counts only when `tenaza label <key>=<value> …` runs as its own shell command, with single-word values.";
+export const LABEL_NOT_RECORDED = `The \`tenaza label\` in this command was not recorded: ${PURE_LABEL_RULE}.`;
 
 /**
  * Context only, never a denial. Names nothing of Yunque's beyond

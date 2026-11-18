@@ -218,6 +218,7 @@ function toBoardSession(
     parentId: node.parent,
     project: deriveProject(node, resolveGitRoot),
     ticket: node.labels.ticket,
+    verdict: node.labels.verdict,
     role: node.parent !== undefined ? "subagente" : "sesión",
     startedAt: node.startedAt,
     endedAt: node.endedAt,

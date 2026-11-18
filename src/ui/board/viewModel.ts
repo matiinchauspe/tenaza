@@ -131,6 +131,24 @@ export interface TurnWaitViewModel {
   backgroundCount: number;
 }
 
+/** `done`, `fail-fast` and no verdict earn no badge, so those cards render as before. */
+export type VerdictBadgeKind = "parked" | "checkpoint";
+
+export interface VerdictBadgeViewModel {
+  kind: VerdictBadgeKind;
+  label: string;
+}
+
+const VERDICT_BADGE_LABEL: Record<VerdictBadgeKind, string> = {
+  parked: "TE ESPERA",
+  checkpoint: "CONTINÚA",
+};
+
+function verdictBadgeFor(verdict: string | undefined): VerdictBadgeViewModel | undefined {
+  if (verdict !== "parked" && verdict !== "checkpoint") return undefined;
+  return { kind: verdict, label: VERDICT_BADGE_LABEL[verdict] };
+}
+
 /** One line of a Session's resolution trace (spec "Requests vs agents") — already resolved to its es-AR symbol/text/tone; `SessionCard` only ever composes these into the final "✓ #<id> <text> · hace <age>" string, never re-derives the wording itself. */
 export interface ResolutionTraceLineViewModel {
   symbol: "✓" | "✕" | "✗";
@@ -194,6 +212,8 @@ export interface SessionCardViewModel {
   nativeWait: NativeWaitViewModel | undefined;
   /** Ticket 05: present while this Session's own Turn ended and nothing more specific is also current — `undefined` for every other card. */
   turnWait: TurnWaitViewModel | undefined;
+  /** TERMINÓ only: a session can announce a verdict and keep running. */
+  verdictBadge: VerdictBadgeViewModel | undefined;
 }
 
 export interface BoardColumnViewModel<Card> {
@@ -398,6 +418,7 @@ function toSessionCard(
   byId: ReadonlyMap<string, BoardSession>,
   liveItem: BoardInboxItem | undefined,
   waitSeconds: number,
+  column: SessionColumn,
 ): SessionCardViewModel {
   return {
     id: session.id,
@@ -418,6 +439,7 @@ function toSessionCard(
     terminalNeedsTcc: session.terminalNeedsTcc,
     nativeWait: toNativeWait(session.nativeWait, now),
     turnWait: toTurnWait(session.turnWait, now),
+    verdictBadge: column === "termino" ? verdictBadgeFor(session.verdict) : undefined,
   };
 }
 
@@ -504,7 +526,7 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
   }
   for (const list of Object.values(sessionsByColumn)) list.sort(byMostRecentEventFirst);
 
-  const toCards = (list: readonly BoardSession[]): SessionCardViewModel[] =>
+  const toCards = (list: readonly BoardSession[], column: SessionColumn): SessionCardViewModel[] =>
     nestUnderParents(list).map(({ session, nested }) =>
       toSessionCard(
         session,
@@ -514,12 +536,13 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
         byId,
         liveBySessionId.get(session.id),
         payload.policy.waitSeconds,
+        column,
       ),
     );
 
-  const corriendoCards = toCards(sessionsByColumn.corriendo);
-  const trabadaCards = toCards(sessionsByColumn.trabada);
-  const terminoCards = toCards(sessionsByColumn.termino);
+  const corriendoCards = toCards(sessionsByColumn.corriendo, "corriendo");
+  const trabadaCards = toCards(sessionsByColumn.trabada, "trabada");
+  const terminoCards = toCards(sessionsByColumn.termino, "termino");
 
   const isFlagged = (card: SessionCardViewModel): boolean => card.context.kind === "track" && card.context.track.flagged;
   const over200k = corriendoCards.filter(isFlagged).length + trabadaCards.filter(isFlagged).length;

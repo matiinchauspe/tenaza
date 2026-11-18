@@ -57,6 +57,7 @@ function baseCard(overrides: Partial<SessionCardViewModel> = {}): SessionCardVie
     terminalNeedsTcc: false,
     nativeWait: undefined,
     turnWait: undefined,
+    verdictBadge: undefined,
     ...overrides,
   };
 }
@@ -286,6 +287,27 @@ describe("SessionCard — native wait block (ticket 14): observed only, never ac
 
     expect(container.querySelector(".live-request")).not.toBeNull();
     expect(container.querySelector(".native-wait")).not.toBeNull();
+  });
+});
+
+describe("SessionCard — verdict badge", () => {
+  test("parked renders TE ESPERA in the 'needs you' red tone", () => {
+    const { container } = renderCard({ card: baseCard({ verdictBadge: { kind: "parked", label: "TE ESPERA" } }) });
+    const badge = container.querySelector(".verdict-badge .status-badge");
+    expect(badge?.textContent).toBe("TE ESPERA");
+    expect(badge?.className).toContain("status-badge--ran");
+  });
+
+  test("checkpoint renders CONTINÚA in the existing neutral tone", () => {
+    const { container } = renderCard({ card: baseCard({ verdictBadge: { kind: "checkpoint", label: "CONTINÚA" } }) });
+    const badge = container.querySelector(".verdict-badge .status-badge");
+    expect(badge?.textContent).toBe("CONTINÚA");
+    expect(badge?.className).toContain("status-badge--inbox");
+  });
+
+  test("renders no verdict badge at all when it is undefined", () => {
+    const { container } = renderCard({ card: baseCard() });
+    expect(container.querySelector(".verdict-badge")).toBeNull();
   });
 });
 

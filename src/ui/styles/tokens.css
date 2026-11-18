@@ -802,6 +802,15 @@ kbd {
 }
 
 /* -------------------------------------------------------------------- */
+/* Verdict badge — a TERMINÓ card's parked/checkpoint badge, spaced     */
+/* like .native-wait.                                                   */
+/* -------------------------------------------------------------------- */
+
+.verdict-badge {
+  margin-top: 6px;
+}
+
+/* -------------------------------------------------------------------- */
 /* Native wait block (ticket 14) — a plain, non-actionable line a card   */
 /* grows while Claude Code's OWN permission/idle prompt is the most      */
 /* recent thing observed for it. Deliberately NO left rail, NO dashed    */

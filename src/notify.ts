@@ -159,6 +159,22 @@ export function buildThresholdCrossedNotification(context: {
   };
 }
 
+/** 🔴 — a run stopped on a decision only the human can make: same red as a Flag crossing, since both need the human to look. */
+export function buildParkedNotification(context: {
+  project: string;
+  role: string;
+  session: string;
+  ticket: string | undefined;
+}): Notification {
+  const ticketLabel = context.ticket ?? context.session.slice(0, 4);
+  return {
+    tag: `parked-${context.session}`,
+    title: "🔴 Tenaza · te espera",
+    subtitle: `${context.project} / ${context.role} / sesión ${context.session}`,
+    message: `#${ticketLabel} espera tu respuesta`,
+  };
+}
+
 /**
  * 🔴 — Tenaza itself is gravely degraded (ADR 0007, ticket 02): "binary
  * missing" can never reach this call site at all (nothing Tenaza owns runs
@@ -327,11 +343,11 @@ export function sendNotification(home: string, notification: Notification, now: 
   }
 }
 
-/** This one Session's project and role, the same way `tenaza status`'s tree row derives them — never the full multi-Session tree, which this doesn't need. */
-function sessionContext(home: string, session: string): { project: string; role: string } {
+/** This one Session's project, role and `ticket` Label, the same way `tenaza status`'s tree row derives them — never the full multi-Session tree, which this doesn't need. */
+function sessionContext(home: string, session: string): { project: string; role: string; ticket: string | undefined } {
   const index = buildSessionIndex(readSessionEvents(session, home));
   const node: SessionNode = index.get(session) ?? { id: session, capabilities: [], labels: {} };
-  return { project: deriveProject(node), role: roleOf(node) };
+  return { project: deriveProject(node), role: roleOf(node), ticket: node.labels.ticket };
 }
 
 /**
@@ -384,4 +400,11 @@ export function notifyThresholdCrossed(
   } catch {
     // See `sendNotification`'s own doc.
   }
+}
+
+export function notifyParked(home: string, session: string, now: Date = new Date()): void {
+  try {
+    const context = sessionContext(home, session);
+    sendNotification(home, buildParkedNotification({ ...context, session }), now);
+  } catch {}
 }

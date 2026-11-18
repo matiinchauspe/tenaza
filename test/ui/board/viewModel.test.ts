@@ -474,6 +474,43 @@ describe("ticket 05: turnWait — Turn state, observed only, never actionable", 
   });
 });
 
+describe("verdictBadge — only a TERMINÓ card, only parked/checkpoint", () => {
+  test("verdict=parked on a TERMINÓ card reads TE ESPERA", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "a", endedAt: "2026-01-01T06:00:00.000Z", verdict: "parked" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.termino.cards[0]?.verdictBadge).toEqual({ kind: "parked", label: "TE ESPERA" });
+  });
+
+  test("verdict=checkpoint on a TERMINÓ card reads CONTINÚA, a neutral badge distinct from parked", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "a", endedAt: "2026-01-01T06:00:00.000Z", verdict: "checkpoint" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.termino.cards[0]?.verdictBadge).toEqual({ kind: "checkpoint", label: "CONTINÚA" });
+  });
+
+  test.each(["done", "fail-fast", undefined])(
+    "verdict=%s on a TERMINÓ card earns no badge — renders exactly like today",
+    (verdict) => {
+      const payload = makeBoardPayload({
+        sessions: [makeSession({ id: "a", endedAt: "2026-01-01T06:00:00.000Z", verdict })],
+      });
+      const model = buildBoardViewModel(payload, NOW);
+      expect(model.termino.cards[0]?.verdictBadge).toBeUndefined();
+    },
+  );
+
+  test("verdict=parked on a still-running (CORRIENDO) Session earns no badge — scoped to TERMINÓ only", () => {
+    const payload = makeBoardPayload({
+      sessions: [makeSession({ id: "a", lastEventTs: NOW.toISOString(), verdict: "parked" })],
+    });
+    const model = buildBoardViewModel(payload, NOW);
+    expect(model.corriendo.cards[0]?.verdictBadge).toBeUndefined();
+  });
+});
+
 describe("buildBoardViewModel — orderedIds", () => {
   test("flattens TE NECESITA, then CORRIENDO, TRABADA, TERMINÓ, each in its own display order", () => {
     const payload = makeBoardPayload({

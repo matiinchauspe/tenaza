@@ -21,35 +21,24 @@ import { captureProcessMarker, captureTerminalLocator } from "../terminallocator
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall, touchSession } from "../toolcalls";
 
-/**
- * The subset of Claude Code's PreToolUse hook payload Tenaza reads.
- * `agent_id` is one of the hooks docs' own "common input fields": present on
- * EVERY hook event — PreToolUse included — when it fires inside a subagent
- * (verified 2026-10-23 against code.claude.com/docs/en/hooks, both its
- * "Common input fields" table and its PreToolUse section). Optional because
- * it's absent for a call in the main Session.
- */
+/** `agent_id` is present only when this call happens inside a subagent; absent for the main session's own calls. */
 export interface ClaudeHookPayload {
   session_id: string;
   hook_event_name: "PreToolUse";
   tool_name: string;
   tool_input: Record<string, unknown>;
   agent_id?: string;
-  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  /** Read only to backfill a missing `session.started`; never otherwise. */
   cwd?: string;
 }
 
-/** A new top-level Session. Never carries a parent — only SubagentStart does. */
 export interface ClaudeSessionStartPayload {
   session_id: string;
   hook_event_name: "SessionStart";
   cwd: string;
 }
 
-/**
- * A Claude Code subagent starting. It is its OWN Session, keyed by `agent_id`
- * — never `session_id`, which stays the parent's id (the ticket's own rule).
- */
+/** Keyed by `agent_id` — `session_id` stays the parent's id. */
 export interface ClaudeSubagentStartPayload {
   session_id: string;
   hook_event_name: "SubagentStart";
@@ -58,16 +47,9 @@ export interface ClaudeSubagentStartPayload {
 }
 
 /**
- * A subagent Session ending — `agent_id` names it, not the parent
- * `session_id`. `agent_transcript_path` (ticket 05, M3) is the SUBAGENT'S
- * OWN transcript — a distinct common field from `transcript_path`, which on
- * `SubagentStop` names the PARENT session's transcript and must never be
- * read for this Session's usage (verified against
- * code.claude.com/docs/en/hooks.md's own `SubagentStop` input example,
- * which carries both side by side). Both optional: a payload that omits
- * `agent_transcript_path` (or names a transcript with no readable usage)
- * still ends the Session, just without a usage sample — degrades silently,
- * never a crash (q9).
+ * `agent_transcript_path` is the subagent's OWN transcript — `transcript_path`
+ * here names the PARENT's. Missing `agent_transcript_path` ends the session
+ * without a usage sample rather than reading the parent's by mistake.
  */
 export interface ClaudeSubagentStopPayload {
   session_id: string;
@@ -75,74 +57,52 @@ export interface ClaudeSubagentStopPayload {
   agent_id: string;
   transcript_path?: string;
   agent_transcript_path?: string;
-  /**
-   * A common input field the real payload carries — but deliberately
-   * NEVER read here (ticket 05 fix): see `handleSubagentStop`'s own doc
-   * comment for why backfilling `session.started` from it would defeat
-   * `isNoiseSession`.
-   */
+  /** Deliberately never read — see `handleSubagentStop` for why backfilling here would defeat `isNoiseSession`. */
   cwd?: string;
 }
 
-/** The top-level Session ending, carrying the runtime's own reason. `transcript_path` is optional — see `ClaudeSubagentStopPayload`. */
 export interface ClaudeSessionEndPayload {
   session_id: string;
   hook_event_name: "SessionEnd";
   reason: string;
   transcript_path?: string;
-  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  /** Read only to backfill a missing `session.started`; never otherwise. */
   cwd?: string;
 }
 
-/** The main agent finishing one turn — samples usage, but never ends the Session (that's SessionEnd's job). */
+/** Never ends the Session — that's SessionEnd's job. */
 export interface ClaudeStopPayload {
   session_id: string;
   hook_event_name: "Stop";
   transcript_path?: string;
-  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  /** Read only to backfill a missing `session.started`; never otherwise. */
   cwd?: string;
 }
 
 /**
- * One tool call completing. Counted toward the "every 25 tool calls" sample
- * (q9) — never logged itself, since an ordinary tool call matches no Policy
- * Rule and the Event contract only records what the Policy decided on.
- * `agent_id` (ticket 05, M2) names a subagent's OWN Session, exactly as on
- * `PreToolUse` — absent for a call in the main Session.
+ * An ordinary tool call matches no Policy Rule and is never logged on its
+ * own. `agent_id` names a subagent's OWN session, exactly as on
+ * `PreToolUse` — absent for a call in the main session.
  */
 export interface ClaudePostToolUsePayload {
   session_id: string;
   hook_event_name: "PostToolUse";
   /**
-   * The PARENT session's transcript when `agent_id` is present (ticket 05,
-   * M3's own recurrence here) — never sampled DIRECTLY for a subagent's own
-   * sample; see `resolveSampleTranscriptPath`. Claude Code's real PostToolUse
-   * payload inside a subagent never carries `agent_transcript_path` at all
-   * (that field is SubagentStop-only) — leaving every mid-run sample
-   * silently skipped (found 2026-10-27). This field is now also the
-   * DERIVATION SOURCE for the subagent's own transcript path in that case
-   * (never read as the sample itself — M3's rule holds, only its NEIGHBOUR
-   * directory is).
+   * The PARENT's transcript when `agent_id` is present — never sampled
+   * directly for a subagent (see `resolveSampleTranscriptPath`). Claude
+   * Code's real PostToolUse payload inside a subagent never carries
+   * `agent_transcript_path`, so this field also serves as the derivation
+   * source for the subagent's own transcript path in that case.
    */
   transcript_path?: string;
   agent_id?: string;
-  /** The SUBAGENT's own transcript, when Claude Code's payload actually carries it (SubagentStop's own case) — wins over any derivation when present; see `resolveSampleTranscriptPath`. */
+  /** The subagent's own transcript, when the payload carries it — wins over any derivation; see `resolveSampleTranscriptPath`. */
   agent_transcript_path?: string;
-  /** Common input field (ticket 05, M6) — read only to backfill a missing `session.started`, never otherwise. */
+  /** Read only to backfill a missing `session.started`; never otherwise. */
   cwd?: string;
 }
 
-/**
- * Ticket 14: the human just submitted a new turn. Carries no decision
- * capability at all in Claude Code's own contract — `handleUserPromptSubmit`
- * only ever appends a Event and touches the activity marker; it is
- * dispatched exactly like every OTHER non-PreToolUse event (see
- * `handleClaudeHook`), so nothing here can ever answer back with a
- * permission decision regardless of what this payload contains.
- * `agent_id`, if Claude Code ever sends it for this event, is handled the
- * SAME defensive way as every other hook in this file (`agent_id ??
- * session_id`) even though research turned up no confirmation either way.
- */
+/** This event carries no decision capability in Claude Code's own contract — never answers back with a permission decision. */
 export interface ClaudeUserPromptSubmitPayload {
   session_id: string;
   hook_event_name: "UserPromptSubmit";
@@ -150,13 +110,10 @@ export interface ClaudeUserPromptSubmitPayload {
 }
 
 /**
- * Ticket 14: Claude Code's own `Notification` hook — `hooks/hooks.json`'s
- * own matcher already narrows the calls that reach this process to
- * `permission_prompt`/`idle_prompt`, and `handleNotification` below checks
- * `notification_type` AGAIN, defensively, against anything else a
- * malformed or future payload might carry. No decision capability exists
- * for this event in Claude Code's own contract either — same guarantee as
- * `ClaudeUserPromptSubmitPayload` above.
+ * `hooks/hooks.json`'s matcher already narrows calls to
+ * `permission_prompt`/`idle_prompt` — `handleNotification` checks
+ * `notification_type` again, defensively. No decision capability exists
+ * for this event either.
  */
 export interface ClaudeNotificationPayload {
   session_id: string;
@@ -177,30 +134,22 @@ export type ClaudeHookInput =
   | ClaudeNotificationPayload;
 
 export interface ClaudeHookResponse {
-  /**
-   * A warning shown to the human, independent of any permission decision
-   * (ADR 0007, ticket 01) — set only when `handlePreToolUse` below itself
-   * noticed a degraded read (a skipped log line) while reaching this
-   * decision. Purely additive: every pre-existing caller that never
-   * references it (every test included) is unaffected.
-   */
+  /** Set only when `handlePreToolUse` noticed a degraded read (a skipped log line) while reaching its decision — independent of any permission decision. */
   systemMessage?: string;
   hookSpecificOutput: {
     hookEventName: "PreToolUse";
     /** Absent only on a decision-less answer that carries `additionalContext` alone (`LABEL_NOT_RECORDED`) — never an implicit allow. */
     permissionDecision?: "allow" | "deny";
     permissionDecisionReason?: string;
-    /** Ticket 10: set only on a live-answering APPROVE that carried a message — "next to the tool result" (code.claude.com/docs/en/hooks' own `additionalContext` field, inside `hookSpecificOutput` alongside `permissionDecision`). */
+    /** Set only on a live-answering APPROVE that carried a message — shown next to the tool result. */
     additionalContext?: string;
   };
 }
 
 /**
- * What the Claude Code Adapter can do today — declared on every
- * `session.started` it writes, so the core degrades by Capability, never by
- * runtime name (ADR 0001). `measure` (usage.sampled) is implemented as of
- * ticket 04; `stop` (actually halting a Session) is not — v1 never stops a
- * Session (q9).
+ * Declared on every `session.started` so the core degrades by Capability,
+ * never by runtime name. `stop` (halting a Session) is not implemented —
+ * v1 never stops a Session.
  */
 const CLAUDE_CAPABILITIES: Capability[] = ["observe", "block", "measure"];
 
@@ -209,18 +158,16 @@ const PURE_LABEL_RULE =
   "a label counts only when `tenaza label <key>=<value> …` runs as its own shell command, with single-word values";
 
 /**
- * announce-declaration/01: the one line every observed Session gets in its
- * own context (SessionStart, and SubagentStart for each subagent), so a
- * caller finds the announce by its shape and never has to name Tenaza (ADR
- * 0003). Worded as an offer, not an order — most Sessions have no caller
- * that labels them.
+ * The one line every observed Session gets in its own context — worded so
+ * a caller finds it by shape without naming Tenaza, and as an offer, not
+ * an order, since most Sessions have no caller that labels them.
  */
 export const ANNOUNCE_DECLARATION = `A session observer is watching this session, and a caller may label it: ${PURE_LABEL_RULE} — \`project\` groups sessions, and any other key is shown as given.`;
 
 /**
  * Shell syntax that makes a command more than a pure label call — see
- * `parseLabelCommand`. Quotes are not in it: on their own they run nothing,
- * so a value wrapped in one matched pair is unwrapped instead.
+ * `parseLabelCommand`. Quotes are deliberately excluded: alone they run
+ * nothing, so a value wrapped in one matched pair is unwrapped instead.
  */
 const SHELL_SYNTAX = /[;&|<>$`()\\\n]/;
 
@@ -230,11 +177,7 @@ const LABEL_PAIR = /^([^=\s'"]+)=(?:"([^"]*)"|'([^']*)'|([^'"]*))$/;
 /** A `tenaza label` named anywhere in a command — the shape that earns `LABEL_NOT_RECORDED` when it is not a pure one. */
 const MENTIONS_LABEL = /(?:^|[\s;&|(`/])tenaza\s+label\b/;
 
-/**
- * What the agent is told when a command carried a `tenaza label` that was
- * not a pure label command, so it was not recorded (announce-declaration/01)
- * — the CLI's own `label` is a no-op, so without this the drop is silent.
- */
+/** What the agent is told when a `tenaza label` command was not pure, so it went unrecorded — the CLI's own `label` is a no-op, so without this the drop is silent. */
 export const LABEL_NOT_RECORDED = `The \`tenaza label\` in this command was not recorded: ${PURE_LABEL_RULE}.`;
 
 /**
@@ -249,14 +192,9 @@ function declarationResponse(hookEventName: "SessionStart" | "SubagentStart"): C
 }
 
 /**
- * Normalize a PreToolUse payload into a runtime-neutral Action (ticket 04,
- * decision 07): a `Bash` call carrying a string command normalizes to
- * `shell`; any `mcp__*` tool call normalizes to `mcp`, carrying the tool's
- * own name and its raw arguments untouched — no per-provider code, and the
- * Policy alone decides what, if anything, those arguments mean. Everything
- * else (a non-Bash, non-MCP tool, or a Bash call Tenaza can't read a
- * command from) is not yet an Action Tenaza has a shape for, and is passed
- * through untouched.
+ * Normalize a PreToolUse payload into a runtime-neutral Action: no
+ * per-provider code — the Policy alone decides what the arguments mean.
+ * `undefined` means this call isn't yet an Action Tenaza has a shape for.
  */
 export function normalizeClaudeAction(payload: ClaudeHookPayload): Action | undefined {
   if (payload.tool_name === "Bash") {
@@ -270,24 +208,19 @@ export function normalizeClaudeAction(payload: ClaudeHookPayload): Action | unde
 }
 
 /**
- * Recognize `tenaza label key=value …` and parse its pairs — the announce
- * mechanism (ADR 0003). Matches the BARE binary name only: a path-qualified
- * `./tenaza` or `/tmp/x/tenaza` runs whatever file sits there, so it is not
- * provably the label call (announce-declaration/01); anything else (a
- * different `tenaza` subcommand, an unrelated command) returns `undefined`,
- * never throws. A token with no `=`, or an empty key, is skipped rather than
- * failing the whole command — one malformed pair never loses the rest. Returns
- * `undefined` (not an empty object) when nothing usable was found, so a
- * caller can tell "not a label command" apart from "a label command with
- * nothing in it" without checking size itself.
+ * Recognize `tenaza label key=value …` and parse its pairs. Matches the
+ * BARE binary name only — a path-qualified `./tenaza` runs whatever file
+ * sits there, so it is not provably the label call. A malformed pair is
+ * skipped rather than failing the whole command; returns `undefined` (not
+ * `{}`) so a caller can tell "not a label command" apart from "a label
+ * command with nothing in it."
  *
- * Only a PURE label command is one (announce-declaration/01, the Policy
- * bypass): any shell syntax that could run something else — chaining,
- * pipes, substitution, redirection, a background `&`, quoting — makes it
- * not a label at all, so `handlePreToolUse` hands the whole command to the
- * Policy instead of skipping it. That is also why values are single words: a
- * quote left unbalanced once split on whitespace (`verdict="needs work"`)
- * makes the whole command not a label, rather than a cut value.
+ * Only a PURE label command counts: any shell syntax that could run
+ * something else — chaining, pipes, substitution, redirection, a
+ * background `&`, quoting — hands the whole command to the Policy instead.
+ * Values are single words for the same reason: an unbalanced quote split on
+ * whitespace would make the whole command not a label, rather than cut a
+ * value.
  */
 export function parseLabelCommand(command: string): Record<string, string> | undefined {
   if (SHELL_SYNTAX.test(command)) return undefined;
@@ -308,12 +241,11 @@ export function parseLabelCommand(command: string): Record<string, string> | und
 }
 
 /**
- * `inboxId` is `undefined` exactly when `decideAction` could not derive it
- * (ADR 0007, ticket 01) — the deny still holds either way; the agent is
- * pointed at `tenaza status` instead of a dead-end id. When present, it is
- * already the item's git-style SHORT hash (decision 03, ADR 0005, ticket
- * 06) — the same string `tenaza status`/`statusline`/the notification show
- * for this item, never a raw position.
+ * `inboxId` is `undefined` exactly when it could not be derived — the deny
+ * still holds either way; the agent is pointed at `tenaza status` instead
+ * of a dead-end id. When present, it is already the item's short hash —
+ * the same string `tenaza status`, the statusline and the notification
+ * show, never a raw position.
  */
 export function denyMessage(inboxId: string | undefined): string {
   const location = inboxId !== undefined ? `inbox ${inboxId}` : "the Inbox — run `tenaza status` to find it";
@@ -335,7 +267,7 @@ function buildHookResponse(
   };
 }
 
-/** Ticket 10: the agent-facing reason for a live-answering APPROVE's explicit allow — there is no "denial" to explain, so this names what actually happened instead of reusing `denyMessage`'s own deny-shaped wording. */
+/** The agent-facing reason for a live-answering APPROVE — names what happened instead of reusing `denyMessage`'s deny-shaped wording. */
 function liveApproveReason(): string {
   return "Approved by the human from the Live surface.";
 }
@@ -347,12 +279,9 @@ function describeSkippedLines(skipped: number): string {
 }
 
 /**
- * Attach a skip-count warning directly onto a response this call is
- * ALREADY returning (ADR 0007, ticket 01) — never a reason to build one
- * that otherwise wouldn't exist. `skippedLines` only ever comes from
- * `decideAction`'s own result, itself derived from the ONE read that call
- * needed anyway (`deriveInboxReport`) — never a second, independent
- * rescan of every Session's log.
+ * Attaches to a response already being returned — never a reason to build
+ * one that otherwise wouldn't exist. `skippedLines` comes from the one
+ * read `decideAction` already needed, never a second rescan of the log.
  */
 function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: number | undefined): ClaudeHookResponse {
   if (!skippedLines) return response;
@@ -360,26 +289,17 @@ function withSkippedLinesWarning(response: ClaudeHookResponse, skippedLines: num
 }
 
 /**
- * Backfill `session.started` from THIS call's own `cwd` when the Session
- * has never had one (ticket 05, M6 — #1423's own fix, confirmed against
- * the real `tenaza status` dogfood, #1436): a Session whose start hook
- * never fired — it predates Tenaza's install — still lands under a real
- * project on the next call that happens to carry a `cwd`, instead of
- * reading "(sin proyecto) sin datos" forever. A no-op when `cwd` is absent,
- * or once the Session already has a `session.started` — this only ever
- * FILLS a gap, never overwrites or duplicates one. A side effect, same
- * guarantee as `handleSessionStart`'s own catch: failing to backfill must
- * never crash the call that triggered it (ADR 0007).
+ * Backfills `session.started` from this call's own `cwd` when the Session
+ * never had one — a Session whose start hook never fired (it predates
+ * Tenaza's install) still lands under a real project on the next call that
+ * carries a `cwd`. A no-op when `cwd` is absent or the Session already has
+ * one; otherwise a side effect, swallowed on failure like every other
+ * lifecycle write in this file.
  *
- * Deliberately NEVER called from `handleSubagentStop` (ticket 05 fix):
- * `SubagentStop` DOES carry `cwd` as a common field, so backfilling there
- * would give Claude Code's own internal side-agents a `session.started`
- * too — exactly undoing `isNoiseSession` (`sessions.ts`), which hides a
- * Session whose only Events are its end plus a Usage sample precisely
- * because that is the side-agent signature. A subagent that did any REAL
- * work already got backfilled by its own `PreToolUse`/`PostToolUse` before
- * it ever reached `SubagentStop`; one that didn't is exactly what
- * `isNoiseSession` is for.
+ * Deliberately NEVER called from `handleSubagentStop`: that event DOES
+ * carry `cwd`, so backfilling there would give Claude Code's own internal
+ * side-agents a `session.started` too — undoing `isNoiseSession`'s hide,
+ * which exists precisely to filter them out.
  */
 function backfillSessionStartedIfMissing(
   home: string,
@@ -419,25 +339,19 @@ function recordLabels(
 }
 
 /**
- * Decide one Claude Code PreToolUse call against the Policy. Returns
- * `undefined` when there is nothing to tell the host — either the call
- * didn't normalize to an Action, it was a `tenaza label` announce (handled
- * separately, below), or the Policy's own verdict was an allow (whether
- * because nothing matched, or because a `flag` Rule did).
+ * Decide one PreToolUse call against the Policy. `undefined` means there
+ * is nothing to tell the host: no Action normalized, it was a
+ * `tenaza label` announce, or the Policy's verdict was an allow.
  */
 async function handlePreToolUse(
   home: string,
   payload: ClaudeHookPayload,
 ): Promise<ClaudePreToolUseOutput | undefined> {
-  // `agent_id` names a subagent's OWN Session, never its parent's
-  // `session_id` (ticket 05, M2 — #1423's own fix: v0.1 logged every
-  // subagent decision under the PARENT's log instead of the subagent's
-  // own). Resolved once, used everywhere below.
+  // agent_id names a subagent's OWN session, never its parent's
+  // session_id — resolved once, used everywhere below.
   const session = payload.agent_id ?? payload.session_id;
-  // Ticket 14, AC3: touch BEFORE anything else below — every Bash/mcp
-  // call is activity, whether or not it ends up matching a Rule, and a
-  // long-running call's own START is worth showing as soon as it happens,
-  // not only once it completes (PostToolUse's own touch).
+  // Touch before anything else: a long-running call's own start is worth
+  // showing immediately, not only once it completes.
   touchSession(home, session);
   backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
 
@@ -473,12 +387,7 @@ function isUnrecordedLabel(command: string): boolean {
   return !pureShaped;
 }
 
-/**
- * Tell the agent its `tenaza label` was not recorded (announce-declaration/01)
- * on top of whatever the Policy answered — beside a deny's reason, or as a
- * decision-less `additionalContext` that leaves Claude Code's own permission
- * checks exactly where they were (decision 07: never an implicit allow).
- */
+/** Tells the agent its `tenaza label` was not recorded, layered onto whatever the Policy already answered — a deny's reason, or a decision-less `additionalContext` that never becomes an implicit allow. */
 function withLabelNotRecorded(response: ClaudePreToolUseOutput | undefined): ClaudePreToolUseOutput {
   const specific = response?.hookSpecificOutput;
   const additionalContext = [specific?.additionalContext, LABEL_NOT_RECORDED].filter(Boolean).join(" ");
@@ -498,22 +407,18 @@ async function decidePreToolUse(
   const skippedLines = result.logged ? result.skippedLines : undefined;
 
   if (result.decision === "deny") {
-    // Ticket 10: `result.reason` carries the live-answering wording
-    // (a reject's own message or the generic fallback, or the es-AR expiry
-    // text) when this deny came out of a hold — `denyMessage(inboxId)`
-    // stays the fallback for every OTHER deny (no Daemon up at all),
-    // unchanged from before ticket 10.
+    // result.reason carries the live-answering wording (a reject's own
+    // message, the generic fallback, or the es-AR expiry text) when this
+    // deny came from a hold; denyMessage(inboxId) is the fallback when no
+    // Daemon answered.
     return withSkippedLinesWarning(buildHookResponse("deny", result.reason ?? denyMessage(result.inboxId)), skippedLines);
   }
 
-  // Ticket 10: a live-answering APPROVE is the ONE allow that explicitly
-  // wants to skip Claude Code's own auto-mode classifier (decision 08) —
-  // the human already said yes. Every OTHER allow (no Rule matched, a
-  // `flag` Rule did, or the ADR 0001 unblockable case) returns NO
-  // permission decision at all (decision 07, H2): an explicit hook `allow`
-  // runs BEFORE that classifier and skips it, which is LESS safe than
-  // saying nothing at all for any of THOSE cases — v0.1's own mistake,
-  // fixed by ticket 01 and left untouched here.
+  // A live-answering APPROVE is the ONE allow that should skip Claude
+  // Code's own auto-mode classifier — the human already said yes. Every
+  // OTHER allow returns NO permission decision at all: an explicit hook
+  // `allow` runs BEFORE that classifier and skips it, which is LESS safe
+  // than saying nothing for any of those cases.
   if (result.decision === "allow" && result.logged && result.live) {
     return withSkippedLinesWarning(
       buildHookResponse("allow", liveApproveReason(), result.additionalContext),
@@ -521,9 +426,8 @@ async function decidePreToolUse(
     );
   }
 
-  // Only a skipped-log-line warning, when `decideAction` hit one, still
-  // rides along as a bare systemMessage with no accompanying permission
-  // decision.
+  // A skipped-log-line warning, when there is one, rides along as a bare
+  // systemMessage with no permission decision.
   return skippedLines ? { systemMessage: describeSkippedLines(skippedLines) } : undefined;
 }
 
@@ -535,17 +439,14 @@ function recordLatestUsageSample(home: string, session: string, contextTokens: n
 }
 
 /**
- * Sample `session`'s context size from `transcriptPath` and append
- * `usage.sampled` — but only when the transcript actually yields a number.
- * No transcript, a missing file, or one with no readable usage all degrade
- * to doing nothing: a zero sample would be a LIE ("this Session uses no
- * context"), not an honest "unknown" (q9).
+ * Samples `session`'s context size and appends `usage.sampled` — only when
+ * the transcript yields a number. A missing or unreadable transcript
+ * degrades to doing nothing: a zero sample would be a LIE ("this Session
+ * uses no context"), not an honest "unknown."
  *
- * Also where 🔴 fires (ticket 08): the running max BEFORE this sample is
- * read first (never after appending — appending it first would make the
- * new sample its own "previous max" and crossing could never be detected),
- * so `shouldNotifyThresholdCrossing` sees an honest "has this Session ever
- * been at or past the threshold before now."
+ * The running max is read BEFORE this sample is appended, never after —
+ * appending first would make the new sample its own "previous max," and
+ * crossing the threshold could never be detected.
  */
 function sampleUsage(home: string, session: string, transcriptPath: string | undefined): void {
   if (!transcriptPath) return;
@@ -563,33 +464,22 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
 }
 
 /**
- * SessionStart: a new top-level Session — no parent. Its own append is
- * wrapped in its own catch (ADR 0007, ticket 02) — recording the start is a
- * side effect, not a decision, and a write failure here (e.g. an unwritable
- * state dir) must never crash the whole hook call and skip the self-check
- * that `runClaudeHookSafely` runs right after. A Session left without its
- * own `session.started` still gets one backfilled from a later Event's
- * `cwd` (ticket 05, M6) — never WITH a terminal locator, since the backfill
- * never runs at SessionStart (see `backfillSessionStartedIfMissing`'s own
- * doc).
+ * SessionStart: a new top-level Session — no parent. The append is wrapped
+ * in its own catch: a write failure here (e.g. an unwritable state dir)
+ * must never crash the hook call and skip the self-check that
+ * `runClaudeHookSafely` runs right after. A Session left without its own
+ * `session.started` still gets one backfilled from a later Event's `cwd`
+ * — but never with a terminal locator, since the backfill never runs here.
  *
- * Ticket 11 (decision 09): also captures the runtime-neutral terminal
- * locator from this hook's own env and process table
- * (`captureTerminalLocator`) — `undefined` (never an empty `{}`) folds
- * away to nothing on `sessionStartedEvent`'s own `terminal` field when
- * nothing was captured at all (an SSH session, an unrecognized terminal, a
- * sandboxed test environment). Never called for a SUBAGENT
- * (`handleSubagentStart`, below) — "a subagent's card focuses its parent's
- * terminal" is resolved from the PARENT's own node at click time, so a
+ * Captures the terminal locator (`captureTerminalLocator`) — never for a
+ * SUBAGENT (`handleSubagentStart`): a subagent's card focuses its parent's
+ * terminal, resolved from the parent's own node at click time, so a
  * subagent's `session.started` carries no `terminal` field at all.
  *
- * Ticket 02 ("a dead Session stops reading as live"): also captures the
- * runtime's own `pid`/`pidStartedAt` (`captureProcessMarker`) — UNLIKE the
- * terminal locator, this one IS also captured for a subagent
- * (`handleSubagentStart`): a subagent shares the SAME OS process as its
- * parent, so its own liveness check needs no parent walk the way the
- * terminal reach does — each node just carries its own copy of the same
- * fact.
+ * Also captures `pid`/`pidStartedAt` (`captureProcessMarker`) — UNLIKE the
+ * terminal locator, this IS also captured for a subagent: it shares the
+ * SAME OS process as its parent, so its own liveness check needs no
+ * parent walk.
  */
 export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
   try {
@@ -614,7 +504,7 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
  * SubagentStart: its own Session, keyed by `agent_id`, parented to
  * `session_id`. Swallows a failed write the way `handleSessionStart` does,
  * so a subagent keeps its announce declaration exactly when a top-level
- * Session would (announce-declaration/01).
+ * Session would.
  */
 export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPayload): void {
   try {
@@ -637,34 +527,23 @@ export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPa
 
 /**
  * SubagentStop: the subagent Session (`agent_id`) ended. Claude Code's own
- * SubagentStop payload carries no free-text reason, so this constant is
- * Tenaza's own word for it — distinct from SessionEnd's runtime-supplied
- * one. Also samples usage for `agent_id` from `agent_transcript_path` —
- * NEVER `transcript_path`, which here names the PARENT's transcript
- * (ticket 05, M3) — a subagent's context is its own, never folded into its
- * parent's.
+ * payload carries no free-text reason, so this constant is Tenaza's own
+ * word for it. Samples usage from `agent_transcript_path` — NEVER
+ * `transcript_path`, which here names the PARENT's transcript: a
+ * subagent's context is its own, never folded into its parent's.
  *
- * Deliberately does NOT call `backfillSessionStartedIfMissing` (ticket 05
- * fix — see that function's own doc comment): this is the ONE lifecycle
- * event where backfilling would defeat `isNoiseSession`'s hide.
+ * Deliberately omits `backfillSessionStartedIfMissing` — see that
+ * function's own doc for why.
  *
- * Found 2026-10-27, measured on the real `~/.tenaza/state`
- * (216 such logs in 24h, 89% inside a `run_in_background` window, not
- * tied to tool-call volume): Claude Code's own INTERNAL side-agents fire
- * SubagentStop WITHOUT ever firing SubagentStart — no `session.started`,
- * no cwd, no parent, nothing observed for this `agent_id` at all before
- * this call. Appending unconditionally used to BORN a brand-new log
- * holding only this one Event (or that plus a usage sample), which the
- * board then rendered as a "(sin proyecto) · sin datos · terminal
- * desconocida" phantom TERMINÓ card — one new log per side-agent, forever.
- * Fixed at the source: an `agent_id` with NO existing log at all (never
- * started by a real SubagentStart, never backfilled by an earlier
- * PreToolUse/PostToolUse doing real work — exactly the signature the doc
- * comment above already names) gets NOTHING written for it here — no file
- * is ever created. A REAL subagent (its log already exists either way) is
- * completely unaffected, resumed subagents (ticket 13's own revival)
- * included — both already guarantee a non-empty log by the time this
- * fires.
+ * Measured on the real `~/.tenaza/state` (216 such logs in 24h, 89%
+ * inside a `run_in_background` window): Claude Code's own INTERNAL
+ * side-agents fire SubagentStop WITHOUT ever firing SubagentStart —
+ * nothing observed for this `agent_id` at all before this call. Appending
+ * unconditionally used to BORN a brand-new log holding only this one
+ * Event, which the board then rendered as a phantom "(sin proyecto) · sin
+ * datos" card — one per side-agent, forever. Fixed at the source: an
+ * `agent_id` with no existing log gets nothing written here. A real
+ * subagent's log already exists either way, so it is unaffected.
  */
 export function handleSubagentStop(home: string, payload: ClaudeSubagentStopPayload): void {
   if (readSessionEvents(payload.agent_id, home).length === 0) return;
@@ -672,7 +551,6 @@ export function handleSubagentStop(home: string, payload: ClaudeSubagentStopPayl
   sampleUsage(home, payload.agent_id, payload.agent_transcript_path);
 }
 
-/** SessionEnd: the top-level Session (`session_id`) ended, with the runtime's own reason. Also samples usage (q9). */
 export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload): void {
   backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
   appendEvent(home, sessionEndedEvent(payload.session_id, payload.reason));
@@ -680,44 +558,18 @@ export function handleSessionEnd(home: string, payload: ClaudeSessionEndPayload)
 }
 
 /**
- * Stop: the main agent finished a Turn — sample usage for `session_id`.
- * Never ends the Session (that's SessionEnd's job).
+ * Stop: the main agent finished a Turn — samples usage, never ends the
+ * Session (that's SessionEnd's job).
  *
- * Ticket 05 ("Turn state: working vs waiting," AC1): also appends a
- * `turn.ended` Event, UNCONDITIONALLY — the one thing that tells a reader
- * "this Turn just ended" apart from a plain `usage.sampled` (today's ONLY
- * other thing `Stop` can write, and one every OTHER caller —
- * `SessionEnd`/`SubagentStop`/the 25th-call `PostToolUse` sample — writes
- * too, so it carries no Turn-boundary meaning on its own). Appended LAST,
- * after `sampleUsage`, so this call's own newest Event is always
- * `turn.ended` — exactly what `sessions.ts`'s `turnWaitSince` reads as
- * "nothing happened since the Turn ended, so it still reads waiting" the
- * very next time anything derives this Session's state, with NO ~60s wait
- * for Claude Code's own `idle_prompt` and no second Event ever written for
- * the transition back once a fresh `prompt.submitted`/tool touch supersedes
- * it (TIME IS STATE, ADR 0002). Wrapped in its own try/catch — same
- * reasoning as `handleUserPromptSubmit`/`handleNotification`'s own appends:
- * a write failure here is a side effect, never worth failing — or even
- * reporting on — the call that triggered it; Claude Code sees no
- * `hookSpecificOutput` either way, so `Stop`'s own hook answer is
- * untouched regardless (ADR 0007 — nothing here blocks, delays or alters
- * the runtime).
- *
- * This is also what makes ticket 14's own `touchSession` call here
- * redundant, and it is REMOVED (not kept alongside): that call existed
- * only to mark "a Turn ending IS activity" for the cases `sampleUsage`
- * writes nothing (ticket 13's "Stop with no transcript | no frame" gap) —
- * a job `turn.ended` now does more precisely (it also NAMES the moment as
- * a Turn boundary, which a bare touch file never could) and unconditionally
- * (every `Stop` call reaches this line, sample or not). Keeping BOTH would
- * also have reopened a subtle race for ticket 05's own purpose: `touchSession`
- * writes a SEPARATE file (`daemon.ts`'s own touched-file merge), and were it
- * written back AFTER this append, a board tick could see that file's mtime
- * as newer than `turn.ended`'s own `ts` and bump `lastEventTs` PAST it —
- * which `turnWaitSince`'s strict equality check would then read as "already
- * superseded," silently swallowing the very signal this ticket exists to
- * deliver. Removing the call removes the race by construction rather than
- * by careful ordering.
+ * Also appends `turn.ended`, UNCONDITIONALLY and LAST, after
+ * `sampleUsage`: `sessions.ts`'s `turnWaitSince` reads "nothing happened
+ * since the Turn ended" off this call's newest Event, with no ~60s wait
+ * for an `idle_prompt`. Wrapped in its own try/catch, same as every other
+ * lifecycle append in this file. Do not also touch the session here:
+ * writing a separate touched-file after this append could make a board
+ * tick see that file's mtime as newer than `turn.ended`'s own `ts`, which
+ * `turnWaitSince`'s strict equality check would then read as already
+ * superseded, silently losing the turn-boundary signal.
  */
 export function handleStop(home: string, payload: ClaudeStopPayload): void {
   backfillSessionStartedIfMissing(home, payload.session_id, payload.cwd, undefined);
@@ -730,19 +582,14 @@ export function handleStop(home: string, payload: ClaudeStopPayload): void {
 }
 
 /**
- * Found 2026-10-27, evidence against the real `~/.tenaza/state`
- * (subagents with 60/198/293 counted tool calls, zero mid-run samples):
- * Claude Code's real PostToolUse payload INSIDE a subagent never carries
- * `agent_transcript_path` at all — that field is SubagentStop's own, not
- * PostToolUse's — so every 25th-call sample was silently skipped for the
- * entire life of a subagent, with only ITS OWN final SubagentStop sample
- * ever landing. Verified against the real on-disk shape: a parent
- * transcript at `<dir>/<id>.jsonl` has its running subagents' own
- * transcripts at `<dir>/<id>/subagents/agent-<agent_id>.jsonl` — a SIBLING
- * directory named after the parent transcript's own basename (minus
- * `.jsonl`), never the parent's transcript itself (M3's rule holds — this
- * computes a DIFFERENT file entirely, never read as the subagent's own
- * usage source).
+ * Claude Code's real PostToolUse payload inside a subagent never carries
+ * `agent_transcript_path` — that field is SubagentStop's only — so every
+ * 25th-call sample was silently skipped for a subagent's whole life until
+ * this derivation existed (measured: subagents with 60/198/293 counted
+ * tool calls, zero mid-run samples). A parent transcript at
+ * `<dir>/<id>.jsonl` has its running subagents' own transcripts at
+ * `<dir>/<id>/subagents/agent-<agent_id>.jsonl` — a sibling directory, not
+ * the parent's transcript itself.
  */
 function deriveSubagentTranscriptPath(parentTranscriptPath: string, agentId: string): string {
   const dir = path.dirname(parentTranscriptPath);
@@ -751,18 +598,10 @@ function deriveSubagentTranscriptPath(parentTranscriptPath: string, agentId: str
 }
 
 /**
- * Which transcript `handlePostToolUse` samples usage from — ticket 05's M3
- * rule (never the PARENT's transcript for a subagent's own sample) PLUS the
- * derivation above: `agent_transcript_path` wins when Claude
- * Code's payload actually carries it; absent, INSIDE a subagent, DERIVE it
- * from the parent's own `transcript_path` instead of giving up on every
- * mid-run sample — never falling back to sampling the parent's transcript
- * directly, which would silently attribute the PARENT's tokens to this
- * subagent (M3's exact bug). A missing or unreadable derived file degrades
- * exactly like any other transcript `sampleUsage` already handles: no
- * sample, never a wrong number, never a throw. A main-agent call (no
- * `agent_id`) is UNCHANGED by this fix — it always samples `transcript_path`
- * directly.
+ * Never falls back to sampling the parent's transcript directly when
+ * derivation fails — that would silently attribute the PARENT's tokens to
+ * this subagent. A missing or unreadable derived file degrades to no
+ * sample instead, same as any other transcript `sampleUsage` handles.
  */
 function resolveSampleTranscriptPath(payload: ClaudePostToolUsePayload): string | undefined {
   if (!payload.agent_id) return payload.transcript_path;
@@ -811,13 +650,12 @@ function checkpointNudge(home: string, session: string): ClaudeContextOutput | u
 }
 
 /**
- * PostToolUse: count one tool call for the resolved Session, sampling
- * usage on exactly the 25th (and every 25th after) — AC2's own boundary.
- * Keyed by `agent_id ?? session_id` (ticket 05, M2), exactly like
- * `PreToolUse` — a subagent's own tool calls must land in ITS log, never
- * its parent's. Also touches the resolved Session's own "last ordinary
- * activity" marker on EVERY call, matched or not — never an Event, so this
- * never grows the single-writer log.
+ * PostToolUse: counts one tool call for the resolved Session, sampling
+ * usage on exactly the 25th (and every 25th after). Keyed by
+ * `agent_id ?? session_id`, like `PreToolUse` — a subagent's own tool
+ * calls must land in ITS log, never its parent's. Also touches the
+ * session's activity marker on every call — never an Event, so this never
+ * grows the log.
  */
 export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): ClaudeContextOutput | undefined {
   const session = payload.agent_id ?? payload.session_id;
@@ -831,19 +669,11 @@ export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayloa
 }
 
 /**
- * UserPromptSubmit (ticket 14): the human just submitted a new turn — a
- * pure ACTIVITY signal, once per turn (never per tool call, so nowhere
- * near the growth ADR 0002 guards the log against). Appends a
- * `prompt.submitted` Event — which, like every Event, already moves
- * `lastEventTs` forward generically (`sessions.ts`'s `buildSessionIndex`)
- * — so a long-idle Session's last Stop never reads stale once a fresh
- * prompt starts the next turn, and so a stale `notification.observed`
- * (below) is superseded the instant real human activity resumes. Wrapped
- * the same way every other lifecycle append in this file already is
- * (ADR 0007): a write failure here is a side effect, never worth failing
- * — or even reporting on — the call that triggered it, exactly matching
- * this event's own total lack of decision capability in Claude Code's
- * contract.
+ * UserPromptSubmit: the human just submitted a new turn — once per turn,
+ * never per tool call. Appends `prompt.submitted`, which moves
+ * `lastEventTs` forward — so a stale `notification.observed` is
+ * superseded the instant real human activity resumes. Wrapped in its own
+ * try/catch, same as every other lifecycle append in this file.
  */
 export function handleUserPromptSubmit(home: string, payload: ClaudeUserPromptSubmitPayload): void {
   const session = payload.agent_id ?? payload.session_id;
@@ -855,17 +685,12 @@ export function handleUserPromptSubmit(home: string, payload: ClaudeUserPromptSu
 }
 
 /**
- * Notification (ticket 14): Claude Code's OWN signal that it is showing a
- * permission prompt, or that a turn has sat idle ~60s with nobody
- * answering — NEVER Tenaza's own `human` Rule hold (contrast
- * `action.decided`'s `"held"`, which Tenaza itself raised and can resolve
- * with an answer). `hooks/hooks.json`'s own matcher already narrows calls
- * to `permission_prompt`/`idle_prompt`; the check below is a SECOND,
- * defensive gate against a malformed or future payload — every OTHER
- * `notification_type` (and a missing one) is a silent no-op, never a
- * crash, and this event carries no decision capability to begin with, so
- * there is nothing here that could ever block, delay or alter the
- * runtime regardless of what the payload contains.
+ * Notification: Claude Code's OWN signal that it is showing a permission
+ * prompt, or that a turn has sat idle, nobody answering — NEVER Tenaza's
+ * own `human` Rule hold (contrast `action.decided`'s `"held"`, which
+ * Tenaza itself raised and can resolve with an answer). Every other
+ * `notification_type` is a silent no-op. Wrapped in its own try/catch,
+ * same as every other lifecycle append in this file.
  */
 export function handleNotification(home: string, payload: ClaudeNotificationPayload): void {
   const kind = payload.notification_type;
@@ -879,14 +704,11 @@ export function handleNotification(home: string, payload: ClaudeNotificationPayl
 }
 
 /**
- * Dispatch one Claude Code hook call by its `hook_event_name`. Only
- * PreToolUse ever answers back with a permission decision; SessionStart,
- * SubagentStart and PostToolUse answer with context only — the announce
- * declaration or the checkpoint nudge, the latter only once this Session
- * has earned it; every other event (SubagentStop, SessionEnd, Stop, and
- * UserPromptSubmit, Notification) just appends what it has and
- * tells the host nothing. Overloaded so a PreToolUse caller gets
- * PreToolUse's own output shape, never the context-only one.
+ * Dispatch one hook call by `hook_event_name`. Only PreToolUse answers
+ * with a permission decision; SessionStart/SubagentStart/PostToolUse
+ * answer with context only; every other event just appends and tells the
+ * host nothing. Overloaded so a PreToolUse caller gets PreToolUse's own
+ * output shape, never the context-only one.
  */
 export async function handleClaudeHook(home: string, payload: ClaudeHookPayload): Promise<ClaudePreToolUseOutput | undefined>;
 export async function handleClaudeHook(home: string, payload: ClaudeHookInput): Promise<ClaudeHookOutput | undefined>;
@@ -928,15 +750,13 @@ export async function handleClaudeHook(
 }
 
 /**
- * What `tenaza hook claude` actually prints to stdout: `ClaudeHookResponse`
- * widened so `hookSpecificOutput` becomes OPTIONAL (ADR 0007, ticket 01) —
- * `runClaudeHookSafely` below needs to print a bare `{ systemMessage }`
- * with NO permission decision at all, which `ClaudeHookResponse` itself
- * cannot express — and so it may also be a context-only answer
- * (`ClaudeContextOutput`: SessionStart/SubagentStart's announce
- * declaration, or PostToolUse's checkpoint nudge), discriminated on
- * `hookEventName`. Only this wider type is used for what actually reaches
- * stdout; a PreToolUse caller sees `ClaudePreToolUseOutput` below.
+ * What `tenaza hook claude` actually prints to stdout: widens
+ * `ClaudeHookResponse` so `hookSpecificOutput` becomes optional —
+ * `runClaudeHookSafely` needs to print a bare `{ systemMessage }` with no
+ * permission decision, which `ClaudeHookResponse` can't express — and so
+ * it may also be a context-only answer (`ClaudeContextOutput`),
+ * discriminated on `hookEventName`. A PreToolUse caller sees
+ * `ClaudePreToolUseOutput` instead.
  */
 export interface ClaudeHookOutput {
   systemMessage?: string;
@@ -956,7 +776,7 @@ export interface ClaudeContextOutput {
 
 export interface HookOutcome {
   output: ClaudeHookOutput | undefined;
-  /** Set exactly when this call was degraded — what broke, and whether it's grave (H3's "no LKG ever" case) — for `tenaza hook claude` to record to `state/health.json`. */
+  /** Set exactly when this call was degraded — what broke, and whether it's grave — for `tenaza hook claude` to record to `state/health.json`. */
   degraded?: { message: string; grave: boolean };
 }
 
@@ -965,31 +785,23 @@ function faultMessage(error: unknown): string {
 }
 
 /**
- * The answer to an UNANTICIPATED fault (ADR 0007 point 1, decision 08 —
- * `docs/research/hook-allow-vs-classifier.md`): `systemMessage` ONLY, for
- * EVERY event, never a `hookSpecificOutput`. An explicit hook `allow` runs
- * BEFORE Claude Code's own auto-mode classifier and SKIPS it — so
- * answering "allow" on a fault would be LESS safe than no Tenaza at all
- * (H2's own mistake, repeated). Saying nothing about the permission
- * decision is what actually reproduces "the call goes ahead exactly as if
- * Tenaza were not installed": Claude Code's own classifier and permission
- * checks run completely unaffected by this hook's answer.
+ * The answer to an unanticipated fault: `systemMessage` only, for every
+ * event, never a `hookSpecificOutput`. An explicit hook `allow` runs
+ * BEFORE Claude Code's own auto-mode classifier and skips it — answering
+ * "allow" on a fault would be LESS safe than no Tenaza at all. Saying
+ * nothing reproduces "the call goes ahead exactly as if Tenaza were not
+ * installed."
  */
 function faultResponse(message: string): ClaudeHookOutput {
   return { systemMessage: message };
 }
 
 /**
- * Re-check whether the Policy itself is degraded right now — cheap (one
- * small file, re-read and re-parsed; `policyWarning` never scans a
- * Session log) and safe to run on EVERY PreToolUse call regardless of
- * whether a Rule matched, unlike a full rescan of every Session's log
- * (that cost scaled with the number of Sessions and ran on every call —
- * ticket 01's own review caught it; `handlePreToolUse`'s
- * `withSkippedLinesWarning` above reports a skipped LOG line instead,
- * sourced from `decideAction`'s own necessary read, never a second one).
- * Combines with whatever `response` already carries (that skip warning,
- * when `handlePreToolUse` set one) rather than overwriting it.
+ * Re-checks whether the Policy itself is degraded — cheap (one small file,
+ * re-read and re-parsed; never scans a Session log) and safe on every
+ * PreToolUse call, unlike a full log rescan, which once ran on every call
+ * and scaled with the number of Sessions. Combines with whatever
+ * `response` already carries rather than overwriting it.
  */
 function withPolicyDegradation(home: string, response: ClaudeHookOutput | undefined): HookOutcome {
   const warning = policyWarning(home);
@@ -1004,14 +816,12 @@ function withPolicyDegradation(home: string, response: ClaudeHookOutput | undefi
 }
 
 /**
- * Compose the SessionStart self-check (ADR 0007, ticket 02) onto whatever
- * `handleClaudeHook` already answered for this event — the announce
- * declaration (announce-declaration/01), which a failing check never
- * removes. Mirrors `withPolicyDegradation`'s own shape for PreToolUse:
- * every check passing adds nothing, any check failing becomes BOTH this
- * call's `systemMessage` and the `degraded` report `runHookClaude` (cli.ts)
- * writes to `state/health.json` — and, when it's grave, fires the macOS
- * notification through the same report.
+ * Composes the SessionStart self-check onto whatever `handleClaudeHook`
+ * already answered — the announce declaration, which a failing check
+ * never removes. Mirrors `withPolicyDegradation`'s shape: a failing check
+ * becomes both this call's `systemMessage` and the `degraded` report
+ * `runHookClaude` writes to `state/health.json`, firing a macOS
+ * notification when it's grave.
  */
 function withSelfCheck(home: string, response: ClaudeHookOutput | undefined): HookOutcome {
   const fault = runSelfCheck(home);
@@ -1020,22 +830,19 @@ function withSelfCheck(home: string, response: ClaudeHookOutput | undefined): Ho
 }
 
 /**
- * Run one `tenaza hook claude` call (ADR 0007, ticket 01): a top-level
- * try/catch around the ENTIRE dispatch — payload parsing included — so ANY
- * unanticipated fault degrades to "no block, the call goes ahead" instead
- * of crashing the process with nothing printed (H1's own root cause: an
- * uncaught throw here meant Claude Code saw no decision at all). Known
- * fault paths (a malformed Policy, a torn log line) are already tolerated
- * further down (`decideAction`, `loadPolicy`, `readLog`) and surface here
- * as `degraded` rather than a throw; this catch is strictly the backstop
- * for everything else — a malformed payload among them.
+ * Runs one `tenaza hook claude` call: a top-level try/catch around the
+ * entire dispatch, payload parsing included, so any unanticipated fault
+ * degrades to "no block, the call goes ahead" instead of crashing the
+ * process with nothing printed — an uncaught throw here once meant Claude
+ * Code saw no decision at all. Known fault paths (a malformed Policy, a
+ * torn log line) are already tolerated further down and surface as
+ * `degraded` rather than a throw; this catch is the backstop for
+ * everything else, a malformed payload included.
  *
  * Two events get their own post-processing on top of `handleClaudeHook`'s
- * own dispatch (ticket 02): PreToolUse re-checks the Policy
- * (`withPolicyDegradation`, ticket 01), and SessionStart runs the self-check
- * (`withSelfCheck`, once per top-level session — never SubagentStart, which
- * stays exactly as `handleClaudeHook` already left it). Every other event
- * passes `handleClaudeHook`'s response straight through, unchanged.
+ * dispatch: PreToolUse re-checks the Policy, and SessionStart runs the
+ * self-check (never SubagentStart). Every other event passes
+ * `handleClaudeHook`'s response straight through.
  */
 export async function runClaudeHookSafely(home: string, raw: string): Promise<HookOutcome> {
   try {

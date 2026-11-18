@@ -137,6 +137,8 @@ export const BoardSessionSchema = z.object({
   project: z.string(),
   /** The `ticket` Label verbatim, exactly as announced — never validated or parsed (its own definition in the glossary). `undefined` when never labeled. */
   ticket: z.string().optional(),
+  /** The `verdict` Label verbatim, as last announced. `undefined` when never labeled. */
+  verdict: z.string().optional(),
   role: SessionRoleSchema,
   startedAt: z.string().optional(),
   endedAt: z.string().optional(),

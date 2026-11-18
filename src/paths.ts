@@ -84,6 +84,22 @@ export function sessionTouchedPath(
   return path.join(sessionsDir(home), `${session}.touched`);
 }
 
+/** A Session's latest usage sample, a plain number — never an Event: PostToolUse reads it on every call instead of replaying the log. */
+export function usageSampleMarkerPath(
+  session: string,
+  home: string = tenazaHome(),
+): string {
+  return path.join(sessionsDir(home), `${session}.usage`);
+}
+
+/** A Session's accumulated labels as JSON — never an Event, for the same reason as `usageSampleMarkerPath`. */
+export function sessionLabelsMarkerPath(
+  session: string,
+  home: string = tenazaHome(),
+): string {
+  return path.join(sessionsDir(home), `${session}.labels`);
+}
+
 /**
  * Where the notifier's test seam records "what would have been sent" (ticket
  * 08) when `TENAZA_NOTIFY_RECORDER` swaps the real macOS sender for it — a

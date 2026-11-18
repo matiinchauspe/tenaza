@@ -2,15 +2,23 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ANNOUNCE_DECLARATION, handleClaudeHook, LABEL_NOT_RECORDED, parseLabelCommand } from "../../src/adapters/claude";
-import { liveAnsweredEvent, sessionEndedEvent } from "../../src/contract/event";
+import {
+  ANNOUNCE_DECLARATION,
+  CHECKPOINT_NUDGE,
+  handleClaudeHook,
+  isDispatchedRun,
+  LABEL_NOT_RECORDED,
+  parseLabelCommand,
+  shouldNudgeCheckpoint,
+} from "../../src/adapters/claude";
+import { liveAnsweredEvent, promptSubmittedEvent, sessionEndedEvent } from "../../src/contract/event";
 import { writeAlive } from "../../src/daemonlink";
 import { decideAction } from "../../src/decide";
 import { inboxIdentityHash } from "../../src/identity";
 import { appendEvent, appendHumanEvent, readSessionEvents } from "../../src/log";
 import { readNotificationRecorder } from "../../src/notify";
 import { renderSessionTree } from "../../src/sessions";
-import { sessionTouchedPath } from "../../src/paths";
+import { sessionLabelsMarkerPath, sessionTouchedPath, usageSampleMarkerPath } from "../../src/paths";
 
 const fixture = (name: string) =>
   path.join(import.meta.dir, "..", "fixtures", "transcripts", name);
@@ -1489,5 +1497,348 @@ describe("touchSession wiring (ticket 14, AC3): every ordinary call bumps the Se
     const second = statSync(sessionTouchedPath("sess-1", home)).mtimeMs;
 
     expect(second).toBeGreaterThanOrEqual(first);
+  });
+});
+
+describe("shouldNudgeCheckpoint: pure, at/past/below/never", () => {
+  test.each([
+    [200_000, 200_000, true],
+    [200_001, 200_000, true],
+    [199_999, 200_000, false],
+    [undefined, 200_000, false],
+  ])("shouldNudgeCheckpoint(%p, %p) -> %p", (latestSample, thresholdTokens, expected) => {
+    expect(shouldNudgeCheckpoint(latestSample, thresholdTokens)).toBe(expected);
+  });
+});
+
+describe("isDispatchedRun: pure, both labels / either alone / neither", () => {
+  test.each([
+    [{ ticket: "RES-1", base: "main" }, true],
+    [{ ticket: "RES-1" }, false],
+    [{ base: "main" }, false],
+    [{}, false],
+    [{ project: "acme" }, false],
+  ])("isDispatchedRun(%p) -> %p", (labels, expected) => {
+    expect(isDispatchedRun(labels)).toBe(expected);
+  });
+});
+
+describe("PostToolUse checkpoint nudge: nag a dispatched run past the threshold, never a block", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-checkpoint-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** Labels through the real `tenaza label` path, so the cache is written as in production. */
+  async function label(session: string, pairs: Record<string, string>, agentId?: string): Promise<void> {
+    const command = `tenaza label ${Object.entries(pairs)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ")}`;
+    await handleClaudeHook(home, {
+      session_id: session,
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command },
+      agent_id: agentId,
+    });
+  }
+
+  test("a dispatched Session (ticket + base labeled) whose latest sample lands past the default threshold is told to checkpoint and end the run — nothing else, never a permission decision", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response).toEqual({
+      hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: CHECKPOINT_NUDGE },
+    });
+  });
+
+  test("an UNLABELED Session past the threshold is never nudged — this walk's own interactive session included", async () => {
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("labeled with `ticket` alone (an attended current-branch build) past the threshold is never nudged — a checkpoint is dispatched-only", async () => {
+    await label("sess-1", { ticket: "RES-1" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("labeled with `base` alone past the threshold is never nudged — `ticket` is required too", async () => {
+    await label("sess-1", { base: "main" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("it repeats on every call past the threshold, not once — a later call needs no fresh sample to still be nudged", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    // The 26th call carries no transcript at all — the nudge must still
+    // fire from the Session's already-recorded sample, not a fresh one.
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+  });
+
+  test("below the threshold, a dispatched Session gets nothing", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("below-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("below-threshold.jsonl"),
+    });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("with no usage sample yet, a dispatched Session gets nothing", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse", cwd: "/tmp/repo" });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("a sample exactly AT the threshold still nudges — never only strictly past it", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), "[flag]\nthreshold_tokens = 242170\n");
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+  });
+
+  test("the nudge is scoped per Session — a sibling session's crossing never nudges this one", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    await label("sess-2", { ticket: "RES-2", base: "main" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-2", hook_event_name: "PostToolUse" });
+
+    expect(response).toBeUndefined();
+  });
+
+  test("a subagent's own crossing nudges by agent_id, independent of its parent session — each needs its own labels", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main" }, "agent-1");
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        agent_id: "agent-1",
+        agent_transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      agent_id: "agent-1",
+    });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+    // The parent carries no labels of its own (a subagent's announce never
+    // reaches it) and was never sampled itself — unnudged on both counts.
+    const parentResponse = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+    expect(parentResponse).toBeUndefined();
+  });
+
+  test("labels accumulate across separate `tenaza label` calls, same as the log they mirror", async () => {
+    await label("sess-1", { project: "acme" });
+    await label("sess-1", { ticket: "RES-1", base: "main" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+  });
+});
+
+describe("the checkpoint nudge reads small per-session markers, never the whole log (the hot path)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-claude-markers-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("sampling writes the Session's latest reading to its own small marker file", async () => {
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    expect(existsSync(usageSampleMarkerPath("sess-1", home))).toBe(false);
+
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(readFileSync(usageSampleMarkerPath("sess-1", home), "utf8")).toBe("242170");
+  });
+
+  test.each(["", "  ", "\n"])(
+    "an empty or blank usage marker (%p) reads as never-sampled, never a lying zero — even at a 0 threshold",
+    async (blank) => {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "tenaza label ticket=RES-1 base=main" },
+      });
+      // A real write never leaves this file empty — this stands in for a
+      // torn one. `Number("")` is `0`, a finite number: read naively, a
+      // blank file would pass for a genuine zero-token sample.
+      await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse", cwd: "/tmp/repo" });
+      writeFileSync(usageSampleMarkerPath("sess-1", home), blank, "utf8");
+      mkdirSync(path.join(home, "config"), { recursive: true });
+      writeFileSync(path.join(home, "config", "policy.toml"), "[flag]\nthreshold_tokens = 0\n");
+
+      const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+      expect(response).toBeUndefined();
+    },
+  );
+
+  test("a `tenaza label` announce mirrors onto the Session's own small label marker, merged across calls", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label project=acme" },
+    });
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=RES-1 base=main" },
+    });
+
+    expect(JSON.parse(readFileSync(sessionLabelsMarkerPath("sess-1", home), "utf8"))).toEqual({
+      project: "acme",
+      ticket: "RES-1",
+      base: "main",
+    });
+  });
+
+  test("the nudge decision never grows past a fixed, tiny read — correct even when the Session's own log holds thousands of unrelated lines", async () => {
+    await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "tenaza label ticket=RES-1 base=main" },
+    });
+    for (let i = 1; i < 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+    // Pad the log far past anything a real Session would ever carry — the
+    // two small markers the nudge actually reads stay a few bytes
+    // regardless of how long this log grows.
+    for (let i = 0; i < 5000; i++) {
+      appendEvent(home, promptSubmittedEvent("sess-1"));
+    }
+
+    const response = await handleClaudeHook(home, {
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      transcript_path: fixture("above-threshold.jsonl"),
+    });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+    expect(statSync(usageSampleMarkerPath("sess-1", home)).size).toBeLessThan(16);
+    expect(statSync(sessionLabelsMarkerPath("sess-1", home)).size).toBeLessThan(64);
   });
 });

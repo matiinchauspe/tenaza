@@ -1,3 +1,4 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Action, Capability, NotificationKind } from "../contract/event";
 import {
@@ -13,6 +14,7 @@ import { decideAction } from "../decide";
 import { runSelfCheck } from "../health";
 import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
 import { maxUsageSample, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
+import { sessionLabelsMarkerPath, usageSampleMarkerPath } from "../paths";
 import { loadPolicy, policyWarning } from "../policy";
 import { captureProcessMarker, captureTerminalLocator } from "../terminallocator";
 import { measureContextTokens } from "../transcript";
@@ -233,6 +235,12 @@ const MENTIONS_LABEL = /(?:^|[\s;&|(`/])tenaza\s+label\b/;
 export const LABEL_NOT_RECORDED =
   "The `tenaza label` in this command was not recorded: a label counts only when `tenaza label <key>=<value> …` runs as its own shell command, with single-word values.";
 
+/**
+ * Context only, never a denial. Names nothing of Yunque's beyond
+ * "checkpoint": Tenaza does not depend on it.
+ */
+export const CHECKPOINT_NUDGE = "This session has crossed its context threshold. Write your checkpoint and end the run.";
+
 /** The `additionalContext` answer SessionStart and SubagentStart give — context only, no decision. */
 function declarationResponse(hookEventName: "SessionStart" | "SubagentStart"): ClaudeHookOutput {
   return { hookSpecificOutput: { hookEventName, additionalContext: ANNOUNCE_DECLARATION } };
@@ -389,6 +397,15 @@ function backfillSessionStartedIfMissing(
   }
 }
 
+/** Best-effort mirror of the labels just logged: the `session.labeled` Event stays the record. */
+function recordLabels(home: string, session: string, labels: Record<string, string>): void {
+  try {
+    const file = sessionLabelsMarkerPath(session, home);
+    const existing = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+    writeFileSync(file, JSON.stringify({ ...existing, ...labels }), "utf8");
+  } catch {}
+}
+
 /**
  * Decide one Claude Code PreToolUse call against the Policy. Returns
  * `undefined` when there is nothing to tell the host — either the call
@@ -421,6 +438,7 @@ async function handlePreToolUse(
       // Never routed through the Policy: an announce isn't a Rule match,
       // so it's never logged as one (ADR 0003).
       appendEvent(home, sessionLabeledEvent(session, labels));
+      recordLabels(home, session, labels);
       return undefined;
     }
   }
@@ -495,6 +513,13 @@ async function decidePreToolUse(
   return skippedLines ? { systemMessage: describeSkippedLines(skippedLines) } : undefined;
 }
 
+/** Best-effort mirror of the sample just logged: the `usage.sampled` Event stays the record. */
+function recordLatestUsageSample(home: string, session: string, contextTokens: number): void {
+  try {
+    writeFileSync(usageSampleMarkerPath(session, home), String(contextTokens), "utf8");
+  } catch {}
+}
+
 /**
  * Sample `session`'s context size from `transcriptPath` and append
  * `usage.sampled` — but only when the transcript actually yields a number.
@@ -515,6 +540,7 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
 
   const previousMax = maxUsageSample(readSessionEvents(session, home));
   appendEvent(home, usageSampledEvent(session, { context_tokens: contextTokens }));
+  recordLatestUsageSample(home, session, contextTokens);
 
   const { thresholdTokens } = loadPolicy(home);
   if (shouldNotifyThresholdCrossing(previousMax, contextTokens, thresholdTokens)) {
@@ -732,22 +758,59 @@ function resolveSampleTranscriptPath(payload: ClaudePostToolUsePayload): string 
     : undefined;
 }
 
+export function shouldNudgeCheckpoint(latestSample: number | undefined, thresholdTokens: number): boolean {
+  return latestSample !== undefined && latestSample >= thresholdTokens;
+}
+
+/** Only a run isolated on its own branch announces both; a session building on the current branch announces `ticket` alone and cannot checkpoint. */
+export function isDispatchedRun(labels: Record<string, string>): boolean {
+  return Boolean(labels.ticket) && Boolean(labels.base);
+}
+
+function readLatestUsageSample(home: string, session: string): number | undefined {
+  try {
+    const raw = readFileSync(usageSampleMarkerPath(session, home), "utf8").trim();
+    if (raw === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readLabels(home: string, session: string): Record<string, string> {
+  try {
+    return JSON.parse(readFileSync(sessionLabelsMarkerPath(session, home), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+/** The latest sample, not the max: a reading that falls after a compaction stops the nudge. */
+function checkpointNudge(home: string, session: string): ClaudeContextOutput | undefined {
+  if (!isDispatchedRun(readLabels(home, session))) return undefined;
+  if (!shouldNudgeCheckpoint(readLatestUsageSample(home, session), loadPolicy(home).thresholdTokens)) return undefined;
+  return { hookEventName: "PostToolUse", additionalContext: CHECKPOINT_NUDGE };
+}
+
 /**
  * PostToolUse: count one tool call for the resolved Session, sampling
  * usage on exactly the 25th (and every 25th after) — AC2's own boundary.
  * Keyed by `agent_id ?? session_id` (ticket 05, M2), exactly like
  * `PreToolUse` — a subagent's own tool calls must land in ITS log, never
- * its parent's. Ticket 14, AC3: also touches the resolved Session's own
- * "last ordinary activity" marker on EVERY call, matched or not — never an
- * Event, so this never grows the single-writer log.
+ * its parent's. Also touches the resolved Session's own "last ordinary
+ * activity" marker on EVERY call, matched or not — never an Event, so this
+ * never grows the single-writer log.
  */
-export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): void {
+export function handlePostToolUse(home: string, payload: ClaudePostToolUsePayload): ClaudeContextOutput | undefined {
   const session = payload.agent_id ?? payload.session_id;
   touchSession(home, session);
   backfillSessionStartedIfMissing(home, session, payload.cwd, payload.agent_id ? payload.session_id : undefined);
   const count = countToolCall(home, session);
-  if (!shouldSampleOnToolCall(count)) return;
-  sampleUsage(home, session, resolveSampleTranscriptPath(payload));
+  if (shouldSampleOnToolCall(count)) {
+    sampleUsage(home, session, resolveSampleTranscriptPath(payload));
+  }
+  return checkpointNudge(home, session);
 }
 
 /**
@@ -800,12 +863,13 @@ export function handleNotification(home: string, payload: ClaudeNotificationPayl
 
 /**
  * Dispatch one Claude Code hook call by its `hook_event_name`. Only
- * PreToolUse ever answers back with a permission decision; SessionStart and
- * SubagentStart answer with context only — the announce declaration
- * (announce-declaration/01); every other event (SubagentStop, SessionEnd,
- * Stop, PostToolUse, and ticket 14's UserPromptSubmit/Notification) just
- * appends what it has and tells the host nothing. Overloaded so a PreToolUse
- * caller gets PreToolUse's own output shape, never the context-only one.
+ * PreToolUse ever answers back with a permission decision; SessionStart,
+ * SubagentStart and PostToolUse answer with context only — the announce
+ * declaration or the checkpoint nudge, the latter only once this Session
+ * has earned it; every other event (SubagentStop, SessionEnd, Stop, and
+ * UserPromptSubmit, Notification) just appends what it has and
+ * tells the host nothing. Overloaded so a PreToolUse caller gets
+ * PreToolUse's own output shape, never the context-only one.
  */
 export async function handleClaudeHook(home: string, payload: ClaudeHookPayload): Promise<ClaudePreToolUseOutput | undefined>;
 export async function handleClaudeHook(home: string, payload: ClaudeHookInput): Promise<ClaudeHookOutput | undefined>;
@@ -831,9 +895,10 @@ export async function handleClaudeHook(
     case "Stop":
       handleStop(home, payload);
       return undefined;
-    case "PostToolUse":
-      handlePostToolUse(home, payload);
-      return undefined;
+    case "PostToolUse": {
+      const nudge = handlePostToolUse(home, payload);
+      return nudge ? { hookSpecificOutput: nudge } : undefined;
+    }
     case "UserPromptSubmit":
       handleUserPromptSubmit(home, payload);
       return undefined;
@@ -850,8 +915,9 @@ export async function handleClaudeHook(
  * widened so `hookSpecificOutput` becomes OPTIONAL (ADR 0007, ticket 01) —
  * `runClaudeHookSafely` below needs to print a bare `{ systemMessage }`
  * with NO permission decision at all, which `ClaudeHookResponse` itself
- * cannot express — and so it may also be SessionStart/SubagentStart's
- * context-only answer (announce-declaration/01), discriminated on
+ * cannot express — and so it may also be a context-only answer
+ * (`ClaudeContextOutput`: SessionStart/SubagentStart's announce
+ * declaration, or PostToolUse's checkpoint nudge), discriminated on
  * `hookEventName`. Only this wider type is used for what actually reaches
  * stdout; a PreToolUse caller sees `ClaudePreToolUseOutput` below.
  */
@@ -865,9 +931,9 @@ export interface ClaudePreToolUseOutput extends ClaudeHookOutput {
   hookSpecificOutput?: ClaudeHookResponse["hookSpecificOutput"];
 }
 
-/** SessionStart/SubagentStart's own `hookSpecificOutput`: context for the Session, never a decision (announce-declaration/01). */
+/** A context-only `hookSpecificOutput`, never a decision. */
 export interface ClaudeContextOutput {
-  hookEventName: "SessionStart" | "SubagentStart";
+  hookEventName: "SessionStart" | "SubagentStart" | "PostToolUse";
   additionalContext: string;
 }
 

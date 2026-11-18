@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Action, Capability, NotificationKind } from "../contract/event";
 import {
@@ -16,6 +16,7 @@ import { appendEvent, readSessionEvents, sessionHasStarted } from "../log";
 import { maxUsageSample, notifyParked, notifyThresholdCrossed, shouldNotifyThresholdCrossing } from "../notify";
 import { sessionLabelsMarkerPath, usageSampleMarkerPath } from "../paths";
 import { loadPolicy, policyWarning } from "../policy";
+import { buildSessionIndex } from "../sessions";
 import { captureProcessMarker, captureTerminalLocator } from "../terminallocator";
 import { measureContextTokens } from "../transcript";
 import { countToolCall, shouldSampleOnToolCall, touchSession } from "../toolcalls";
@@ -397,13 +398,23 @@ function backfillSessionStartedIfMissing(
   }
 }
 
-/** Best-effort mirror of the labels just logged: the `session.labeled` Event stays the record. */
-function recordLabels(home: string, session: string, labels: Record<string, string>): void {
+function labelsFromLog(home: string, session: string): Record<string, string> {
+  return buildSessionIndex(readSessionEvents(session, home)).get(session)?.labels ?? {};
+}
+
+function writeLabelsMarker(home: string, session: string, labels: Record<string, string>): void {
   try {
-    const file = sessionLabelsMarkerPath(session, home);
-    const existing = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
-    writeFileSync(file, JSON.stringify({ ...existing, ...labels }), "utf8");
+    writeFileSync(sessionLabelsMarkerPath(session, home), JSON.stringify(labels), "utf8");
   } catch {}
+}
+
+function recordLabels(
+  home: string,
+  session: string,
+  previous: Record<string, string>,
+  labels: Record<string, string>,
+): void {
+  writeLabelsMarker(home, session, { ...previous, ...labels });
 }
 
 /**
@@ -435,12 +446,12 @@ async function handlePreToolUse(
   if (action.kind === "shell") {
     const labels = parseLabelCommand(action.command);
     if (labels) {
+      const previous = readLabels(home, session);
       // Never routed through the Policy: an announce isn't a Rule match,
-      // so it's never logged as one (ADR 0003).
+      // so it's never logged as one.
       appendEvent(home, sessionLabeledEvent(session, labels));
-      recordLabels(home, session, labels);
-      // Only `parked` needs the human; `checkpoint`/`done`/`fail-fast` notify nobody.
-      if (labels.verdict === "parked") notifyParked(home, session);
+      recordLabels(home, session, previous, labels);
+      if (labels.verdict === "parked" && previous.verdict !== "parked") notifyParked(home, session);
       return undefined;
     }
   }
@@ -780,11 +791,14 @@ function readLatestUsageSample(home: string, session: string): number | undefine
   }
 }
 
+/** Writes even `{}`, so an unlabelled Session replays its log once, never on every PostToolUse. */
 function readLabels(home: string, session: string): Record<string, string> {
   try {
     return JSON.parse(readFileSync(sessionLabelsMarkerPath(session, home), "utf8"));
   } catch {
-    return {};
+    const healed = labelsFromLog(home, session);
+    writeLabelsMarker(home, session, healed);
+    return healed;
   }
 }
 

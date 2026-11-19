@@ -14,7 +14,7 @@ import { buildBoardViewModel, highlightedSessionId, resolveBoardKeyAction, type 
 
 const EVENTS_URL = "/events";
 
-/** `hot` highlights TE NECESITA once it's non-zero — the same condition the tab title already uses. */
+/** `hot` highlights TE NECESITA once it's non-zero. */
 const STAT_LABELS: { key: keyof BoardStats; label: string; hot?: boolean }[] = [
   { key: "teNecesita", label: "TE NECESITAN", hot: true },
   { key: "corriendo", label: "CORRIENDO" },

@@ -5,7 +5,7 @@ export interface ActivityPanelProps {
   entries: readonly ActivityFeedEntry[];
 }
 
-/** Absolute time, never relative "hace Ns": the panel already orders entries newest-first, so an absolute time reads better here. An unparsable `ts` degrades to an em dash rather than "Invalid Date". */
+/** Absolute, never relative "hace Ns": the panel already orders entries newest-first, so an absolute time reads better here. */
 function formatClock(ts: string): string {
   const date = new Date(ts);
   return Number.isNaN(date.getTime())

@@ -85,7 +85,7 @@ export interface InboxActionsState {
   runningIds: ReadonlySet<string>;
   /** Combined stdout+stderr per item, keyed by id — cleared only when a new `run` starts for that same id. */
   outputs: Readonly<Record<string, string>>;
-  /** The last non-ok, non-403 response any write for this item got — cleared on that id's next successful write. Distinct from a run's own in-stream failure trailer: this is "the write itself was refused," not "the write started and the command failed." */
+  /** Distinct from a run's own in-stream failure trailer: this is "the write itself was refused," not "the write started and the command failed." */
   errors: Readonly<Record<string, string>>;
   /** True once any write 403s — the Daemon's token rotated (a restart) and this tab's cookie is stale. Never clears itself: reopening the view is the only fix. */
   staleToken: boolean;
@@ -98,7 +98,7 @@ export interface InboxActionsState {
   approve(id: string, message?: string): void;
   /** `message` is the deny reason the agent reads; empty or omitted falls back to a generic one, never silently dropped. */
   reject(id: string, message?: string): void;
-  /** `sessionId` is the owning Session's id, never the card's own id when the card is an Inbox item. Fire-and-forget: a focus action changes no derived state, so there's nothing for `/events` to push back either. */
+  /** `sessionId` is the owning Session's id, never the card's own id when the card is an Inbox item. */
   focusTerminal(sessionId: string): void;
   archive(sessionId: string): void;
 }

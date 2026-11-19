@@ -28,7 +28,7 @@ import type {
   TurnWait,
 } from "../../contract/live";
 
-/** The one place this wording is picked — `SessionCard`/`InboxCard` only render it. "unknown" returns an empty string rather than a dead literal nobody reads, since neither card shows a terminal button for it at all. */
+/** "unknown" returns an empty string rather than a dead literal nobody reads, since neither card shows a terminal button for it at all. */
 export function terminalLabelFor(reach: TerminalReach, appLabel: string | undefined): string {
   if (reach === "exact") return "ir a terminal ↗";
   if (reach === "app") return `abrir ${appLabel ?? "la terminal"} ↗`;

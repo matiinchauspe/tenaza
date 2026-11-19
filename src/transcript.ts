@@ -1,22 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 
 /**
- * The context size Tenaza reports for a Session at one moment: the total
- * tokens that were IN the model's context window for the LATEST assistant
- * turn in its transcript — `input_tokens + cache_creation_input_tokens +
- * cache_read_input_tokens`, the same three numbers the Anthropic API bills
- * for that turn's prompt. `output_tokens` is deliberately excluded: it is
- * what the model just generated, not what was read into context for this
- * call — it reappears as `cache_read`/`cache_creation` on the NEXT turn's
- * usage, so adding it here would double-count it one line early. (Build-time
- * judgment call, ticket 04 — the ticket names the Event's shape but not this
- * formula; this is the ecosystem's own convention for "current context
- * size", not something the spec states.)
+ * Includes `input_tokens` and both cache fields, never `output_tokens` —
+ * that's what the model just generated, not what was read into context
+ * for this call; it reappears as `cache_read`/`cache_creation` on the
+ * NEXT turn's usage, so counting it here would double it one line early.
  *
- * Scans from the end of the file backward so "latest" never means "first" or
- * "largest" — the file's own chronological order decides. Any line that
- * fails to parse, or isn't an assistant turn carrying `usage`, is skipped
- * rather than treated as an error: a transcript is an external, unversioned
+ * Skips any line that fails to parse or isn't an assistant turn carrying
+ * `usage`, rather than erroring — a transcript is an external, unversioned
  * format Tenaza does not own.
  */
 export function measureContextTokens(transcriptPath: string): number | undefined {

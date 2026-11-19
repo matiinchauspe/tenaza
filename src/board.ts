@@ -1,75 +1,56 @@
 /**
- * The Live surface's own domain logic (ticket 08, decision 04): which
- * column a Session belongs in, how its age reads, and the pure list math
- * the board's keyboard selection moves over. Zero imports of its own, on
- * purpose — same reasoning as `contextbar.ts`: the React client bundles
- * this file directly, so it must never pull in a node builtin
- * transitively. It may still import another zero-import file:
- * `sessionstate.ts` (deepening ticket 03) is exactly that, and owns the
- * precedence ladder this file used to carry its own copy of.
+ * Zero imports of its own except `sessionstate.ts` (also zero-import): the
+ * React client bundles this file directly, so it must never pull in a node
+ * builtin transitively.
  *
  * TIME IS STATE: every function here that classifies anything time-based
- * takes `now` as a plain argument and does nothing with `Date.now()`
- * internally — the caller (the board's `useNow` hook, ticking every
- * 15-30s) is what actually re-evaluates these on a clock, including for a
- * Session that stopped producing Events entirely (which otherwise would
- * never re-push over SSE, and would freeze — frozen "CORRIENDO" forever,
- * or a TERMINÓ card that never ages out of the 24h window).
+ * takes `now` as a plain argument rather than reading `Date.now()`
+ * internally — the caller's own ticking clock re-evaluates these, including
+ * for a session that stopped producing events entirely. Without that, a
+ * frozen state would never clear and a TERMINÓ card would never age out of
+ * its 24h window.
  *
- * `stallMinutes` is never defaulted here. It always comes from the ONE
- * place the Policy is read (`policy.ts`'s `DEFAULT_STALL_MINUTES`, carried
- * in the SSE payload as `LivePolicy.stallMinutes`) — a default here would
- * be a second copy of that number the client and the Daemon could drift
- * apart on, exactly what the ticket's "never hardcoded in the client"
- * rules out.
+ * `stallMinutes` is never defaulted here — it always comes from the one
+ * place the Policy is read, so the client and the Daemon can't drift on
+ * the number.
  */
 
 import { sessionState } from "./sessionstate";
 
-/** TERMINÓ shows a Session ended within this window (spec: "the last 24 h") — not configurable, unlike `stallMinutes`. */
+/** Not configurable, unlike `stallMinutes` — this window is fixed. */
 export const TERMINO_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export type SessionColumn = "corriendo" | "trabada" | "termino";
 
-/** The subset of `BoardSession` the time-based functions below actually read — named independently of the contract type so this file stays import-free. */
+/** Subset of `BoardSession` these functions read — named independently so this file stays import-free. */
 export interface SessionTiming {
   endedAt?: string;
   lastEventTs?: string;
   /**
-   * Ticket 09 (tenaza-v0-3): present while a current Stop-derived wait
-   * applies (`sessions.ts`'s `turnWaitSince`, carried over SSE as
-   * `BoardSession.turnWait` — `contract/live.ts`). Only PRESENCE matters to
-   * `sessionColumn` below — the richer shape underneath (`since`,
-   * `backgroundCount`) is `viewModel.ts`'s own badge to resolve, never this
-   * file's, which is why this stays `unknown` rather than importing
-   * `TurnWait` and breaking the "zero imports" rule in this file's header.
+   * Present while a current wait applies — `turnWait` for a Stop-derived
+   * wait, `nativeWait` for a native prompt. Only PRESENCE matters to
+   * `sessionColumn` below; the richer shape is `viewModel.ts`'s own badge
+   * to resolve, which is why these stay `unknown` rather than importing
+   * their real types and breaking "zero imports."
    */
   turnWait?: unknown;
-  /** Same "presence only" convention as `turnWait` above, for a current native prompt (`sessions.ts`'s `nativeWaitFor`, carried as `BoardSession.nativeWait`). */
   nativeWait?: unknown;
 }
 
 /**
- * Which board column a Session belongs in RIGHT NOW, or `undefined` when it
- * belongs in none (an ended Session past the 24h TERMINÓ window — the
- * board simply drops its card, per spec). A Session's own column, never a
- * rollup from descendants (unlike `sessions.ts`'s tree-view
- * `rollupCategory`): the board shows every Session, main and subagent
- * alike, as its own independent card (spec's user story 9), so there is no
- * parent to roll up into — `parentId` is shown on the card for context
- * only (the "↳ parent" label).
+ * `undefined` when the session belongs in no column — an ended session
+ * past the 24h TERMINÓ window, whose card the board just drops. A
+ * session's own column, never a rollup from descendants (unlike
+ * `sessions.ts`'s tree-view `rollupCategory`): the board shows every
+ * session, main and subagent alike, as its own independent card, so there
+ * is no parent to roll up into.
  *
- * Deepening ticket 03: the ladder itself — ended beats a current
- * `turnWait`/`nativeWait`, which beats Stalled, which beats working — is
- * `sessionstate.ts`'s `sessionState` now, the SAME function
- * `sessions.ts`'s `renderNode` calls for the CLI tree. This function's own
- * job is only the LABEL each of those four states gets on the board
- * (CORRIENDO covers both "waiting" and "working" — the board has no
- * separate waiting column, the card's own ESPERÁNDOTE / native-wait badge
- * (`viewModel.ts`'s `toTurnWait`/`toNativeWait`) renders on top of it
- * regardless) and the 24h TERMINÓ window, which decides whether an ended
- * Session's card still shows at all — neither of which `sessionstate.ts`
- * owns.
+ * The ended/waiting/stalled/working ladder is `sessionstate.ts`'s
+ * `sessionState` — the same function `sessions.ts` calls for the CLI
+ * tree. This function only assigns the board LABEL for each state:
+ * CORRIENDO covers both waiting and working (the board has no separate
+ * waiting column; a card's own badge renders the distinction on top), and
+ * decides the 24h TERMINÓ window, which `sessionstate.ts` doesn't own.
  */
 export function sessionColumn(session: SessionTiming, now: Date, stallMinutes: number): SessionColumn | undefined {
   const state = sessionState(
@@ -88,13 +69,7 @@ export function sessionColumn(session: SessionTiming, now: Date, stallMinutes: n
   return state === "stalled" ? "trabada" : "corriendo";
 }
 
-/**
- * `Ns` / `Nm` / `Nh` / `Nd` since `ts` — the same convention
- * `sessions.ts`'s `formatAge` already uses for the CLI tree, reimplemented
- * here against a bare ISO string (rather than a `SessionNode`) so it also
- * reads an Inbox row's own `ts` with no second formatter. `undefined`
- * (never observed) reads as "—", same as a Session with no sample yet.
- */
+/** `Ns`/`Nm`/`Nh`/`Nd` since `ts`, or `—` if absent. Reimplemented against a bare ISO string, not a `SessionNode` — `sessions.ts` has its own `formatAge` for the CLI tree, but this one also needs to read an Inbox row's `ts` with no second formatter. */
 export function formatAge(ts: string | undefined, now: Date): string {
   if (!ts) return "—";
   const ms = Math.max(0, now.getTime() - new Date(ts).getTime());
@@ -109,26 +84,12 @@ export function formatAge(ts: string | undefined, now: Date): string {
 }
 
 /**
- * A board card's displayed project NAME (human fix round, ticket 08):
- * `deriveProject` (`sessions.ts`) returns a `project` Label verbatim, or —
- * absent one — a git root's ABSOLUTE PATH (`/Users/.../oarfish`), which
- * reads fine in the CLI's own grouped tree but has no room on a dense board
- * card (the human's own rejection: "the project shows the full cwd path
- * instead of the project name"). The spec names no formatting rule for this
- * — decision left to the code, reported.
- *
- * Mirrors how Yunque itself lays out a worktree, this project's own
- * CLAUDE.md: `.worktrees/<repo>/<task...>/` — the segment right after
- * `.worktrees` (or `worktrees`) is the REPO, never the leaf task/branch
- * directory under it, which is what a bare basename would return instead.
- * Anything else — a plain git root, an arbitrary cwd — uses the path's own
- * basename, same as `reservee`/`rudy` in the prototype (decision 04).
- *
- * A value with no path separator at all (a `project` Label like
- * "reservee", or the `UNKNOWN_PROJECT` bucket "(sin proyecto)") passes
- * through unchanged — `deriveProject` already resolved it to exactly the
- * string a human announced (or the one fixed bucket), which this must
- * never rewrite.
+ * The project name shown on a card. `deriveProject` (`sessions.ts`)
+ * returns either a `project` Label verbatim, or — absent one — a git
+ * root's absolute path, which has no room on a dense card. A path under a
+ * known worktree layout (see `worktreeLayout` below) shortens to its repo
+ * name; anything else falls back to the path's own basename. A value with
+ * no path separator at all passes through unchanged.
  */
 export function projectLabel(project: string): string {
   if (!project.includes("/")) return project;
@@ -138,12 +99,7 @@ export function projectLabel(project: string): string {
   return segments[segments.length - 1] ?? project;
 }
 
-/**
- * The worktree a card's Session runs in, when its path follows a known
- * worktree layout — shown as a secondary detail so two Sessions on one
- * repo stay distinguishable. `undefined` for a plain git root, a Label, or
- * an unrecognized path: there the project name already says it all.
- */
+/** The worktree a card's session runs in, shown as a secondary detail so two sessions on one repo stay distinguishable. `undefined` for a plain git root, a Label, or an unrecognized path. */
 export function worktreeLabel(project: string): string | undefined {
   if (!project.includes("/")) return undefined;
   const segments = project.split("/").filter((segment) => segment.length > 0);
@@ -151,13 +107,11 @@ export function worktreeLabel(project: string): string | undefined {
 }
 
 /**
- * The two worktree layouts the human works in (the human's report,
- * 2026-10-27: this very Session showed as "oarfish", the name Orca gave its
- * worktree, instead of its repo):
- *   - Yunque: `.worktrees/<repo>/<task...>` — the repo right after
- *     `.worktrees` (or `worktrees`); the leaf directory is the worktree.
- *   - Orca: `orca/workspaces/<repo>/<worktree>` — the repo right after
- *     `workspaces`; the next segment is Orca's own name for the worktree.
+ * The two worktree layouts recognized:
+ *   - Yunque: `.worktrees/<repo>/<task...>` — repo right after
+ *     `.worktrees`/`worktrees`; the leaf directory is the worktree.
+ *   - Orca: `orca/workspaces/<repo>/<worktree>` — repo right after
+ *     `workspaces`; the next segment is Orca's name for the worktree.
  */
 function worktreeLayout(segments: readonly string[]): { repo: string; worktree: string | undefined } | undefined {
   const worktreesAt = segments.findIndex((segment) => segment === ".worktrees" || segment === "worktrees");
@@ -173,13 +127,10 @@ function worktreeLayout(segments: readonly string[]): { repo: string; worktree: 
 }
 
 /**
- * Ticket 10: a "held" Inbox row's own `action.decided` line NEVER changes
- * once written (ADR 0005's identity line is permanent) — whether it still
- * reads as live (the hook is still polling, holding the agent's call) or
- * has lapsed to pending (the window passed) is derived fresh against the
- * clock every time, exactly like `sessionColumn`'s own stall
- * classification. `waitSeconds` is the EFFECTIVE (already-capped) window —
- * `LivePolicy.waitSeconds` on the wire, never a raw, unconfigured default.
+ * Whether a "held" row still reads as live or has lapsed to pending is
+ * derived fresh against the clock every time, never stored. `waitSeconds`
+ * is the EFFECTIVE, already-capped window — never a raw, unconfigured
+ * default.
  */
 export type LiveItemPhase = "live" | "pending";
 
@@ -188,7 +139,7 @@ export function liveItemPhase(heldAt: string, now: Date, waitSeconds: number): L
   return elapsedMs <= waitSeconds * 1000 ? "live" : "pending";
 }
 
-/** The draining wait bar's own fill fraction (1 = just born live, 0 = about to lapse), clamped to `[0, 1]` — a `waitSeconds` of 0 (a degenerate test Policy) never divides by zero. */
+/** Fill fraction for the draining wait bar (1 = just went live, 0 = about to lapse), clamped to [0,1] — a `waitSeconds` of 0 never divides by zero. */
 export function liveWaitRemainingFraction(heldAt: string, now: Date, waitSeconds: number): number {
   const totalMs = waitSeconds * 1000;
   if (totalMs <= 0) return 0;
@@ -197,16 +148,12 @@ export function liveWaitRemainingFraction(heldAt: string, now: Date, waitSeconds
 }
 
 /**
- * The board's keyboard selection, as pure list math (`useBoardKeyboard`
- * wraps this in a hook): given the CURRENT flattened order of visible card
- * ids, move one step from `currentId`. Keyed by id, never by a stored
- * index — so a list that changed shape under the selection (a card
- * resolved, a new one arrived) never has to be reconciled against a stale
- * position: `ids.indexOf(currentId)` just re-resolves it fresh every call.
- * No selection yet, or a selection that fell off the list (`indexOf` ===
- * -1): lands on the first id moving down, the last moving up — never
- * `undefined` while the list is non-empty. An empty list has nothing to
- * select. Clamped, never wraps, at either end.
+ * Keyboard selection as pure list math. Keyed by id, never a stored index
+ * — `ids.indexOf(currentId)` re-resolves fresh every call, so a list that
+ * changed shape under the selection (a card resolved, a new one arrived)
+ * never needs reconciling against a stale position. No selection, or one
+ * that fell off the list, lands on the first id moving down, the last
+ * moving up. Clamped, never wraps.
  */
 export function moveSelection(
   ids: readonly string[],
@@ -221,38 +168,36 @@ export function moveSelection(
 }
 
 // ---------------------------------------------------------------------------
-// Activity panel (ticket 12, spec "Activity panel (l)") — resolutions and
-// session-column transitions "the SSE stream already carries," derived
-// client-side by diffing one tick's board state against the last one this
-// file itself remembered, never a new server field and never persisted
-// past this render (spec: "derived from the stream, never stored").
+// Activity panel: resolutions and column transitions, derived client-side
+// by diffing this tick's board state against what this file remembered
+// last tick — never a new server field, never persisted past render.
 // ---------------------------------------------------------------------------
 
 export interface ActivityFeedEntry {
-  /** A unique key for this ENTRY (react's own list key) — never a domain id by itself, since one resolution or one session can legitimately produce several entries over a run. */
+  /** React list key — never a domain id by itself, since one session or resolution can produce several entries over a run. */
   id: string;
-  /** When this was OBSERVED (a resolution's own `ts` when one exists; `now` for a transition, which carries no timestamp of its own). */
+  /** When this was observed — a resolution's own `ts` when one exists, else `now` for a transition. */
   ts: string;
   text: string;
 }
 
-/** The subset of a Session's resolution trace this diff actually reads — named independently of `contract/live.ts`'s own `ResolutionTraceEntry`, same convention `SessionTiming` above already follows, so this file stays import-free. */
+/** Subset of a session's resolution trace this diff reads — named independently of `contract/live.ts`'s `ResolutionTraceEntry` so this file stays import-free. */
 export interface ActivityResolution {
   id: string;
   kind: "ran" | "done" | "dismissed" | "failed" | "approved" | "rejected";
   ts: string;
 }
 
-/** The subset of a Session this diff reads — `SessionTiming`'s own fields (for the column classification, ticket 09's `turnWait`/`nativeWait` included — `useActivityFeed.ts` must carry them through or this diff can never tell a waiting Session from a stalled one) plus what a feed LINE needs to read (its label) and what its resolutions the diff watches for new ones. */
+/** Subset of a session this diff reads: `SessionTiming`'s fields (the caller must carry `turnWait`/`nativeWait` through, or this can never tell a waiting session from a stalled one), plus a label and its resolutions. */
 export interface ActivitySession extends SessionTiming {
   id: string;
   project: string;
   ticket?: string;
-  /** Newest first, same convention the contract's own `resolutions` field already carries — only `[0]` (the latest) is ever compared. */
+  /** Newest first — only `[0]` (the latest) is ever compared. */
   resolutions: readonly ActivityResolution[];
 }
 
-/** What this diff remembers about ONE Session between ticks — just enough to tell "did its column change" and "is there a resolution here it hasn't already reported." */
+/** What this diff remembers about one session between ticks: enough to tell whether its column changed or there's an unreported resolution. */
 export interface ActivitySnapshot {
   column: SessionColumn | undefined;
   latestResolutionId: string | undefined;
@@ -260,7 +205,7 @@ export interface ActivitySnapshot {
 
 export type ActivitySnapshots = ReadonlyMap<string, ActivitySnapshot>;
 
-/** The feed's own short verbs (spec, parenthetical list) — DELIBERATELY not `viewModel.ts`'s own `traceInfo` wording ("corrido por vos," "cerrado como listo"): that is a CARD's memory of its own latest request, read in context; this is a compact, cross-session timeline where a terser verb reads better one line at a time. */
+/** Deliberately different wording from `viewModel.ts`'s `traceInfo` ("corrido por vos," etc.): that's a card's memory of its own latest request, read in context; this is a compact cross-session timeline where a terser verb reads better. */
 const RESOLUTION_FEED_VERB: Record<ActivityResolution["kind"], string> = {
   ran: "corrido",
   done: "listo",
@@ -270,21 +215,16 @@ const RESOLUTION_FEED_VERB: Record<ActivityResolution["kind"], string> = {
   rejected: "rechazado",
 };
 
-/** A Session's own short label for a feed line — its `ticket` Label when it announced one, else its project name (never its bare id, which says nothing at a glance). */
+/** Short label for a feed line: the session's `ticket` Label when announced, else its project name — never its bare id, which says nothing at a glance. */
 function activitySessionLabel(session: ActivitySession): string {
   return session.ticket ?? session.project;
 }
 
 /**
- * The feed's own wording for a column change (no literal spec text given —
- * this run's own call, reported): "se trabó" entering TRABADA, "terminó"
- * entering TERMINÓ, "volvió a correr" entering CORRIENDO — never "arrancó"
- * for that last one, since a transition only ever fires for a Session this
- * diff has ALREADY seen in some other column before (a brand-new Session's
- * first sighting is seeded silently, below, never reported as a
- * transition) — reaching CORRIENDO again always means it came FROM
- * somewhere else (TRABADA, or a resume after TERMINÓ), never a first
- * start.
+ * Never "arrancó" for the CORRIENDO case: a transition only fires for a
+ * session this diff has already seen in another column before (a
+ * brand-new session's first sighting is seeded silently, never reported),
+ * so reaching CORRIENDO again always means it came FROM somewhere else.
  */
 function activityTransitionText(column: SessionColumn): string {
   if (column === "trabada") return "se trabó";
@@ -293,24 +233,17 @@ function activityTransitionText(column: SessionColumn): string {
 }
 
 /**
- * One tick of the activity feed's own diff (`useActivityFeed.ts` calls this
- * on every viewModel recompute — a fresh SSE payload AND the ticking clock
- * alike, since a column change like TRABADA is itself time-driven with no
- * new bytes over the wire, same "TIME IS STATE" every other classifier in
- * this file already follows). Compares `sessions` (this tick's own,
- * classified against `now`) to `previous` (what the LAST call to this
- * function left behind) and returns both what's NEW this tick and the
- * updated snapshot to diff against next time.
+ * Runs on every viewModel recompute — a fresh SSE payload and the ticking
+ * clock alike, since a column change like TRABADA is itself time-driven
+ * with no new bytes over the wire. Compares this tick's `sessions` to
+ * `previous` and returns what's new plus the updated snapshot.
  *
- * A Session seen for the FIRST time (no entry in `previous` at all) is
- * seeded into `next` silently — never a synthetic "transition," which
- * would flood the panel with every already-running Session the instant
- * the board first connects. A Session that VANISHES from `sessions`
- * entirely while its last known column was TERMINÓ reads as archived
- * (ticket 11's own archive route is the only thing that removes a TERMINÓ
- * card outright) — the one entry this diff can never read off a
- * `resolutions` array, since archiving a Session is not itself the
- * resolution of any request it raised.
+ * A session seen for the first time is seeded into `next` silently, never
+ * reported as a transition — that would flood the panel with every
+ * already-running session the instant the board connects. A session that
+ * vanishes while its last known column was TERMINÓ reads as archived: the
+ * one case this diff can't read off `resolutions`, since archiving isn't
+ * itself the resolution of any request it raised.
  */
 export function diffActivityFeed(
   sessions: readonly ActivitySession[],
@@ -357,5 +290,5 @@ export function diffActivityFeed(
   return { additions, next };
 }
 
-/** "the latest ~12 board events" (spec) — the activity panel's own cap, applied by `useActivityFeed.ts` after prepending each tick's `additions`. */
+/** Cap on the activity panel, applied by `useActivityFeed.ts` after prepending each tick's `additions`. */
 export const ACTIVITY_FEED_CAPACITY = 12;

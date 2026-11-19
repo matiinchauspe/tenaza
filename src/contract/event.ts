@@ -3,18 +3,18 @@ import { z } from "zod";
 /**
  * The Event contract: Tenaza's only on-disk state. Every Session's log is a
  * sequence of these, one JSON object per line. The core and every Adapter
- * agree on this shape and nothing else.
+ * agree on this shape and nothing else. An optional field with nothing to
+ * report is omitted entirely, never written as `undefined` or an empty
+ * placeholder.
  */
 
 /**
- * `"held"` (ticket 10, decision 06): a `human` match the hook is currently
- * WAITING on a live answer for — neither allowed nor (yet) denied. Written
- * exactly once, at the moment the item is born live, on the SAME
- * `action.decided` Event every other match already uses (ADR 0005's own
- * identity line never moves). The line never changes again afterward —
- * TIME IS STATE: whether a `"held"` row still reads as live or has lapsed
- * to pending is derived fresh against the clock (`board.ts`'s
- * `liveItemPhase`), never by writing a second Event over this one.
+ * `"held"`: a `human` match the hook is currently waiting on a live answer
+ * for — neither allowed nor denied yet. Written once, on the same
+ * `action.decided` Event every other match uses, and never rewritten:
+ * whether it still reads as live or has lapsed to pending is derived fresh
+ * against the clock (`board.ts`'s `liveItemPhase`), never by writing a
+ * second Event.
  */
 export const DecisionSchema = z.enum(["allow", "deny", "held"]);
 export type Decision = z.infer<typeof DecisionSchema>;
@@ -27,11 +27,9 @@ export type Capability = z.infer<typeof CapabilitySchema>;
 
 /**
  * An agent's attempted operation, normalized by the Adapter into a
- * runtime-neutral shape Rules match on. v1 normalizes shell commands; v0.2
- * (ticket 04, decision 07) adds `mcp` — an MCP tool call, carried as the
- * tool's own name plus its raw arguments, with NO per-provider shape.
- * `file.write` stays named in the spec for a later Adapter and is added
- * here when one needs it.
+ * runtime-neutral shape Rules match on — `mcp` carries the tool's own name
+ * plus raw arguments, with no per-provider shape. `file.write` is not yet
+ * implemented; add it here when an Adapter needs it.
  */
 export const ActionSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -55,20 +53,19 @@ export type McpAction = Extract<Action, { kind: "mcp" }>;
 /**
  * A matched Rule's own fields, stored on the `action.decided` Event — a
  * `shell` Rule ref (`match`, plus `reason` when the parse fell back to the
- * v0.1 raw-substring check) or an `mcp` Rule ref (`tool`, plus whichever of
- * `unless`/`when` it carried, ticket 04). Structurally the same shape
- * `policy.ts`'s own `Rule` union already is — kept separate here so this
- * contract module never imports from `policy.ts`.
+ * raw-substring check) or an `mcp` Rule ref (`tool`, plus whichever of
+ * `unless`/`when` it carried). Structurally the same shape `policy.ts`'s
+ * own `Rule` union already is — kept separate here so this contract module
+ * never imports from `policy.ts`.
  */
 const ShellRuleRefSchema = z.object({
   match: z.string(),
   effect: EffectSchema,
   /**
-   * Set exactly when THIS match came from the v0.1 raw-substring fallback
-   * because the command failed to parse (ticket 03, decision 02, ADR
-   * 0006) — absent on a clean tree-sitter match, never written as
-   * `undefined`. A per-decision fact about how the match was reached, not
-   * a property of the Rule itself (which never carries this).
+   * Set exactly when this match came from the raw-substring fallback
+   * because the command failed to parse — absent on a clean tree-sitter
+   * match, never written as `undefined`. A per-decision fact about how the
+   * match was reached, not a property of the Rule itself.
    */
   reason: z.enum(["parse_error"]).optional(),
 });
@@ -84,33 +81,29 @@ type DecidedRule =
   | { tool: string; unless?: Record<string, unknown[]>; when?: Record<string, unknown>; effect: Effect };
 
 /**
- * Ticket 11 (decision 09): a runtime-neutral TERMINAL LOCATOR, captured once
- * at SessionStart from the hook's own env and process table — never
- * re-queried later, and never carried by a subagent's own `session.started`
- * at all (`adapters/claude.ts`'s `handleSubagentStart` never calls the
- * capture function): "a subagent's card focuses its PARENT's terminal"
- * (spec) is a RESOLUTION-time rule the core applies by walking to the
- * parent's own node, not something every Session needs its own copy of.
- * Every field is optional and independently absent — a locator with none of
- * them set is never written at all (`sessionStartedEvent`'s own doc), and a
- * v0.1 Session (or one started over SSH, or any environment this capture
- * recognizes nothing in) simply has no `terminal` key, which the terminal
- * table (`terminals.ts`) reads as "unknown" — greyed, never a crash.
+ * A runtime-neutral terminal locator, captured once at SessionStart from
+ * the hook's own env and process table — never re-queried later, and never
+ * carried by a subagent's own `session.started` at all: a subagent's card
+ * focuses its parent's terminal, a resolution-time rule the core applies by
+ * walking to the parent's own node, not something every Session needs its
+ * own copy of. Every field is optional and independently absent — a locator
+ * with none of them set is never written at all, and a v0.1 Session (or
+ * one started over SSH, or any environment this capture recognizes nothing
+ * in) simply has no `terminal` key, which the terminal table
+ * (`terminals.ts`) reads as "unknown" — greyed, never a crash.
  *
- * `tty` and `outerApp` come from the hook's own PID walk (research
- * `docs/research/tenaza-focus-agent-terminal.md` §2), never from a
- * per-terminal env var — they are the GENERIC fallback this ticket's own
- * app-level row (Warp, Alacritty, VS Code, Cursor, an unrecognized
- * terminal) resolves against. The per-terminal keys below are the SPECIFIC
- * ones a known terminal's own row (`terminals.ts`) detects on: multiplexer
- * keys (`tmuxPane`/`zellijPane`) are checked FIRST at resolution time
- * ("multiplexer vars win" — the outer vars above are stale once a
- * multiplexer server is running, §1.2's own reproduced gotcha), independent
- * of the ORDER these fields are declared here.
+ * `tty` and `outerApp` come from the hook's own PID walk, never from a
+ * per-terminal env var — they are the generic fallback this app-level row
+ * (Warp, Alacritty, VS Code, Cursor, an unrecognized terminal) resolves
+ * against. The per-terminal keys below are the specific ones a known
+ * terminal's own row (`terminals.ts`) detects on: multiplexer keys
+ * (`tmuxPane`/`zellijPane`) are checked first at resolution time, because
+ * the outer vars above go stale once a multiplexer server is running,
+ * independent of the order these fields are declared here.
  */
 const TerminalLocatorSchema = z.object({
   termProgram: z.string().optional(),
-  /** `__CFBundleIdentifier` — undocumented, but the strongest single app hint this capture has (research §2). */
+  /** `__CFBundleIdentifier` — undocumented, but the strongest single app hint this capture has. */
   bundleId: z.string().optional(),
   /** The hook's own controlling tty (`ps -o tty= -p $PPID`) — the join key Terminal.app and iTerm2 match a tab/session by. */
   tty: z.string().optional(),
@@ -126,7 +119,7 @@ const TerminalLocatorSchema = z.object({
   weztermPane: z.string().optional(),
   weztermSocket: z.string().optional(),
   kittyWindowId: z.string().optional(),
-  /** Present only when kitty's remote control is configured (`allow_remote_control` + `listen_on`) — absent means Level 1 only for this row, by design (research §1.5). */
+  /** Present only when kitty's remote control is configured (`allow_remote_control` + `listen_on`) — absent means Level 1 only for this row, by design. */
   kittyListenOn: z.string().optional(),
   zellijSession: z.string().optional(),
   zellijPane: z.string().optional(),
@@ -138,30 +131,25 @@ const SessionStartedData = z.object({
   runtime: z.string(),
   cwd: z.string(),
   capabilities: z.array(CapabilitySchema),
-  /** Ticket 11 — omitted entirely (never an empty `{}`) when the capture yielded nothing, same convention every other optional Event field in this file already follows. */
+  /** Omitted when the capture yielded nothing. */
   terminal: TerminalLocatorSchema.optional(),
   /**
-   * Ticket 02 ("a dead Session stops reading as live"): the runtime's own OS
-   * process id, captured ONCE here and never re-queried — the fact a LATER
-   * read (`sessions.ts`'s `closeDeadProcesses`) checks against the live
-   * process table to tell a Session whose process is simply gone apart from
-   * one that's merely idle. Omitted entirely — never written as `undefined`
-   * — when the hook's own process table couldn't be read at all (a
-   * sandboxed test env, `backfillSessionStartedIfMissing`'s own catch-up
-   * path, which never captures one): a Session with no `pid` simply never
-   * becomes a candidate for that later check, same silent-degrade
-   * convention `terminal` above already follows.
+   * The runtime's own OS process id, captured once and never re-queried —
+   * `sessions.ts`'s `closeDeadProcesses` checks it against the live
+   * process table later to tell a dead Session apart from an idle one.
+   * Omitted when the process table couldn't be read at all (a sandboxed
+   * test env, or `backfillSessionStartedIfMissing`'s catch-up path) — such
+   * a Session is simply never a candidate for that check.
    */
   pid: z.number().optional(),
   /**
-   * Ticket 02: `pid`'s own process-start marker (`ps -o lstart=`) at the
-   * exact moment `pid` was captured — an OPAQUE token, never parsed as a
-   * date. Its only job is to be compared byte-for-byte against a FRESH read
-   * of the same pid later: two reads of the SAME process always agree, a
-   * pid reused by an unrelated process after a reboot never does — the
-   * ticket's own named trap. Omitted when `pid` itself is, or when `ps`
-   * couldn't report it even though `pid` was known (degrades to trusting
-   * the bare pid alone, see `closeDeadProcesses`'s own doc).
+   * `pid`'s own process-start marker (`ps -o lstart=`), captured at the
+   * same moment — an opaque token, never parsed as a date, compared
+   * byte-for-byte against a fresh read later: two reads of the same
+   * process always agree, a pid reused by an unrelated process after a
+   * reboot never does. Omitted when `pid` itself is, or when `ps` couldn't
+   * report it even though `pid` was known — degrades to trusting the bare
+   * pid alone (see `closeDeadProcesses`).
    */
   pidStartedAt: z.string().optional(),
 });
@@ -189,45 +177,40 @@ const ApprovalResolvedData = z.object({
   ref: z.string(),
   outcome: z.enum(["done", "dismissed"]),
   /**
-   * Ticket 10: which PATH produced this resolution, when the resolution
-   * trace needs to tell it apart from the plain, by-hand case — `"run"`
-   * (closed by a successful `tenaza run`, CLI or the view's own streaming
-   * run alike) or `"live"` (a live-answering approve/reject). Absent for a
-   * plain `done`/`dismiss` (by hand, CLI or the view) — the trace reads
-   * THAT as "cerrado como listo" / "descartado", its own default. Never a
-   * third discriminator beyond what the trace actually needs.
+   * Which path produced this resolution, when the trace needs to tell it
+   * apart from the plain, by-hand case — `"run"` (closed by a successful
+   * `tenaza run`, CLI or streaming alike) or `"live"` (a live-answering
+   * approve/reject). Absent for a plain `done`/`dismiss`, which the trace
+   * reads as its own default. Never a third discriminator beyond what the
+   * trace needs.
    */
   via: z.enum(["run", "live"]).optional(),
 });
 
 /**
- * Ticket 10: the human's answer to a LIVE Inbox item, appended to the human
- * log (`state/human.jsonl`) by the Daemon's write route the instant the
- * browser posts it — the ONE thing the waiting hook (`live.ts`) polls that
- * file for. `ref` is the item's FULL identity hash (ADR 0005) — the same
- * one the `action.decided` "held" line already fixed. Distinct from
- * `approval.resolved`: THAT Event is the hook's own record that it actually
- * acted on this answer (closing the item); THIS one is only the raw answer
- * itself, and a hook that crashes or a browser double-post never turns it
- * into a second resolution on its own.
+ * The human's answer to a live Inbox item, appended to the human log by
+ * the Daemon's write route the instant the browser posts it — the one
+ * thing the waiting hook (`live.ts`) polls that file for. `ref` is the
+ * item's full identity hash, the same one the `action.decided` `"held"`
+ * line already fixed. Distinct from `approval.resolved`: that Event is the
+ * hook's own record that it acted on this answer (closing the item); this
+ * one is only the raw answer, and a crash or a browser double-post never
+ * turns it into a second resolution on its own.
  */
 const LiveAnsweredData = z.object({
   ref: z.string(),
   answer: z.enum(["approve", "reject"]),
-  /** Optional on approve (spec: "with an optional message"); reject without one gets a generic deny reason — the hook's own call, never stored as an empty string here. */
+  /** Optional on approve; a reject without one gets a generic deny reason — the hook's own call. */
   message: z.string().optional(),
 });
 
 /**
- * Ticket 10: `tenaza run`/the view's own run exited non-zero. Spec: "falló
- * (código N) (the item stays open)" — this is NEVER a Resolution (the item
- * stays open for a retry), so it is deliberately NOT folded into
- * `approval.resolved`'s `outcome` — `dedupOutstanding` (`inbox.ts`) only
- * ever reads `approval.resolved`, so a `run.failed` Event can never close an
- * item on its own. Lives in the human log alongside `approval.resolved`
- * (same writer, same reason to exist: a human-initiated attempt, not
- * something the Session itself did) purely for the resolution trace to
- * read back.
+ * `tenaza run`/the view's own run exited non-zero. Never a Resolution —
+ * the item stays open for a retry — so deliberately not folded into
+ * `approval.resolved`'s `outcome`: `dedupOutstanding` (`inbox.ts`) only
+ * reads `approval.resolved`, so this Event alone can never close an item.
+ * Lives in the human log alongside `approval.resolved` for the resolution
+ * trace to read back.
  */
 const RunFailedData = z.object({
   ref: z.string(),
@@ -235,75 +218,58 @@ const RunFailedData = z.object({
 });
 
 /**
- * Ticket 11's "archive a TERMINÓ card" — a human Event in the log (ADR
- * 0002: no state beside the logs), carried in the human log alongside
- * `approval.resolved`/`live.answered`/`run.failed` (same multi-writer
- * convention those already use: the Daemon writes this one on the human's
- * `x`/archivar click, never the Session's own single-writer log). No
- * payload beyond the envelope's own `session` — unlike a Resolution, there
- * is nothing else to record: archiving names no command, carries no
- * outcome, and is never reversed in v0.2 (no "unarchive").
+ * A human Event in the log — no state is kept beside the logs. Carried
+ * alongside `approval.resolved`/`live.answered`/`run.failed` (same
+ * multi-writer convention: the Daemon writes this on the human's archive
+ * click, never the Session's own single-writer log). No payload beyond the
+ * envelope's own `session` — archiving names no command, carries no
+ * outcome, and is never reversed (no "unarchive").
  */
 const SessionArchivedData = z.object({});
 
 /**
- * Ticket 14: the human just submitted a new turn (Claude Code's own
- * `UserPromptSubmit` hook) — a pure ACTIVITY signal, carrying no decision
- * capability at all in Claude Code's own contract. Once per TURN, not per
- * tool call, so this is nowhere near the per-call growth ADR 0002's
- * "single-writer log stays small" guards against — the same cadence
- * `session.started`/`session.ended`/`SubagentStop` already log at. Its
- * only job is to move `lastEventTs` forward (`sessions.ts`'s
- * `buildSessionIndex` already does that for every Event type, generically)
- * so a long CORRIENDO stretch's last turn-ending Stop never reads stale the
- * moment a fresh prompt starts the next one — and, per `nativeWaitFor`, to
- * resolve a stale `notification.observed` (below) the instant real human
- * activity resumes. No payload beyond the envelope itself.
+ * The human just submitted a new turn (Claude Code's own
+ * `UserPromptSubmit` hook) — a pure activity signal with no decision
+ * capability. Logged once per turn, not per tool call, the same cadence
+ * `session.started`/`session.ended`/`SubagentStop` already use. Its only
+ * job is to move `lastEventTs` forward so a long CORRIENDO stretch's last
+ * turn-ending Stop never reads stale once a fresh prompt starts the next
+ * turn, and to resolve a stale `notification.observed` (below) the instant
+ * real human activity resumes. No payload beyond the envelope itself.
  */
 const PromptSubmittedData = z.object({});
 
 /**
- * Ticket 05 ("Turn state: working vs waiting"): the main agent's OWN
- * `Stop` hook — one request-response Turn just ended. A pure ACTIVITY
- * signal, carrying no decision capability at all (same guarantee as
- * `PromptSubmittedData` above): nothing here can ever answer back with a
- * permission decision regardless of what this event contains (ADR 0007's
- * "Stop's hook answer is unchanged" — this Event is appended AFTER the
- * hook's own response is already decided, never part of it). Distinct from
- * `usage.sampled`, which `Stop` ALSO appends when a transcript yields one
- * (q9): a usage sample and a Turn ending are two independent facts that
- * happen to share one hook, and conflating them (reading "the last
- * `usage.sampled`" as "the Turn just ended") would misread every OTHER
- * caller of `usageSampledEvent` — `SessionEnd`, `SubagentStop`, and the
- * 25th-call `PostToolUse` sample — as a Turn boundary too. Recorded once
- * per Turn, the same cadence `prompt.submitted` already logs at (ADR 0002:
- * nowhere near the per-call growth the single-writer log guards against).
+ * The main agent's own `Stop` hook — one request-response Turn just ended.
+ * A pure activity signal, same guarantee as `PromptSubmittedData` above.
+ * Distinct from `usage.sampled`, which `Stop` also appends when a
+ * transcript yields one: a usage sample and a Turn ending are two
+ * independent facts that happen to share one hook — conflating them would
+ * misread every other `usageSampledEvent` caller (`SessionEnd`,
+ * `SubagentStop`, the 25th-call `PostToolUse` sample) as a Turn boundary
+ * too. Recorded once per Turn, the same cadence `prompt.submitted` uses.
  */
 const TurnEndedData = z.object({});
 
 /**
- * Ticket 14: the two `Notification` matcher values the ticket scopes
- * this to (`docs/research/claude-code-waiting-on-human-hooks.md`) — never
- * the full matcher table Claude Code carries (`auth_success`,
+ * The two `Notification` matcher values this project reads — never the
+ * full matcher table Claude Code carries (`auth_success`,
  * `agent_completed`, …), which this project has no use for and
- * `adapters/claude.ts`'s own `handleNotification` silently ignores.
+ * `adapters/claude.ts`'s `handleNotification` silently ignores.
  */
 export const NotificationKindSchema = z.enum(["permission_prompt", "idle_prompt"]);
 export type NotificationKind = z.infer<typeof NotificationKindSchema>;
 
 /**
- * Ticket 14: Claude Code's OWN signal that it is showing a permission
- * prompt, or that a turn has sat idle ~60s with nobody answering — NEVER
- * Tenaza's own `human` Rule hold (contrast `action.decided`'s `"held"`,
- * which Tenaza raised and can itself resolve with an answer). This is
- * OBSERVED ONLY: nothing here ever carries a permission decision, and
- * nothing in this project ever answers it on the agent's behalf (`decide.
- * ts` never reads this Event type at all). Resolution is INFERRED, never a
- * second Event — `sessions.ts`'s `nativeWaitFor` reads this as "still the
- * most recent thing this Session did" until some LATER Event (a fresh
- * prompt, a touch, another notification) supersedes it, exactly mirroring
- * how Claude Code's own docs describe both signals resolving (no dedicated
- * "answered" hook exists for either).
+ * Claude Code's own signal that it is showing a permission prompt, or that
+ * a turn has sat idle ~60s unanswered — never Tenaza's own `human` Rule
+ * hold (contrast `action.decided`'s `"held"`, which Tenaza raised and can
+ * resolve itself). Observed only: nothing here carries a permission
+ * decision, and nothing in this project answers it on the agent's behalf.
+ * Resolution is inferred, never a second Event — `sessions.ts`'s
+ * `nativeWaitFor` reads this as the most recent thing this Session did
+ * until a later Event (a fresh prompt, a touch, another notification)
+ * supersedes it.
  */
 const NotificationObservedData = z.object({
   kind: NotificationKindSchema,
@@ -349,12 +315,7 @@ export type PromptSubmittedEvent = Extract<Event, { type: "prompt.submitted" }>;
 export type NotificationObservedEvent = Extract<Event, { type: "notification.observed" }>;
 export type TurnEndedEvent = Extract<Event, { type: "turn.ended" }>;
 
-/**
- * Build an `action.decided` Event envelope with the current timestamp.
- * `reason` (ticket 03) is folded into the stored `rule` ref only when it's
- * actually set — never written as an explicit `undefined` key, so every
- * pre-ticket-03 caller and assertion is unaffected.
- */
+/** `reason` is folded into the stored `rule` ref only when set — never written as an explicit `undefined` key. */
 export function actionDecidedEvent(
   session: string,
   action: Action,
@@ -372,12 +333,11 @@ export function actionDecidedEvent(
 }
 
 /**
- * Build a `session.started` Event envelope with the current timestamp. No
- * `parent` is a top-level Session; a `parent` names the Session that spawned
- * this one (ticket 03: a Claude Code subagent, keyed by the hook's own
- * `agent_id`, parented to the hook's `session_id`). `capabilities` is the
+ * No `parent` is a top-level Session; a `parent` names the Session that
+ * spawned this one — a Claude Code subagent, keyed by the hook's own
+ * `agent_id`, parented to the hook's `session_id`. `capabilities` is the
  * Adapter's own declaration — the core degrades by Capability, never by
- * runtime name (ADR 0001).
+ * runtime name.
  */
 export function sessionStartedEvent(
   session: string,
@@ -401,13 +361,12 @@ export function sessionStartedEvent(
 }
 
 /**
- * Build a `session.labeled` Event envelope with the current timestamp
- * (ticket 05, ADR 0003): `labels` is whatever the announce carried, stored
- * opaquely — Tenaza interprets only the reserved `project` key, and that
- * happens on read (`deriveProject`), never here. Multiple `session.labeled`
- * Events for the same Session accumulate (`buildSessionIndex` merges them in
- * file order), so a later announce adds or overrides keys without this
- * builder needing to know the Session's prior labels.
+ * `labels` is whatever the announce carried, stored opaquely — Tenaza
+ * interprets only the reserved `project` key, and that happens on read
+ * (`deriveProject`), never here. Multiple `session.labeled` Events for the
+ * same Session accumulate (`buildSessionIndex` merges them in file order),
+ * so a later announce adds or overrides keys without this builder needing
+ * the Session's prior labels.
  */
 export function sessionLabeledEvent(
   session: string,
@@ -422,11 +381,7 @@ export function sessionLabeledEvent(
   }) as SessionLabeledEvent;
 }
 
-/**
- * Build a `session.ended` Event envelope with the current timestamp. `reason`
- * is the runtime's own word for why (e.g. Claude Code's SessionEnd reason, or
- * the constant Tenaza uses for a SubagentStop).
- */
+/** `reason` is the runtime's own word for why — e.g. Claude Code's SessionEnd reason, or the constant Tenaza uses for a SubagentStop. */
 export function sessionEndedEvent(session: string, reason: string): SessionEndedEvent {
   return EventSchema.parse({
     v: 1,
@@ -438,12 +393,11 @@ export function sessionEndedEvent(session: string, reason: string): SessionEnded
 }
 
 /**
- * Build a `usage.sampled` Event envelope with the current timestamp (q9): a
- * Session's context size, and cost when the Adapter knows it. `cost_usd` is
- * omitted — never written as `undefined` or `0` — when there is nothing to
- * report, since a Session's context_tokens is always known at the point an
- * Adapter samples it, but its cost in USD depends on pricing data v1's
- * Claude Adapter does not compute.
+ * A Session's context size, and cost when the Adapter knows it. `cost_usd`
+ * is omitted — never written as `undefined` or `0` — when there is
+ * nothing to report: `context_tokens` is always known at the point an
+ * Adapter samples it, but cost in USD depends on pricing data v1's Claude
+ * Adapter does not compute.
  */
 export function usageSampledEvent(
   session: string,
@@ -459,13 +413,11 @@ export function usageSampledEvent(
 }
 
 /**
- * Build an `approval.resolved` Event envelope with the current timestamp.
- * `session` is the Session whose denied Action this Resolution closes (not
- * who is resolving it — the human, through the CLI); `ref` is the Inbox
- * item's stable id, as a string. `via` (ticket 10) is omitted entirely —
- * never written as an explicit `undefined` key — for the plain, by-hand
- * `done`/`dismiss` case; see `ApprovalResolvedData`'s own doc for what each
- * value means to the resolution trace.
+ * `session` is the Session whose denied Action this Resolution closes —
+ * not who is resolving it (the human, through the CLI). `ref` is the Inbox
+ * item's stable id as a string. `via` is omitted entirely, never as an
+ * explicit `undefined` key, for the plain `done`/`dismiss` case — see
+ * `ApprovalResolvedData` for what each value means.
  */
 export function approvalResolvedEvent(
   session: string,
@@ -483,12 +435,10 @@ export function approvalResolvedEvent(
 }
 
 /**
- * Build a `live.answered` Event envelope with the current timestamp (ticket
- * 10) — appended to the human log by the Daemon's `/items/<id>/answer`
- * write route the instant the browser posts an answer. `session` is the
- * item's OWN Session (resolved server-side from the Inbox row, never trusted
- * from the browser) — same convention as `approvalResolvedEvent`. `message`
- * is omitted entirely when absent, never written as an empty string.
+ * `session` is the item's own Session, resolved server-side from the
+ * Inbox row — never trusted from the browser, same convention as
+ * `approvalResolvedEvent`. `message` is omitted entirely when absent,
+ * never written as an empty string.
  */
 export function liveAnsweredEvent(
   session: string,
@@ -506,11 +456,9 @@ export function liveAnsweredEvent(
 }
 
 /**
- * Build a `run.failed` Event envelope with the current timestamp (ticket
- * 10) — appended by `resolve.ts`'s `runInboxItem`/`startInboxItemRunStream`
- * on a non-zero exit, so the resolution trace has something to read back
- * for "falló (código N)" even though the item itself stays open (never a
- * Resolution — see `RunFailedData`'s own doc).
+ * Appended by `resolve.ts`'s `runInboxItem`/`startInboxItemRunStream` on a
+ * non-zero exit, so the resolution trace has something to read back even
+ * though the item itself stays open — see `RunFailedData`.
  */
 export function runFailedEvent(session: string, ref: string, exitCode: number): RunFailedEvent {
   return EventSchema.parse({
@@ -523,12 +471,9 @@ export function runFailedEvent(session: string, ref: string, exitCode: number): 
 }
 
 /**
- * Build a `session.archived` Event envelope with the current timestamp
- * (ticket 11) — appended to the human log by the Daemon's
- * `/sessions/<id>/archive` write route the instant the human's `x`/archivar
- * click reaches it (`resolve.ts`'s `archiveSession`). `session` is the
- * archived Session's own id — same envelope convention every other
- * human-log Event already carries it under.
+ * Appended to the human log by the Daemon's archive write route the
+ * instant the human's archive click reaches it (`resolve.ts`'s
+ * `archiveSession`). `session` is the archived Session's own id.
  */
 export function sessionArchivedEvent(session: string): SessionArchivedEvent {
   return EventSchema.parse({
@@ -540,11 +485,7 @@ export function sessionArchivedEvent(session: string): SessionArchivedEvent {
   }) as SessionArchivedEvent;
 }
 
-/**
- * Build a `prompt.submitted` Event envelope with the current timestamp
- * (ticket 14) — appended by `adapters/claude.ts`'s `handleUserPromptSubmit`
- * on every `UserPromptSubmit` call, once per turn.
- */
+/** Appended by `adapters/claude.ts`'s `handleUserPromptSubmit` on every `UserPromptSubmit` call, once per turn. */
 export function promptSubmittedEvent(session: string): PromptSubmittedEvent {
   return EventSchema.parse({
     v: 1,
@@ -556,11 +497,9 @@ export function promptSubmittedEvent(session: string): PromptSubmittedEvent {
 }
 
 /**
- * Build a `notification.observed` Event envelope with the current
- * timestamp (ticket 14) — appended by `adapters/claude.ts`'s
- * `handleNotification` only for the two matcher values this project
- * reads (`NotificationKindSchema`); every other `notification_type` never
- * reaches this builder at all.
+ * Appended by `adapters/claude.ts`'s `handleNotification` only for the two
+ * matcher values this project reads (`NotificationKindSchema`); every
+ * other `notification_type` never reaches this builder.
  */
 export function notificationObservedEvent(session: string, kind: NotificationKind): NotificationObservedEvent {
   return EventSchema.parse({
@@ -572,11 +511,7 @@ export function notificationObservedEvent(session: string, kind: NotificationKin
   }) as NotificationObservedEvent;
 }
 
-/**
- * Build a `turn.ended` Event envelope with the current timestamp (ticket
- * 05) — appended by `adapters/claude.ts`'s `handleStop` on every `Stop`
- * call, regardless of whether that same call also samples usage.
- */
+/** Appended by `adapters/claude.ts`'s `handleStop` on every `Stop` call, regardless of whether that same call also samples usage. */
 export function turnEndedEvent(session: string): TurnEndedEvent {
   return EventSchema.parse({
     v: 1,

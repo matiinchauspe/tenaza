@@ -9,13 +9,7 @@ import { sessionTouchedPath, sessionsDir, tenazaHome } from "./paths";
 import { loadPolicy } from "./policy";
 import { sessionState, type SessionState } from "./sessionstate";
 
-/**
- * The four states the ticket names for a Session's row (and what a parent
- * rolls up to, per its most urgent descendant): waits for the human > alive
- * > done > ended. "Stalled" (a Session with no recent Event) is NOT a fifth
- * category here — it is a WORD override on "alive" applied at render time
- * (`categoryWord`), since the ticket's own glyph set has only four symbols.
- */
+/** waits > alive > done > ended, by urgency. "Stalled" is not a category here — it's a word override on "alive" (see `categoryWord`). */
 export type SessionCategory = "waits" | "alive" | "done" | "ended";
 
 function categoryRank(category: SessionCategory): number {
@@ -31,7 +25,7 @@ function categoryRank(category: SessionCategory): number {
   }
 }
 
-/** One observed Session, derived from every Event that names it — never stored, only read (ADR 0002). */
+/** One observed Session, derived fresh from events — never persisted (ADR 0002). */
 export interface SessionNode {
   id: string;
   parent?: string;
@@ -42,25 +36,23 @@ export interface SessionNode {
   startedAt?: string;
   endedAt?: string;
   endedReason?: string;
-  /** The latest `ts` across every Event naming this Session — the basis for `age` and the Session-state classifier's Stalled math (`sessionstate.ts`'s `sessionState`). */
   lastEventTs?: string;
-  /** The context size from the LATEST `usage.sampled` Event this Session has (q9). `undefined` means never sampled, never zero. */
+  /** undefined means never sampled — never zero. */
   contextTokens?: number;
-  /** The Action from the LATEST `action.decided` Event (ticket 08's "last signal" — what this Session most recently attempted, allowed or not). Last write wins, same convention as `contextTokens`; `undefined` means it has never attempted a matched or recorded Action. */
+  /** undefined means no Action has been matched yet. */
   lastAction?: Action;
-  /** Ticket 14: the LATEST `notification.observed` Event this Session carries — last write wins, same convention as `lastAction`. Whether it still reads as a CURRENT native wait (vs. superseded by later activity) is `nativeWaitFor`'s own call, never decided here. */
+  /** Whether this still counts as a CURRENT wait is `nativeWaitFor`'s call, not this field's. */
   lastNotification?: { kind: NotificationKind; ts: string };
-  /** Ticket 05 ("Turn state"): the ts of the LATEST `turn.ended` Event (this Session's own `Stop`) — last write wins, same convention as `lastNotification`. Whether it still reads as a CURRENT wait (vs. superseded by a fresh prompt or ordinary activity) is `turnWaitSince`'s own call, never decided here. */
+  /** Whether this still counts as a CURRENT wait is `turnWaitSince`'s call, not this field's. */
   lastTurnEnded?: string;
-  /** Ticket 11 (decision 09): the terminal locator its OWN `session.started` carried, when its Adapter captured one — never set on a subagent (`adapters/claude.ts`'s `handleSubagentStart` never calls the capture), which is exactly why "a subagent's card focuses its PARENT's terminal" is a RESOLUTION-time rule (`daemon.ts`'s focus route walks to `node.parent`) rather than something copied onto every node here. */
+  /** Never set on a subagent — its Adapter never captures one — which is why focusing a subagent's terminal resolves to its parent elsewhere, rather than being copied onto every node here. */
   terminalLocator?: TerminalLocator;
-  /** Ticket 02: the runtime's own OS process id, captured at `session.started` (`adapters/claude.ts`'s `captureProcessMarker`) — `undefined` for a backfilled start, legacy data, or an environment `ps` couldn't be read in. UNLIKE `terminalLocator`, a subagent carries its OWN copy (same OS process as its parent), never resolved by walking to `node.parent`. */
+  /** undefined for a backfilled start, legacy data, or an environment where `ps` couldn't be read. Unlike `terminalLocator`, a subagent carries its OWN pid — never resolved via `node.parent`. */
   pid?: number;
-  /** Ticket 02: `pid`'s own process-start marker (`ps -o lstart=`) at the moment it was captured — paired with `pid` so `closeDeadProcesses` can tell a reused pid after a reboot apart from the same process still running. `undefined` means the reuse guard can't be applied; `pid` alone is still trusted then. */
+  /** Paired with `pid` so `closeDeadProcesses` can tell a reused pid (after a reboot) apart from the same process still running. undefined means the reuse guard can't apply — `pid` alone is still trusted. */
   pidStartedAt?: string;
 }
 
-/** Thrown by every Session-scoped operation (the focus and archive write routes, `daemon.ts`/`resolve.ts`, ticket 11) when an id names no observed Session at all. */
 export class UnknownSessionError extends Error {
   constructor(public readonly id: string) {
     super(`unknown session ${id}`);
@@ -72,11 +64,10 @@ function emptyNode(id: string): SessionNode {
 }
 
 /**
- * One SessionNode per distinct `session` any Event names — "every observed
- * Session" means every id ANY Event names, not only ones carrying a
- * lifecycle Event. A Session known only through an `action.decided` (ticket
- * 01/02's fixtures, written before this ticket existed) still gets a node,
- * with everything but `id` and `lastEventTs` left undefined.
+ * One SessionNode per distinct `session` any Event names, not only one
+ * with a lifecycle Event — a session known only through e.g.
+ * `action.decided` still gets a node, with everything but `id` and
+ * `lastEventTs` left undefined.
  */
 export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
   const index = new Map<string, SessionNode>();
@@ -87,6 +78,7 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
 
     if (!node.lastEventTs || event.ts > node.lastEventTs) node.lastEventTs = event.ts;
 
+    // Events are read in file order, so each branch below is last-write-wins (ADR 0002).
     if (event.type === "session.started") {
       node.parent = event.data.parent;
       node.runtime = event.data.runtime;
@@ -96,10 +88,10 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
       node.terminalLocator = event.data.terminal;
       node.pid = event.data.pid;
       node.pidStartedAt = event.data.pidStartedAt;
-      // A start AFTER an end is the same Session running again (ticket 13):
-      // SendMessage re-fires SubagentStart under the same agent_id. Only a
-      // start revives it — the usage.sampled every SessionEnd/SubagentStop
-      // appends right after its own end must never read as activity.
+      // A start after an end means the session is running again
+      // (SendMessage re-fires SubagentStart under the same agent_id) — only
+      // a start revives it, so the trailing usage.sampled after an end
+      // never counts as activity.
       delete node.endedAt;
       delete node.endedReason;
     } else if (event.type === "session.ended") {
@@ -108,19 +100,14 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
     } else if (event.type === "session.labeled") {
       Object.assign(node.labels, event.data.labels);
     } else if (event.type === "usage.sampled") {
-      // Last write wins, same as endedAt/endedReason above — the file's own
-      // chronological order is the only ordering Tenaza trusts (ADR 0002).
       node.contextTokens = event.data.context_tokens;
     } else if (event.type === "action.decided") {
-      // Every matched Action, not only a `human`-effect one — "last signal"
-      // (ticket 08) is "what did this Session most recently attempt",
+      // Captures every matched Action, not only a human-effect one —
       // independent of whether it was held, denied, flagged or allowed.
       node.lastAction = event.data.action;
     } else if (event.type === "notification.observed") {
-      // Last write wins, same convention as lastAction/contextTokens above.
       node.lastNotification = { kind: event.data.kind, ts: event.ts };
     } else if (event.type === "turn.ended") {
-      // Ticket 05: last write wins, same convention as lastNotification above.
       node.lastTurnEnded = event.ts;
     }
   }
@@ -129,36 +116,27 @@ export function buildSessionIndex(events: Event[]): Map<string, SessionNode> {
 }
 
 /**
- * The `cwd` a Session's OWN `session.started` carried (ticket 06, "`run`
- * from the Session's directory") — `undefined` when this Session has no
- * `session.started` at all (its start hook never fired, or the Session id
- * is unknown outright). Deliberately NOT a fallback to the caller's own
- * current directory: a caller that treats `undefined` as "run here
- * instead" would silently run a denied command somewhere the human never
- * asked for it to run (the ticket's own warning) — `resolve.ts`'s
- * `runInboxItem` refuses outright instead.
+ * The cwd this session's own `session.started` carried — undefined when
+ * there was no `session.started` at all. Deliberately not a fallback to
+ * the caller's own cwd: treating undefined as "run here instead" would run
+ * a denied command somewhere the human never asked for it to run
+ * (`resolve.ts`'s `runInboxItem` refuses outright instead).
  */
 export function cwdForSession(session: string, home: string = tenazaHome()): string | undefined {
   return buildSessionIndex(readSessionEvents(session, home)).get(session)?.cwd;
 }
 
 /**
- * This Session's OWN category — before any rollup from descendants. ENDED
- * beats an open Inbox item (ticket 05, #1436's own fix — flipped from the
- * priority ticket 03 originally gave this check): a Session that already
- * finished is never shown "te espera" just because a `human`-Rule match it
- * triggered before ending is still unresolved. That match stays visible in
- * the Inbox on its own (`deriveInbox`), independent of this Session's row —
- * an open Inbox item only promotes a STILL-RUNNING Session to "waits".
- * (`rollupCategory`'s own waits > alive > done > ended priority, below, is
- * unaffected: it ranks a PARENT against its descendants, never this check.)
+ * This session's own category, before any rollup from descendants. Ended
+ * always beats an open Inbox wait — a finished session is never shown "te
+ * espera" for a Rule match it triggered before ending; that match stays
+ * visible in the Inbox on its own, independent of this row.
  */
 export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): SessionCategory {
   if (node.endedAt !== undefined) {
-    // An ended Session WITH a parent is a subagent finishing its work ("done");
-    // an ended Session with no parent is the top-level Session closing ("ended").
     // Derived structurally from `parent`, never from parsing the free-text
-    // `reason` — a build-time judgment call (ticket 03), not spec-mandated.
+    // `reason` — a subagent (has a parent) is "done"; a top-level session
+    // (no parent) is "ended".
     return node.parent !== undefined ? "done" : "ended";
   }
   if (waiting.has(node.id)) return "waits";
@@ -166,11 +144,9 @@ export function nodeCategory(node: SessionNode, waiting: ReadonlySet<string>): S
 }
 
 /**
- * A parent's displayed category is the most urgent among itself and every
- * descendant (waits > alive > done > ended) — the ticket's own rollup rule.
- * A tie keeps the SELF value (self wins ties): a build-time judgment call,
- * since the ticket's priority order only ranks the four categories against
- * each other, never says who wins a tie within one category.
+ * Rolls up to whichever of itself and its descendants is most urgent
+ * (`categoryRank`). Ties keep the parent's own value — deliberate, not an
+ * oversight.
  */
 export function rollupCategory(
   node: SessionNode,
@@ -193,32 +169,22 @@ const WORD: Record<SessionCategory, string> = {
   ended: "cerró",
 };
 const STALLED_WORD = "sin señal";
-/** Ticket 05: the tree's own word for an alive Session between Turns — never a fifth category or a new glyph (same "word override on alive" convention this file's own `STALLED_WORD` already established), just rendered through `categoryWord` below instead of "vivo". */
 const WAITING_WORD = "esperándote";
 
 export function glyphFor(category: SessionCategory): string {
   return GLYPH[category];
 }
 
-/** Ticket 05 (AC3): "esperándote · N en segundo plano" — the ONE place this suffix is built for the CLI tree (the board's own literal lives separately in `viewModel.ts`, same convention `NO_MEASURE_TEXT` already follows there, never importing this node-builtin-using module). Empty when nothing is running in the background at all — never a stray " · 0 en segundo plano". */
+/** The board keeps its own copy of this suffix (`viewModel.ts`) rather than importing this module, which pulls in Node builtins the UI can't use. */
 function backgroundSuffix(activeDescendants: number): string {
   return activeDescendants > 0 ? ` · ${activeDescendants} en segundo plano` : "";
 }
 
 /**
- * Stalled and Turn state only ever override the "alive" word — a
- * waiting(-for-Inbox)/done/ended Session already reads unambiguously.
- *
- * Deepening ticket 03: `state` is already resolved by `sessionstate.ts`'s
- * `sessionState` (`renderNode` below), which is where the precedence
- * between a current Turn wait and Stalled now lives — this function picks
- * only the WORD for whichever of the two `state` already settled on, never
- * the precedence itself. For the "alive" category, `state` is never
- * `"ended"` (an ended node rolls up to `done`/`ended` before this is ever
- * reached, in `nodeCategory`), so only `"waiting"` and `"stalled"` are
- * ever live choices here, with `"working"` as the fallthrough.
- * `activeDescendants` defaults to 0 so a caller with no background count to
- * report (`notify.ts`) never has to pass one.
+ * Only overrides the "alive" word — waiting/done/ended already read
+ * unambiguously. The precedence between a current Turn wait and Stalled is
+ * decided by `sessionState` (`renderNode` below); this only picks the word
+ * for whichever `state` it settled on.
  */
 export function categoryWord(
   category: SessionCategory,
@@ -230,33 +196,15 @@ export function categoryWord(
   return state === "stalled" ? STALLED_WORD : WORD.alive;
 }
 
-/**
- * Ticket 02 ("a dead Session stops reading as live"): Tenaza's OWN word for
- * a Session closed because its runtime process is gone — written onto
- * `endedReason` exactly where a real `SessionEnd`'s runtime-supplied reason
- * would go, but never confusable with one (AC1: "reported as a distinct
- * reason… so the two never blur"). Never a Rule a human would see; purely
- * an internal marker for anything that ever reads `endedReason` later.
- */
+/** Written to `endedReason` where a real SessionEnd's reason would go — an internal marker only, never a Rule a human sees. */
 export const PROCESS_GONE_REASON = "process_gone";
 
 /**
- * Ticket 02: is `node`'s own OS process the EXACT one its `session.started`
- * captured — never resurrected by an unrelated process that happens to
- * reuse the same pid after a reboot (the ticket's own named trap)? A pure
- * decision over an ALREADY-READ `startMarkers` map (`closeDeadProcesses`
- * below does the one real `ps` read, batched across every candidate at
- * once) — this function itself never touches the process table.
- *
- * `node.pid === undefined` (legacy data, a backfilled start, or an
- * environment `ps` couldn't be read in at SessionStart) means nothing was
- * ever captured to check — reads as "cannot tell," never "gone": this NEVER
- * marks a Session dead on the mere ABSENCE of a pid (AC2's own "only a dead
- * process changes category" — missing information is not evidence of
- * death). A pid present in `startMarkers` but with no stored
- * `pidStartedAt` to compare degrades to trusting the bare pid number alone
- * — the best available signal, same silent-degrade convention every other
- * optional capture in this project already follows.
+ * Is `node`'s process still the exact one `session.started` captured — not
+ * a different process that reused the same pid after a reboot? A pure
+ * decision over the already-read `startMarkers` map; `closeDeadProcesses`
+ * does the one real `ps` read. Missing information (no pid captured) is
+ * never evidence of death.
  */
 export function isProcessGone(node: SessionNode, startMarkers: ReadonlyMap<number, string>): boolean {
   if (node.pid === undefined) return false;
@@ -267,17 +215,12 @@ export function isProcessGone(node: SessionNode, startMarkers: ReadonlyMap<numbe
 }
 
 /**
- * The real process-table read (never run in a unit test — `closeDeadProcesses`'s
- * own `readProcessStartMarkers` parameter is what a test injects instead,
- * same shape `defaultGitRootFor`/`defaultPsWalk` already use): ONE `ps`
- * call for every candidate pid at once (`-p` takes a comma list) — ticket
- * 13's own lesson, never repeated here as one spawn per Session. A pid `ps`
- * cannot find is simply ABSENT from its own output (verified against a
- * mixed real+bogus `-p` list: `ps` drops what it can't find rather than
- * erroring per-pid) — exactly the "confirmed gone" signal `isProcessGone`
- * reads back. Never throws: a missing `ps` binary or a sandboxed test
- * environment with no real process table degrades to an empty map —
- * "nobody confirmed gone this read," never a crash.
+ * Batches every candidate pid into ONE `ps -p` call rather than one spawn
+ * per session. A pid `ps` can't find is simply absent from its output
+ * (verified: `ps` drops unmatched pids rather than erroring) — exactly the
+ * "confirmed gone" signal `isProcessGone` reads back. Never throws: a
+ * missing `ps` binary or sandboxed test environment degrades to an empty
+ * map instead of a crash.
  */
 function defaultProcessStartMarkers(pids: readonly number[]): ReadonlyMap<number, string> {
   const map = new Map<number, string>();
@@ -290,47 +233,20 @@ function defaultProcessStartMarkers(pids: readonly number[]): ReadonlyMap<number
       map.set(Number(match[1]), match[2] as string);
     }
   } catch {
-    // See the doc comment above.
   }
   return map;
 }
 
 /**
- * Ticket 02's own fix. Originally called directly, right after
- * `buildSessionIndex`, by each of `tenaza status` (`renderSessionTree`),
- * `statusline` (`deriveStatuslineCounts`) and the board (`daemon.ts`'s
- * `buildBoardPayload`) so the three could never disagree (AC1: "one rule,
- * the same in all three"). Deepening ticket 01 ("every surface reads one
- * closed-out Session index") moved that single call site INTO
- * `closedOutSessionIndex` below, which now also folds in `archiveSession`
- * (`resolve.ts`) as a fourth caller — this function itself is unchanged,
- * only ever reached through that shared seam now, never from a hook's own
- * answer path (ADR 0007, ticket 02's own AC4).
+ * Closes every session whose process is CONFIRMED gone — `endedAt`/
+ * `endedReason` set as a real SessionEnd would.
  *
- * Closes every Session whose own runtime process is CONFIRMED gone —
- * `endedAt`/`endedReason` set exactly as a real `SessionEnd` would read,
- * so every existing consumer (`nodeCategory`, `board.ts`'s `sessionColumn`,
- * `statusline.ts`'s `isLive`) treats it correctly with NO new logic of its
- * own. Never written back to the log — a derived, read-side fact,
- * recomputed fresh on every call (ADR 0002), and reached only from
- * `status`/`statusline`/the board, never from a hook's own answer path
- * (ADR 0007, the ticket's own AC4).
- *
- * `endedAt` is set to the node's OWN `lastEventTs` — its last confirmed
- * activity — never to `now`: using `now` would make `endedAt` a different
- * value on every single call (nothing persists it), which would never let
- * `sessionColumn`'s 24h TERMINÓ window actually age the card out, and would
- * spuriously change the board's own payload on every poll tick forever.
- * `now` is used only as a last-resort fallback for a hand-built fixture
- * with a `pid` but no `lastEventTs` at all — unreachable through the real
- * pipeline, since capturing a `pid` requires a `session.started` Event,
- * which `buildSessionIndex` already folds into `lastEventTs` first.
- *
- * Only a node with NO real end yet (`endedAt === undefined`) is ever a
- * candidate — this never overwrites a real `SessionEnd`'s own reason, and
- * a node with no `pid` at all is left exactly as it was (AC2: a live-but-
- * idle Session, or one Tenaza never captured a pid for, keeps reading
- * alive/"sin señal" — only a CONFIRMED-dead process ever changes category).
+ * `endedAt` is the node's own `lastEventTs`, never `now`: `now` changes on
+ * every call, which would stop the 24h TERMINÓ window from ever aging a
+ * card out, and would churn the board's payload on every poll. `now` only
+ * backstops a fixture with a `pid` but no `lastEventTs` at all —
+ * unreachable in the real pipeline, since a `pid` is only captured
+ * alongside a `session.started`, which sets `lastEventTs` first.
  */
 export function closeDeadProcesses(
   index: ReadonlyMap<string, SessionNode>,
@@ -351,40 +267,15 @@ export function closeDeadProcesses(
   }
 }
 
-/**
- * Ticket 06 ("a Session with no pid stops reading live after 24h of
- * silence"): Tenaza's own word for a Session closed by THIS rule —
- * distinct from `PROCESS_GONE_REASON` (AC: "the ended reason is
- * distinguishable from `process_gone`... so a reader can tell the two
- * apart"). Same "purely an internal marker, never a Rule a human would see"
- * convention `PROCESS_GONE_REASON` already follows.
- */
 export const NO_PID_SILENT_REASON = "no_pid_silent";
 
 /**
- * Ticket 06: is `node` a transition-era Session gone silent long enough to
- * read as ended? Every Session started before `session.started` began
- * capturing `pid` (ADR 0008, ticket 02 — every Session from the 0.2.0
- * binary) carries NO `pid` at all, which means `isProcessGone`/
- * `closeDeadProcesses` can NEVER confirm one of these gone — there is
- * nothing to check against the live process table (`isProcessGone`'s own
- * "missing information is not evidence of death" rule, untouched by this
- * ticket). Found 2026-10-28: the statusline read "7 vivas" while only 2
- * `claude` processes existed — 5 pre-0.3.0 Sessions with no `pid` could
- * never be confirmed gone, and `archiveSession` refused to remove them
- * (`resolve.ts`) since nothing could ever set their `endedAt` either.
- *
- * `windowMs` is `TERMINO_WINDOW_MS` (`board.ts`) by default — the SAME 24h
- * the board's own TERMINÓ column already uses (AC: "reuse… never a second
- * magic number"), not a new number invented for this rule (ADR 0010).
- *
- * A Session that already has a real end, or one that carries a `pid` at
- * all (the real `closeDeadProcesses` check owns that one — AC: "a Session
- * WITH a pid is never touched by this rule"), is never a candidate here —
- * the two rules are mutually exclusive by construction, so they can never
- * disagree about the same Session. A Session with no `lastEventTs` at all
- * (no Event has ever named it) has nothing to measure silence against yet,
- * the same convention `isStalled` already follows.
+ * Every session from before `session.started` captured `pid` (ADR 0008)
+ * carries no `pid` at all, so `isProcessGone`/`closeDeadProcesses` can
+ * never confirm it gone — there's nothing to check against the process
+ * table. This is the fallback for those: gone silent past `windowMs`
+ * (`TERMINO_WINDOW_MS` by default, the same 24h the board's TERMINÓ column
+ * uses).
  */
 export function isPidlessSilent(node: SessionNode, now: Date, windowMs: number = TERMINO_WINDOW_MS): boolean {
   if (node.pid !== undefined) return false;
@@ -394,37 +285,17 @@ export function isPidlessSilent(node: SessionNode, now: Date, windowMs: number =
 }
 
 /**
- * Ticket 06: `closeDeadProcesses`'s own companion for a Session it can
- * never confirm gone — `isPidlessSilent`'s own shape, closed the SAME way a
- * real `SessionEnd` would read (`endedAt`/`endedReason` set, never written
- * back to the log — ADR 0002, recomputed fresh on every call, exactly
- * `closeDeadProcesses`'s own convention). Originally called right after
- * `closeDeadProcesses` at each of its own three call sites directly;
- * deepening ticket 01 moved that pairing INTO `closedOutSessionIndex`
- * below, now reached from four surfaces (`archiveSession` joins the
- * original three) without this function knowing any of them exist —
- * ticket 02's own "one rule, never disagreeing" convention (AC1), extended
- * rather than duplicated.
+ * `closeDeadProcesses`'s companion for a session with no `pid` to check.
  *
- * `endedAt` is `lastEventTs` PLUS `windowMs` (ADR 0010, human's own call)
- * — the FIXED moment this Session's silence first crossed the 24h line,
- * never `lastEventTs` bare and never `now`. A bare `lastEventTs` would read
- * the board's own TERMINÓ window (`board.ts`'s `sessionColumn`, the SAME
- * `TERMINO_WINDOW_MS`) as already past its 24h the instant this rule can
- * even fire, dropping the card before a human ever sees it. `now` was tried
- * first and rejected: it moves on every read, so the card never ages out of
- * TERMINÓ on its own and a human has to archive every single one by hand.
- * This fixed stamp gives the board exactly the SAME 24h-wide TERMINÓ
- * window every other ended Session gets, just shifted to start when the
- * silence crossed the line rather than when the last real Event landed —
- * the card is TERMINÓ (and archivable with "x") from 24h to 48h of total
- * silence, then drops off the board on its own past 48h, exactly like any
- * other ended Session ages out. A Session already silent past 48h the
- * first time this rule ever observes it simply never shows on the board at
- * all — accepted (ADR 0010): there is no real end moment to recover for
- * data that stale, and `tenaza status`/the statusline still read it as
- * ended regardless (they gate on `endedAt !== undefined` alone, never on
- * the board's own window).
+ * `endedAt` is `lastEventTs + windowMs`, never bare `lastEventTs` (would
+ * already read past the board's TERMINÓ window the instant this fires,
+ * hiding the card before a human sees it) and never `now` (moves every
+ * read, so the card never ages out — someone would have to archive every
+ * one by hand). The fixed stamp gives the same 24h TERMINÓ window any ended
+ * session gets, just starting when the silence crossed the line: visible
+ * 24h-48h after going silent, then drops off past 48h on its own. A
+ * session already silent past 48h the first time this rule sees it never
+ * shows on the board at all — there is no real end moment left to recover.
  */
 export function closeSilentPidlessSessions(
   index: ReadonlyMap<string, SessionNode>,
@@ -439,45 +310,20 @@ export function closeSilentPidlessSessions(
 }
 
 /**
- * Deepening ticket 01 ("every surface reads one closed-out Session
- * index"): the ONE function `tenaza status` (`renderSessionTree`),
- * `statusline` (`deriveStatuslineCounts`), the board (`daemon.ts`'s
- * `buildBoardPayload`) and archive (`resolve.ts`'s `archiveSession`) all
- * call now, in place of re-assembling `buildSessionIndex` +
- * `closeDeadProcesses` + `closeSilentPidlessSessions` by hand at each call
- * site — exactly the drift that let this bug happen: only the board ever
- * folded in the Activity touch (`daemon.ts:317`, pre-ticket-01), so a
- * Session busy with ordinary tool calls and no Event for a while read
- * "sin señal" in the CLI while the board still showed it running, and a
- * native prompt the human already answered kept reading "esperándote" in
- * the CLI after later activity had already superseded it on the board.
+ * The one seam `tenaza status`, `statusline`, the board, and archive all
+ * read a closed-out session index through — never reassembling
+ * `buildSessionIndex` plus the two closes by hand, which is what let one
+ * caller's local Activity-touch merge drift out of sync with the others.
  *
- * The order is FIXED, in exactly this sequence, inside this one function:
- *   1. `buildSessionIndex` — the pure fold over `Event[]`, unchanged.
- *   2. merge `touchedAt` into `lastEventTs` — BEFORE either close, so a
- *      derived `endedAt` (step 3/4) reflects the Session's true last
- *      activity, touch included (the reasoning originally at
- *      `daemon.ts:322-324`, now lives here for every caller).
- *   3. `closeDeadProcesses` — reads the touch-merged `lastEventTs`.
- *   4. `closeSilentPidlessSessions` — same.
- * Reordering 2 after 3/4 would let a dead or silence-closed Session's
- * `endedAt` miss activity the touch alone recorded — the exact class of
- * staleness this ticket closes.
+ * Order is fixed: touch merges into `lastEventTs` before either close
+ * reads it, so a derived `endedAt` reflects the session's true last
+ * activity. Reordering would let a dead- or silence-closed session's
+ * `endedAt` miss activity the touch alone recorded.
  *
- * `touchedAt` is a plain `ReadonlyMap`, never read from disk in here: the
- * CALLER decides how to produce it, which is what lets archive merge only
- * its OWN Session's touch (`readSessionTouchedTimestamp`, one `statSync`)
- * while the other three merge every Session's at once
- * (`readTouchedTimestamps`, one `readdirSync`) — this function is
- * indifferent to which, and a caller with no touch signal at all (or a
- * fixture that predates ticket 14) simply omits it, leaving every node's
- * `lastEventTs` exactly as `buildSessionIndex` derived it.
- *
- * `readProcessStartMarkers` and `windowMs` are threaded straight through
- * to `closeDeadProcesses`/`closeSilentPidlessSessions` — the SAME
- * injectable seams those two already exposed, so a test proves the ORDER
- * (touch merges before either close reads `lastEventTs`) without ever
- * touching the real process table or the real clock.
+ * `touchedAt` is never read from disk here — the caller decides how to
+ * produce it (archive merges only its own session's touch; the other
+ * three merge every session's at once), so this stays indifferent to
+ * which.
  */
 export function closedOutSessionIndex(
   events: Event[],
@@ -514,11 +360,7 @@ function defaultGitRootFor(cwd: string): string | undefined {
 /** The bucket a Session with neither a Label nor a known cwd groups under — never crashes, never vanishes. */
 export const UNKNOWN_PROJECT = "(sin proyecto)";
 
-/**
- * project Label → git root of cwd → cwd — the spec's own fallback chain,
- * read on every call (no daemon, ADR 0002). `resolveGitRoot` is injectable
- * so tests never spawn a real `git` process.
- */
+/** Read fresh on every call (ADR 0002, no daemon-side cache) — `resolveGitRoot` is injectable so tests never spawn a real `git` process. */
 export function deriveProject(
   node: SessionNode,
   resolveGitRoot: (cwd: string) => string | undefined = defaultGitRootFor,
@@ -530,25 +372,11 @@ export function deriveProject(
 }
 
 /**
- * Ticket 13, criterion 3 — the ACTUAL measured cause, found by profiling
- * `buildBoardPayload` once the log-read cache (`log.ts`'s `SessionLogCache`)
- * turned out NOT to be where the ~440 ms at real scale went: every Session
- * with no `project` Label spawns its OWN `git … rev-parse` process in
- * `defaultGitRootFor`, and the real-scale fixture (1165 Sessions, 197 of
- * them visible) has only 8 DISTINCT `cwd`s among them — one spawn per
- * Session instead of one per distinct `cwd` is what actually cost
- * ~450 ms, confirmed by isolating this one call from the rest of
- * `buildBoardPayload` and timing it alone.
- *
- * A `git` worktree's root for a given `cwd` cannot change within the
- * lifetime of ONE Daemon process (the worktree would have to move or be
- * deleted and recreated elsewhere while the Daemon keeps running) — so,
- * unlike the log cache, this one never needs an invalidation key at all:
- * once resolved, a `cwd`'s root is memoized for good. `tenaza status` and
- * `statusline` (one-shot processes) have no reason to pay for a cache that
- * dies with them — `deriveProject`'s own default stays exactly as it was;
- * only `daemon.ts` builds ONE resolver via this and passes it down for the
- * life of the Daemon.
+ * A git worktree's root for a given `cwd` cannot change within the
+ * lifetime of one Daemon process, so this needs no invalidation key — once
+ * resolved, memoized for good. One-shot processes (`tenaza status`,
+ * `statusline`) have no reason to pay for a cache that dies with them, so
+ * only `daemon.ts` builds one and passes it down for its own lifetime.
  */
 export function createCachingGitRootResolver(
   resolveGitRoot: (cwd: string) => string | undefined = defaultGitRootFor,
@@ -563,30 +391,18 @@ export function createCachingGitRootResolver(
 }
 
 /**
- * Claude Code's own internal side-agents (ticket 05 — #1436's "~85 phantom
- * Sessions" measured on the human's real `tenaza status`, 2026-10-25): a
- * Session whose ENTIRE observed log is its own end plus a Usage sample —
- * no `session.started` even after `adapters/claude.ts`'s own M6 backfill
- * (the triggering Events never carried a `cwd` to backfill FROM), no
- * Policy match, no Label. There is nothing useful to show for it, so
- * `renderSessionTree` hides it rather than rendering a permanent
- * "(sin proyecto) sin datos cerró" row forever.
+ * Claude Code's own internal side-agents leave two noise shapes behind: a
+ * log that is only its own end plus a usage sample (no `session.started`,
+ * no Policy match, no Label — nothing useful to show), or a log that is
+ * only a single `session.ended` with reason `"subagent_stop"`. Both get
+ * hidden here rather than rendered as a permanent empty row.
  *
- * Widened 2026-10-27 for a NARROWER legacy shape the
- * same side-agents also leave behind — a log whose ENTIRE content is a
- * single `session.ended` with reason `"subagent_stop"` (no usage sample at
- * all, e.g. an unreadable or absent transcript). `adapters/claude.ts`'s own
- * `handleSubagentStop` now refuses to WRITE this shape going forward (it
- * never appends anything for an `agent_id` with no existing log), but a
- * log that already landed on disk before that fix shipped is never
- * deleted (ADR 0002) — this is what still hides it from a render. Gated on
- * `endedReason` specifically (never on the type-set alone, unlike the
- * two-Event case above): a GENUINE top-level Session that happens to have
- * ended with no `session.started` at all (its own end carried no `cwd` to
- * backfill from either) is a real, if sparse, Session — never silently
- * dropped just because its log happens to be short. `endedReason` is
- * `undefined` for every pre-ticket-14 caller, which keeps this branch
- * permanently false and the original two-Event rule untouched for them.
+ * The second shape is gated on `endedReason` specifically, never on the
+ * type-set alone: a genuine top-level session that ended with no
+ * `session.started` at all is a real, if sparse, session and is never
+ * dropped just because its log happens to be short. `handleSubagentStop`
+ * no longer writes this shape, but a log that already landed before that
+ * fix is never deleted (ADR 0002) — this still has to catch it.
  */
 export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>, endedReason?: string): boolean {
   if (eventTypes.size === 2 && eventTypes.has("session.ended") && eventTypes.has("usage.sampled")) return true;
@@ -594,21 +410,12 @@ export function isNoiseSession(eventTypes: ReadonlySet<Event["type"]>, endedReas
 }
 
 /**
- * Ticket 11's "archive a TERMINÓ card": every Session id's LATEST
- * `session.archived` Event ts, read from the human log's own Events (ADR
- * 0002 — no state beside the logs; the Daemon's write route appended one
- * there, never a side file). Scanned fresh on every read, same convention
- * as every other derived state in this project.
- *
- * Orchestrator review, 2026-10-27: a Claude Code Session can be RESUMED
- * (`claude --resume`/`--continue`) under the SAME `session_id`, firing
- * SessionStart/tool Events again long after it was archived — so a human
- * may archive, resume, run, and eventually archive the SAME Session a
- * SECOND time. Collapsing to the newest ts here (never a bare `Set`,
- * which this function used to return) is what lets `isArchived` below
- * tell "still archived" apart from "was archived once, but that's stale
- * now" — an EARLIER archive Event is never deleted (ADR 0002 never
- * rewrites a line), only superseded by comparing timestamps.
+ * This id's latest `session.archived` event ts — a map, not a bare set of
+ * archived ids: a session can be resumed under the same id (`claude
+ * --resume`) and archived again later, so `isArchived` below needs to tell
+ * "still archived" apart from "archived once but stale now" by comparing
+ * timestamps. An earlier archive event is never deleted (ADR 0002), only
+ * superseded.
  */
 export function latestArchiveTimestamps(home: string = tenazaHome()): Map<string, string> {
   const map = new Map<string, string>();
@@ -621,22 +428,14 @@ export function latestArchiveTimestamps(home: string = tenazaHome()): Map<string
 }
 
 /**
- * TIME IS STATE (orchestrator review, 2026-10-27): an archive hides a
- * Session's card from the board only while NOTHING of that Session
- * happened AFTER it — never permanently. `archivedAt` is this Session's
- * own latest archive ts (`latestArchiveTimestamps`, `undefined` when
- * never archived at all); `lastEventTs` is the Session's own latest
- * Event (`SessionNode.lastEventTs`, the same running max every other
- * time-based check in this project already reads). A resumed Session —
- * a fresh SessionStart or tool call landing AFTER the archive — makes
- * `lastEventTs` newer than `archivedAt`, which is exactly what brings its
- * card back, in whatever column its CURRENT state now puts it: visibility
- * is re-evaluated fresh on every read, the same way `isStalled`/
- * `sessionColumn` already re-evaluate against a ticking clock elsewhere —
- * never a flag written once and trusted forever. Used ONLY by `daemon.ts`'s
- * board payload and `resolve.ts`'s own re-archive check — never by
- * `renderSessionTree` (`tenaza status`), since the spec scopes archiving
- * to "hides that Session from the BOARD," not the CLI.
+ * An archive hides a card from the board only while nothing has happened
+ * on that session since — never permanently. A resumed session's
+ * `lastEventTs` moves past `archivedAt`, which brings the card back in
+ * whatever column its current state now puts it.
+ *
+ * Used only by the board payload and the re-archive check — never by
+ * `renderSessionTree`, since archiving hides a session from the board, not
+ * the CLI.
  */
 export function isArchived(archivedAt: string | undefined, lastEventTs: string | undefined): boolean {
   if (archivedAt === undefined) return false;
@@ -644,29 +443,17 @@ export function isArchived(archivedAt: string | undefined, lastEventTs: string |
 }
 
 /**
- * Ticket 14 (AC3): every Session's own "last ordinary activity" signal —
- * each `<session>.touched` file's own mtime (`toolcalls.ts`'s
- * `touchSession`, bumped on every PreToolUse/PostToolUse/Stop call,
- * matched or not — NEVER an Event, so ADR 0002's single-writer log stays
- * exactly the size it was). Scanned fresh on every call, same convention
- * as `latestArchiveTimestamps` above; a file that vanishes between the
- * directory listing and the stat (a race with its own writer, vanishingly
- * rare and harmless either way) is simply absent from this read, never a
- * crash.
+ * Every session's own "last ordinary activity" signal — each
+ * `<session>.touched` file's mtime, bumped by `toolcalls.ts`'s
+ * `touchSession` on every tool-use hook, matched or not. Never an Event,
+ * so the single-writer log (ADR 0002) stays exactly the size it was. A
+ * file that vanishes between the directory listing and the stat is simply
+ * absent from this read, never a crash.
  *
- * `buildSessionIndex` itself stays a pure function of `Event[]` and has no
- * reason to know this file exists — the merge happens one layer up, in
- * `closedOutSessionIndex`. FALSIFIED as of deepening ticket 01 ("every
- * surface reads one closed-out Session index"): this doc comment used to
- * claim `tenaza status`/`statusline` had "no need" for this signal at all,
- * on the theory that a one-shot CLI read needed no board-style freshness.
- * That was the bug — a Session busy with ordinary tool calls and no Event
- * for a while read "sin señal" in the CLI tree while the board (the only
- * caller that merged this) still showed it running, and the statusline
- * undercounted "vivas" the same way. Every reader of a Session's state —
- * `tenaza status`, the statusline, the board, and archive (which uses
- * `readSessionTouchedTimestamp` below instead, scoped to its own Session)
- * — needs this signal equally; none of them gets to skip it.
+ * `buildSessionIndex` stays a pure function of `Event[]` and has no reason
+ * to know this file exists — the merge happens one layer up, in
+ * `closedOutSessionIndex`. Every reader of a session's state needs this
+ * signal equally; none of them gets to skip it.
  */
 export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, string> {
   const map = new Map<string, string>();
@@ -679,23 +466,18 @@ export function readTouchedTimestamps(home: string = tenazaHome()): Map<string, 
       const stat = statSync(path.join(dir, name));
       map.set(name.slice(0, -suffix.length), new Date(stat.mtimeMs).toISOString());
     } catch {
-      // See the doc comment above.
     }
   }
   return map;
 }
 
 /**
- * Deepening ticket 01: one Session's own Activity touch — the SAME
- * `.touched` mtime `readTouchedTimestamps` scans the whole directory for,
- * read here for a single, already-known Session id. `archiveSession`
- * (`resolve.ts`) already knows which Session it's archiving, so scanning
- * every OTHER Session's `.touched` file just to throw the result away
- * would be pure waste — a directory listing that only grows with every
- * Session Tenaza has ever observed, paid on every single archive click.
- * `undefined` when the file was never written, or vanished between the
- * existence check and the stat (a race with its own writer, same
- * silent-degrade convention `readTouchedTimestamps` already follows).
+ * One session's own Activity touch, read directly rather than through
+ * `readTouchedTimestamps`'s full directory scan — `archiveSession` already
+ * knows which session it's archiving, so scanning every OTHER session's
+ * `.touched` file just to discard the result would be pure waste on every
+ * archive click. `undefined` when the file was never written or vanished
+ * mid-read.
  */
 export function readSessionTouchedTimestamp(session: string, home: string = tenazaHome()): string | undefined {
   try {
@@ -706,28 +488,14 @@ export function readSessionTouchedTimestamp(session: string, home: string = tena
 }
 
 /**
- * Ticket 14: is `node` CURRENTLY waiting on a native Claude Code prompt —
- * a permission dialog, or the ~60s idle_prompt — right now? TIME IS
- * STATE, the same way `isStalled`/`liveItemPhase` are elsewhere: neither
- * signal has a documented "resolved" hook event
- * (`docs/research/claude-code-waiting-on-human-hooks.md`), so this is
- * derived fresh from ORDERING, never a stored flag. `node.lastNotification`
- * still names the Session's CURRENT native wait exactly when it is STILL
- * the most recent thing observed for this Session — i.e. `node.lastEventTs`
- * (which the caller MUST have already folded the touched-file merge into,
- * `daemon.ts`'s `buildBoardPayload`) has not moved past it. The moment
- * anything later happens — a fresh prompt, an ordinary tool call's touch,
- * a lifecycle Event, another notification — `lastEventTs` advances past
- * `lastNotification.ts` and this reads `undefined` again, with no second
- * Event ever written for that transition.
- *
- * Known, accepted tie (same shape `log.ts`'s own `appendEventAtLine` doc
- * already accepts for two Events landing in the exact same millisecond):
- * a later Event whose `ts` happens to be BYTE-IDENTICAL to the notification's
- * own never resolves it here (a strict string comparison, not `>=`) — in
- * practice vanishingly rare for real activity, each a separate hook process
- * launch apart in wall-clock time; only ever observed in a synthetic test
- * that appends two Events back to back with no delay between them.
+ * Is `node` currently waiting on a native prompt (a permission dialog, or
+ * the idle timeout) right now? Neither signal has a "resolved" hook event,
+ * so this is derived fresh from ordering rather than a stored flag:
+ * `lastNotification` still names the CURRENT wait exactly while
+ * `lastEventTs` has not moved past it. The moment anything later happens —
+ * a fresh prompt, a tool-call touch, another notification — `lastEventTs`
+ * advances past it and this reads `undefined` again, with no event ever
+ * written for that transition.
  */
 export function nativeWaitFor(node: SessionNode): { kind: NotificationKind; since: string } | undefined {
   const notification = node.lastNotification;
@@ -736,29 +504,20 @@ export function nativeWaitFor(node: SessionNode): { kind: NotificationKind; sinc
   return { kind: notification.kind, since: notification.ts };
 }
 
-/** Ticket 05 ("Turn state: working vs waiting"): working, mid-Turn — or waiting for the human, between Turns. See `turnWaitSince`'s own doc for how "waiting" is actually derived. */
+/** working: mid-turn. waiting: between turns, for the human. */
 export type TurnState = "working" | "waiting";
 
 /**
- * Ticket 05: `node`'s own Stop-derived wait — present exactly when its
- * LATEST Turn ended (`turn.ended`, this Session's own `Stop`) and nothing
- * else has happened since: no fresh `prompt.submitted`, no ordinary
- * tool-call touch, no later native prompt. TIME IS STATE, the exact
- * convention `nativeWaitFor` above already established for the SAME "no
- * second Event for the transition" shape — any later Event (ticket 14's
- * own touched-file merge, `buildBoardPayload`'s doc comment, included)
- * simply moves `lastEventTs` past `lastTurnEnded`, and this reads
- * `undefined` again with nothing else to do.
+ * This session's own Stop-derived wait — present when its latest turn
+ * ended and nothing has happened since (no fresh prompt, tool-call touch,
+ * or later native prompt); the moment something does, `lastEventTs` moves
+ * past `lastTurnEnded` and this reads `undefined` again.
  *
- * Returns `undefined` — never "waiting" — the instant a MORE SPECIFIC
- * native signal is also current (`nativeWaitFor`): that one carries its
- * own `kind` (a permission prompt vs. the ~60s idle timeout) and renders
- * its own, more specific badge, so a caller never has to choose between
- * the two — this function already resolves that for it, which is what
- * keeps the board from ever showing two waiting badges on one card. Also
- * `undefined` once the Session itself has ended (`endedAt`) — mirrors
- * `nodeCategory`'s own done/ended check, which always outranks any wait,
- * rather than leaving that to Event-ordering alone.
+ * Returns `undefined` whenever a more specific native wait is also current
+ * (`nativeWaitFor`) — that one carries its own kind and renders its own
+ * badge, so a card never shows two waiting badges at once. Also
+ * `undefined` once the session has ended, so done/ended always outranks
+ * any wait.
  */
 export function turnWaitSince(node: SessionNode): string | undefined {
   if (node.endedAt !== undefined) return undefined;
@@ -767,30 +526,17 @@ export function turnWaitSince(node: SessionNode): string | undefined {
   return undefined;
 }
 
-/**
- * Ticket 05: is `node` mid-Turn ("working") or between Turns ("waiting for
- * the human")? "Waiting" covers BOTH a current native prompt
- * (`nativeWaitFor`) and this Session's own plain Stop-derived wait
- * (`turnWaitSince`) — the two are mutually exclusive by `turnWaitSince`'s
- * own gate above, so this never double-counts them; it only needs to know
- * whether EITHER currently applies.
- */
 export function turnState(node: SessionNode): TurnState {
   if (node.endedAt !== undefined) return "working";
   return nativeWaitFor(node) !== undefined || turnWaitSince(node) !== undefined ? "waiting" : "working";
 }
 
 /**
- * Ticket 05 (AC3, "background work is not hidden"): how many of `nodeId`'s
- * own descendants — subagents, and THEIR subagents in turn — are not yet
- * ended, i.e. still doing work this Session's own row alone cannot show.
- * The ONLY "background work" Tenaza has any visibility into: a backgrounded
- * shell command (`run_in_background`) fires no hook Tenaza could ever
- * observe finishing, so it is deliberately never counted here — only a
- * real subagent Session (its own `session.started`/`SubagentStart`) is.
- * `childrenOf` is whatever a caller already built (`childrenIndex` for the
- * CLI tree, `daemon.ts`'s own map for the board) — never rebuilt here, so
- * this stays a cheap, pure traversal over structure the caller already has.
+ * How many of `nodeId`'s descendants (recursively) have not yet ended —
+ * work this session's own row can't show. The only "background work"
+ * Tenaza has visibility into: a backgrounded shell command fires no hook
+ * Tenaza could ever observe finishing, so only real subagent sessions are
+ * counted here, never those.
  */
 export function countActiveDescendants(nodeId: string, childrenOf: ReadonlyMap<string, SessionNode[]>): number {
   const children = childrenOf.get(nodeId) ?? [];
@@ -802,7 +548,7 @@ export function countActiveDescendants(nodeId: string, childrenOf: ReadonlyMap<s
   return count;
 }
 
-/** Every distinct Event `type` observed for each Session — what `isNoiseSession` reads, computed once per render. Exported so the Daemon's board payload (ticket 08) can drop the SAME noise rows from `/events`, rather than re-deriving a second copy of this scan. */
+/** Every distinct event type observed per session — what `isNoiseSession` reads. Exported so the board payload can drop the same noise rows from `/events` without a second copy of this scan. */
 export function eventTypesBySession(events: Event[]): Map<string, Set<Event["type"]>> {
   const map = new Map<string, Set<Event["type"]>>();
   for (const event of events) {
@@ -818,18 +564,15 @@ function byStartedThenId(a: SessionNode, b: SessionNode): number {
 }
 
 /**
- * Every Session that names `parent` as its own parent, sorted
- * chronologically — ALWAYS, regardless of project (spec: "a subagent
- * renders once, under its parent, even across projects"). Project is never
- * a reason to split a child from its parent; it only decides which group a
- * Session with NO renderable parent becomes a root of (`groupRootsByProject`
- * below). `nodes` has already dropped noise (`isNoiseSession`), so a child
- * whose parent WAS noise, or was never observed at all, simply finds
- * nothing here and surfaces as its own root there instead.
+ * Every session that names `parent` as its own, sorted chronologically —
+ * regardless of project; project only decides which group a session with
+ * no renderable parent roots under (`groupRootsByProject` below). A child
+ * whose parent was noise or never observed finds nothing here and
+ * surfaces as its own root there instead.
  *
- * Exported (ticket 05) so `daemon.ts`'s own board payload can build the
- * SAME structural parent→children map once per read and feed it to
- * `countActiveDescendants`, rather than re-deriving a second copy of this.
+ * Exported so the board payload can build the same parent→children map
+ * once per read and feed it to `countActiveDescendants`, rather than
+ * re-deriving a second copy.
  */
 export function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> {
   const map = new Map<string, SessionNode[]>();
@@ -844,16 +587,12 @@ export function childrenIndex(nodes: SessionNode[]): Map<string, SessionNode[]> 
 }
 
 /**
- * Group every Session under its derived project. A Session IS a root of
- * its own project group exactly when it has no RENDERABLE parent — no
- * `parent` at all, or a `parent` id that names no surviving node (never
- * observed, or filtered out as noise). Project is deliberately NOT part of
- * this test (ticket 05 fix — a previous version of this function made a
- * cross-project child a root here too, which rendered it TWICE alongside
- * `childrenIndex` nesting it under its parent; the spec's own line is
- * explicit that a subagent nests under its parent "even across projects",
- * so a known parent always wins). A Session with a renderable parent is
- * never a root here — `childrenIndex` nests it instead.
+ * Roots every session under its derived project. A session roots here only
+ * when it has no RENDERABLE parent — no `parent` at all, or a `parent` id
+ * that names no surviving node. Project is deliberately not part of this
+ * test: a session with a renderable parent is always nested by
+ * `childrenIndex` instead, even across projects — making project part of
+ * this test would render it twice, once here and once nested there.
  */
 function groupRootsByProject(
   nodes: SessionNode[],
@@ -876,13 +615,7 @@ function groupRootsByProject(
   return groups;
 }
 
-/**
- * The ticket Label when one was announced, else the structural role —
- * "subagente" for any Session with a parent, "sesión" otherwise (ticket 03's
- * own fallback, now filled in by ticket 05: `ticket` is shown opaquely,
- * exactly as announced, never validated or parsed — only `project` is
- * interpreted, per the Label's own definition).
- */
+/** `ticket` label when announced, else "subagente"/"sesión" by structural role. Shown opaquely, exactly as announced — never validated or parsed, unlike `project`, which `deriveProject` interprets. */
 export function roleOf(node: SessionNode): string {
   return node.labels.ticket ?? (node.parent !== undefined ? "subagente" : "sesión");
 }
@@ -900,17 +633,15 @@ export function formatAge(node: SessionNode, now: Date): string {
   return `${days}d`;
 }
 
-/** Spanish for "no data" — reserved for a Session from an Adapter that never declared the `measure` Capability at all (ADR 0001). Distinct from the empty-bar-plus-dash convention `formatContextBar`/`formatContextNumber` already use for "has `measure`, just not sampled yet": that one is honest uncertainty on a Capability that COULD answer; this one is a Capability that structurally never will. */
+/** "No data" for an Adapter that never declared the `measure` Capability at all (ADR 0001) — distinct from `formatContextBar`/`formatContextNumber`'s empty-bar-plus-dash for "has `measure`, not sampled yet": that's honest uncertainty on a Capability that COULD answer; this is one that structurally never will. */
 const NO_MEASURE_CAPABILITY = "sin datos";
 
 /**
- * The tree row's context column: the bar + number pair when this Session's
- * Adapter declared `measure`, or the Capability-gated "no data" text when it
- * didn't — never both, and never inferred from whether a sample happens to
- * exist (a stray `usage.sampled` on a non-measuring Session, e.g. a test
- * fixture, is deliberately ignored: the Capability gates this, not the
- * data). The core degrades by Capability here, never by runtime name (ADR
- * 0001, exercised by ticket 06).
+ * Bar+number when the session's Adapter declared `measure`, else the
+ * Capability-gated "no data" text — never inferred from whether a sample
+ * happens to exist. A stray `usage.sampled` on a non-measuring session
+ * (e.g. a test fixture) is deliberately ignored: the Capability gates
+ * this, never the data.
  */
 export function formatContextColumn(node: SessionNode, thresholdTokens: number): string {
   if (!node.capabilities.includes("measure")) return NO_MEASURE_CAPABILITY;
@@ -930,14 +661,10 @@ function renderNode(
   lines: string[],
 ): void {
   const category = rollupCategory(node, childrenOf, waiting);
-  // Ticket 05: this node's OWN Turn state and background count — never
-  // rolled up from descendants (unlike `category` above), since each one
-  // already renders its own row right below its parent's.
+  // Turn state and background count are per-node, never rolled up — each
+  // descendant already renders its own row.
   const turn = turnState(node);
-  // Deepening ticket 03: the SAME classifier the board calls
-  // (`board.ts`'s `sessionColumn`) decides ended/waiting/Stalled/working
-  // here too — `categoryWord` below only picks the word for whichever of
-  // the four this settles on, never the precedence between them.
+  // Same classifier the board uses (`sessionState`), so the two never disagree.
   const state: SessionState = sessionState(
     { ended: node.endedAt !== undefined, waitingForHuman: turn === "waiting", lastEventTs: node.lastEventTs },
     now,
@@ -968,20 +695,10 @@ function renderNode(
 }
 
 /**
- * `tenaza status`'s Session tree, grouped per project — the spec's variant
- * D, now WITH the context bar (ticket 04, q9): 15 cells over 300k, a `┊`
- * mark at the Policy's threshold (default 200k), red past it, and the
- * number as `243k` / `⚑243k`. Empty when no Session has ever been observed
- * — or when every observed Session was noise (ticket 05, `isNoiseSession`)
- * — so it adds nothing to a fresh `status` (ticket 01/02's own output stays
- * unchanged).
- *
- * Deepening ticket 01: reads `closedOutSessionIndex` — the SAME closed-out
- * index the board builds, Activity touch merged in before either close —
- * rather than `buildSessionIndex` + the two closes by hand. This is the fix
- * itself: before this ticket, the CLI tree never merged the touch at all,
- * so a Session busy with ordinary tool calls read "sin señal" here while
- * the board still showed it running.
+ * `tenaza status`'s session tree, grouped per project. Reads the same
+ * `closedOutSessionIndex` the board builds, rather than reassembling
+ * `buildSessionIndex` plus the two closes by hand, so the CLI and the
+ * board never disagree about a session's state.
  */
 export function renderSessionTree(home: string = tenazaHome(), now: Date = new Date()): string {
   const events = readAllSessionEvents(home);
@@ -994,18 +711,13 @@ export function renderSessionTree(home: string = tenazaHome(), now: Date = new D
   );
   if (nodes.length === 0) return "";
 
-  // `projectOf` only feeds `groupRootsByProject` now — `childrenIndex`
-  // nests purely on `parent`, never on project (ticket 05 fix: a subagent
-  // nests under its parent even across projects, per spec).
   const projectOf = new Map(nodes.map((node) => [node.id, deriveProject(node)] as const));
   const childrenOf = childrenIndex(nodes);
   const waiting = new Set(deriveInbox(home).map((row) => row.session));
   const groups = groupRootsByProject(nodes, projectOf);
   const policy = loadPolicy(home);
   const thresholdTokens = policy.thresholdTokens;
-  // Deepening ticket 02: the Policy's own `stallMinutes` — the SAME field
-  // the board reads (`policy.ts`'s `DEFAULT_STALL_MINUTES` when absent) —
-  // never a second hardcoded threshold here.
+  // Policy's own `stallMinutes` — never a second hardcoded threshold here.
   const stallThresholdMs = policy.stallMinutes * 60 * 1000;
 
   const lines: string[] = [];

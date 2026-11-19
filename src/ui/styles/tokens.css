@@ -1,38 +1,17 @@
 /**
- * The Live surface's one CSS file (ticket 08, decision 04): custom-property
- * tokens for color, spacing, type scale and borders — every component
- * below reads these, never a literal color or a one-off pixel value, so
- * the HumanLayer look (dark, square edges, dense, uppercase badges) stays
- * in exactly one place to change. No CSS framework.
- *
- * Human fix round: this file is now a literal port of the approved
- * prototype's own `<style>` block
- * (`.yun/prototypes/tenaza-live-surface/PROTOTYPE-live-surface-BC.ts`) —
- * same token NAMES and VALUES, same layout, same per-card look. Only the
- * SELECTORS differ: the prototype's own one-letter classes (`.sc`, `.ac`,
- * `.l1`, …) are kept apart from this project's already-reviewed BEM naming
- * (`session-card__l1`, `inbox-card__cmd`, …), carried over from the first
- * build of this ticket. Every rule below still reads the SAME colors,
- * sizes and positions the prototype does — the human's own approved look,
- * not an approximation of it.
+ * Custom-property tokens for color, spacing, type scale and borders —
+ * components read these rather than a literal color or a one-off pixel
+ * value, so the look stays in exactly one place to change. No CSS
+ * framework.
  */
 
 /**
- * Geist + Geist Mono (SIL Open Font License), vendored as woff2 under
- * ../assets/fonts — never a CDN or a Google Fonts URL (the prototype's own
- * `<link>` to fonts.googleapis.com is NOT ported — decision 04/ticket 08's
- * own "no CDN, the page works offline" rule), so the page works fully
- * offline from the compiled binary. Source: the `geist` npm package,
- * v1.8.2 (https://www.npmjs.com/package/geist,
- * https://github.com/vercel/geist-font) — license text copied alongside
- * the files at ../assets/fonts/GEIST-OFL-LICENSE.txt. Only the weights the
- * board actually uses are vendored (Regular/Medium/SemiBold for Geist,
- * Regular/Medium/SemiBold for Geist Mono — SemiBold added in this fix
- * round: the prototype's logo, column headers and badges all set Geist
- * Mono at weight 600, which the first build of this ticket never vendored)
- * — the other ~15 weights the full family ships have no use in a dense
- * HumanLayer-style board, and every unused weight is ~45-50kb baked into
- * the compiled binary for nothing.
+ * Geist + Geist Mono (SIL Open Font License), vendored as woff2 — never a
+ * CDN or Google Fonts URL, so the page works fully offline from the
+ * compiled binary. License text alongside the files at
+ * ../assets/fonts/GEIST-OFL-LICENSE.txt. Only the weights actually used
+ * are vendored (Regular/Medium/SemiBold, both families) — each unused
+ * weight would cost ~45-50kb baked into the binary for no benefit.
  */
 @font-face {
   font-family: "Geist";
@@ -83,7 +62,6 @@
 }
 
 :root {
-  /* Color — dark only; the Live surface has no light mode (decision 04). The approved prototype's own exact palette — not an approximation of it. */
   --bg: #0a0c0f;
   --s1: #101318;
   --s2: #151920;
@@ -100,13 +78,11 @@
   --orange: #fb923c;
   --red: #f87171;
 
-  /* The context track's own neutral fill (prototype's `.track .fill`) — its own token rather than a literal, per this file's "never a one-off literal" rule. */
   --track-fill: #6b7584;
 
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
 
-  /* Borders — square edges, no radius anywhere */
   --radius: 0px;
   --border-width: 1px;
 }
@@ -136,13 +112,12 @@ body {
   font-family: var(--font-mono);
 }
 
-/* A visible focus ring everywhere — accessibility bar (ticket 08). The prototype has none (a throwaway); kept here regardless — the real app's own bar, never relaxed to match a prototype's gap. */
 :focus-visible {
   outline: 2px solid var(--teal);
   outline-offset: 1px;
 }
 
-/* A card's focus ring IS its selected border: the roving `tabIndex` keeps DOM focus on the selected card, so the outline above drew a second teal ring 1px outside `card--selected`'s border — a double selection on every j/k move. The selected border stays the one visible indicator. */
+/* The selected border is this card's focus ring; the outline above would draw a second ring beside it, since roving tabIndex keeps DOM focus on the selected card. */
 .card:focus-visible {
   outline: none;
 }
@@ -161,7 +136,6 @@ kbd {
   background: var(--bg);
 }
 
-/* Respect the OS-level reduced-motion preference — no pulsing dot, no transitions. */
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.001ms !important;
@@ -169,10 +143,6 @@ kbd {
     transition-duration: 0.001ms !important;
   }
 }
-
-/* -------------------------------------------------------------------- */
-/* App shell + header (prototype's <header>)                            */
-/* -------------------------------------------------------------------- */
 
 .app {
   display: flex;
@@ -202,7 +172,7 @@ kbd {
   letter-spacing: 2px;
 }
 
-/* Ticket 12: the official mark, inline, sized to the wordmark's own text height — `display: block` so the SVG's default inline baseline gap never adds a stray few pixels under it the way an inline `<img>`/`<svg>` otherwise would. */
+/* `display: block` avoids the stray pixels an inline SVG's own baseline gap would add below it. */
 .app__logo-mark {
   display: block;
   flex-shrink: 0;
@@ -254,7 +224,7 @@ kbd {
   font-family: var(--font-mono);
 }
 
-/* Ticket 09: the token rotates every Daemon launch (decision 05) — a tab left open across a restart gets 403 on every write. No prototype equivalent; a plain, visible banner rather than failing silently. */
+/* The token rotates on every Daemon launch, so a tab left open across a restart gets 403 on writes — surfaced here as a banner rather than failing silently. */
 .app__stale-banner {
   padding: 8px 20px;
   background: color-mix(in srgb, var(--amber) 12%, var(--bg));
@@ -263,10 +233,6 @@ kbd {
   font: 12px var(--font-mono);
   flex-shrink: 0;
 }
-
-/* -------------------------------------------------------------------- */
-/* Board + columns (prototype's <main class="board"> / .col / .colh)    */
-/* -------------------------------------------------------------------- */
 
 .board {
   flex: 1;
@@ -363,17 +329,9 @@ kbd {
   margin: 0;
 }
 
-/* -------------------------------------------------------------------- */
-/* Cards — shared essentials; each card kind owns its own look below    */
-/* -------------------------------------------------------------------- */
-
 .card {
   cursor: pointer;
 }
-
-/* -------------------------------------------------------------------- */
-/* Session card (prototype's .sc)                                       */
-/* -------------------------------------------------------------------- */
 
 .session-card {
   background: var(--s1);
@@ -382,7 +340,6 @@ kbd {
   transition: border-color 0.2s;
 }
 
-/* A subagent rendered right under its parent (spec: "under its parent") — indented, with a thin rail on the left tying it to the card above. */
 .session-card--nested {
   margin-left: 16px;
   border-left: 2px solid var(--line2);
@@ -444,7 +401,6 @@ kbd {
   margin-top: 3px;
 }
 
-/* "Last signal" (spec's own field) — the prototype's variants never show it; added in the SAME dim mono voice as l2, one line down, since the spec still requires it. */
 .session-card__signal {
   color: var(--dim);
   font: 11px var(--font-mono);
@@ -454,16 +410,11 @@ kbd {
   text-overflow: ellipsis;
 }
 
-/* Ticket 11: the terminal button every card gets, plus "archivar" on a TERMINÓ card only — same `.btn` base every other action button already uses (`.inbox-card__acts`/`.live-request__acts`'s own sibling row). */
 .session-card__actions {
   display: flex;
   gap: 6px;
   margin-top: 9px;
 }
-
-/* -------------------------------------------------------------------- */
-/* Context track (prototype's .ctx/.track/.fill/.over/.mark/.ctxn)      */
-/* -------------------------------------------------------------------- */
 
 .context-track {
   display: flex;
@@ -520,10 +471,6 @@ kbd {
   color: var(--red);
 }
 
-/* -------------------------------------------------------------------- */
-/* Inbox / action card (prototype's .ac.inbox — the read-only slice)    */
-/* -------------------------------------------------------------------- */
-
 .inbox-card {
   background: var(--s1);
   border: var(--border-width) solid var(--line);
@@ -550,7 +497,6 @@ kbd {
   color: var(--mut);
 }
 
-/* Ticket 10: "pedido de <project> · #<id><ticket>" (prototype's own `.req`) — its own line, below `__top`, now that `__top` carries only the badge and the age. */
 .inbox-card__req {
   font: 500 12px var(--font-mono);
   color: var(--fg);
@@ -581,7 +527,7 @@ kbd {
   word-break: break-word;
 }
 
-/* Content defect #1 (human fix round): a 40-line heredoc command used to fill the whole card. Clamp to 3 lines with an ellipsis; the full text is always one hover away (the box's own `title`), and a SELECTED card lifts the clamp below so the whole thing reads inline, scroll-capped so one truly enormous command can never blow out the card's height. The clamp lives on this inner span, not the padded box: clamped on the box, `overflow: hidden` clips at the padding edge and a cut 4th line shows through the bottom padding. */
+/* The clamp lives on this inner span, not the padded box — clamping the box would let `overflow: hidden` clip at the padding edge and show a cut 4th line through the bottom padding. The full text is one hover away via the box's own `title`; a selected card lifts the clamp so it reads inline, still height-capped so one huge command can't blow out the card. */
 .inbox-card__cmd-text {
   overflow: hidden;
   display: -webkit-box;
@@ -606,10 +552,6 @@ kbd {
   margin-right: 8px;
 }
 
-/* -------------------------------------------------------------------- */
-/* Action buttons (prototype's .acts/.btn) — ticket 09: run/listo/descartar */
-/* -------------------------------------------------------------------- */
-
 .inbox-card__acts {
   display: flex;
   gap: 6px;
@@ -617,7 +559,6 @@ kbd {
   margin-top: 11px;
 }
 
-/* A shared base — same spirit as `.card`/`.status-badge` staying unscoped: every card kind's own action buttons look identical, so there is exactly one rule to change. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -640,14 +581,13 @@ kbd {
   color: var(--mut);
 }
 
-/* The YA CORRIÓ note (prototype's `.ac .note`) — shown instead of a `run` button for an item the Adapter could never actually block (ADR 0001). */
+/* Shown instead of a `run` button for a request the Adapter could never actually block (ADR 0001). */
 .inbox-card__note {
   font: 11px var(--font-mono);
   color: var(--dim);
   margin-top: 8px;
 }
 
-/* The streamed output of a `run` in progress (or just finished) — no prototype equivalent (it never wired a real `run`); dim and monospace, same voice as `.inbox-card__note`, capped so a chatty command never blows out the card. */
 .inbox-card__output {
   margin: 8px 0 0;
   background: var(--bg);
@@ -661,17 +601,12 @@ kbd {
   overflow-y: auto;
 }
 
-/* Review fix: a failed `run`'s own trailer, or a write call Tenaza refused outright — both red (`--red`, the prototype's own error tone), kept visually apart from the command's own (neutral-toned) output above. */
 .inbox-card__output-error {
   margin: 6px 0 0;
   font: 11px var(--font-mono);
   color: var(--red);
   word-break: break-word;
 }
-
-/* -------------------------------------------------------------------- */
-/* Status badge — the Inbox card's own two states (ticket 08's slice)    */
-/* -------------------------------------------------------------------- */
 
 .status-badge {
   font: 600 10px var(--font-mono);
@@ -691,10 +626,6 @@ kbd {
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
 
-/* -------------------------------------------------------------------- */
-/* Live dot (prototype's .live/.live i)                                  */
-/* -------------------------------------------------------------------- */
-
 .live-dot {
   font: 500 11px var(--font-mono);
   color: var(--mut);
@@ -704,7 +635,7 @@ kbd {
   letter-spacing: 0.6px;
 }
 
-/* The prototype's label text is literally uppercase ("EN VIVO"); this app's own copy stays natural-case in the DOM (es-AR, same convention `StatusBadge` already follows) and CSS does the transform — same visual result, accessible text unaffected. */
+/* CSS transforms the text to uppercase rather than the DOM text being uppercase, so assistive tech reads it in natural case. */
 .live-dot__label {
   text-transform: uppercase;
 }
@@ -738,10 +669,6 @@ kbd {
   }
 }
 
-/* -------------------------------------------------------------------- */
-/* Footer keybar (prototype's <footer>) — only the keys ticket 08 wires */
-/* -------------------------------------------------------------------- */
-
 .app__footer {
   height: 34px;
   border-top: var(--border-width) solid var(--line);
@@ -760,19 +687,11 @@ kbd {
   align-items: center;
 }
 
-/* -------------------------------------------------------------------- */
-/* Column header tooltip (ticket 10, prototype's `.colh span[title]`)   */
-/* -------------------------------------------------------------------- */
-
-/* TE NECESITA's own tooltip ("el agente no está esperando…") is the ONLY column title that ever carries a `title` attribute — this rule is dormant on every other column. */
+/* Only TE NECESITA's column title ever carries a `title` attribute — this selector is dormant on every other column. */
 .column__title[title] {
   cursor: help;
   border-bottom: 1px dotted var(--dim);
 }
-
-/* -------------------------------------------------------------------- */
-/* Status badge — the "wait" tone (ticket 10)                           */
-/* -------------------------------------------------------------------- */
 
 .status-badge--wait {
   color: var(--amber);
@@ -780,45 +699,27 @@ kbd {
   background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
 
-/* Ticket 14: the SAME muted tone ".status-badge--inbox" already uses — never the "wait" tone's amber, since Tenaza only OBSERVES a native prompt (never holds or answers it) and the badge's own color must never imply otherwise. */
+/* Never the "wait" tone's amber: Tenaza only observes a native prompt, it never holds or answers one, and the badge color must not imply otherwise. */
 .status-badge--native {
   color: var(--mut);
   border-color: var(--line2);
 }
 
-/* -------------------------------------------------------------------- */
-/* Live request block (ticket 10, prototype's `.live-item`) — docked on a */
-/* Session's own card while its agent is held, live.                    */
-/* -------------------------------------------------------------------- */
-
-/* A left rail while held (amber) — the card's own "TE ESPERA" cue even before the eye reaches the badge itself. */
+/* A left rail (amber) so a held card reads as "TE ESPERA" before the eye reaches the badge. */
 .session-card--waiting {
   border-left: 2px solid var(--amber);
 }
 
-/* Ticket 10's cross-highlight: a selected TE NECESITA card points at the Session that raised it. Teal, same hue `card--selected` already uses for "this is the thing you're acting on" — distinct enough in context (this card is never ALSO the keyboard selection at the same time: the selection sits on the TE NECESITA card instead). */
+/* Highlights the Session a selected TE NECESITA card points at, in the selected border's own teal — safe because this card is never itself the keyboard selection at the same time; that stays on the TE NECESITA card. */
 .session-card--highlighted {
   border-color: var(--teal);
 }
-
-/* -------------------------------------------------------------------- */
-/* Verdict badge — a TERMINÓ card's parked/checkpoint badge, spaced     */
-/* like .native-wait.                                                   */
-/* -------------------------------------------------------------------- */
 
 .verdict-badge {
   margin-top: 6px;
 }
 
-/* -------------------------------------------------------------------- */
-/* Native wait block (ticket 14) — a plain, non-actionable line a card   */
-/* grows while Claude Code's OWN permission/idle prompt is the most      */
-/* recent thing observed for it. Deliberately NO left rail, NO dashed    */
-/* divider the way `.live-request` gets below — this is a much lighter  */
-/* signal (observation, not a hold Tenaza can act on), so it reads as    */
-/* one quiet line rather than a whole block.                            */
-/* -------------------------------------------------------------------- */
-
+/* Deliberately no left rail or divider, unlike a held request — this is a lighter signal, an observation rather than something Tenaza can act on, so it reads as one quiet line rather than a block. */
 .native-wait {
   display: flex;
   align-items: center;
@@ -908,7 +809,6 @@ kbd {
   color: var(--dim);
 }
 
-/* Rechazar/aprobar's own tones over the shared `.btn` base (prototype's `.btn.ok`/`.btn.no`). */
 .btn--ok {
   border-color: color-mix(in srgb, var(--green) 50%, transparent);
   color: var(--green);
@@ -918,11 +818,6 @@ kbd {
   border-color: color-mix(in srgb, var(--red) 45%, transparent);
   color: var(--red);
 }
-
-/* -------------------------------------------------------------------- */
-/* Resolution trace (ticket 10, prototype's `.trace`) — the Session card's */
-/* own memory of its latest request's outcome.                          */
-/* -------------------------------------------------------------------- */
 
 .resolution-trace {
   font: 11px var(--font-mono);
@@ -951,11 +846,6 @@ kbd {
   color: var(--red);
 }
 
-/* -------------------------------------------------------------------- */
-/* Toast stack (ticket 10, prototype's `#toast`/`.toast`) — "resolving a */
-/* request gives visible feedback... never a silent vanish" (spec).     */
-/* -------------------------------------------------------------------- */
-
 .toast-stack {
   position: fixed;
   right: 16px;
@@ -978,15 +868,7 @@ kbd {
   max-width: 360px;
 }
 
-/* -------------------------------------------------------------------- */
-/* Activity panel (ticket 12, prototype's `#feed`/`#log`) — `l` toggles a */
-/* small panel listing the latest board events, derived client-side and  */
-/* never stored (spec "Activity panel (l)"). Same fixed position the     */
-/* toast stack uses (the prototype's own layout, ported literally) — the */
-/* two are mutually rare in practice and a toast's own z-index (9) still  */
-/* wins if they ever do overlap.                                        */
-/* -------------------------------------------------------------------- */
-
+/* Shares the toast stack's fixed position — the two rarely overlap, and the toast's own z-index (9) wins on the rare occasion they do. */
 .activity-panel {
   position: fixed;
   right: 16px;
@@ -999,7 +881,7 @@ kbd {
   z-index: 7;
 }
 
-/* An open panel sits exactly where toasts land, so a toast fired while it is open moves to the panel's left instead of covering its log. `BoardApp` renders the stack right after the panel, and the panel renders nothing while closed. */
+/* Moves a toast fired while the panel is open to the panel's left instead of covering its log — relies on `BoardApp` rendering the stack right after the panel, which renders nothing while closed. */
 .activity-panel + .toast-stack {
   right: calc(16px + 360px + 12px);
 }

@@ -1,27 +1,19 @@
 import { createHash } from "node:crypto";
 
 /**
- * Inbox item identity (decision 03, ADR 0005, ticket 06): an Inbox item is
- * identified by its Session and the LINE its own `action.decided` Event
- * landed on in that Session's log — stable by construction, computed by
- * the denying hook alone (`log.ts`'s `appendEventAtLine`), no lock. This
- * module hashes that pair into one opaque, git-style identity string and
- * shortens it for display — the two concerns ticket 06 actually asks for,
- * kept apart from WHERE the (session, line) pair itself comes from.
+ * An Inbox item is identified by its Session and the line its own
+ * `action.decided` landed on — stable by construction, computed by the
+ * denying hook alone, no lock. This module only hashes that pair and
+ * shortens it for display.
  */
 
-/** A sha1 hex digest is always exactly this long — the full, permanent identity. Anything shorter is a DISPLAY prefix, never stored as a Resolution's own ref. */
+/** A sha1 hex digest is always exactly this long — the full, permanent identity. Anything shorter is a display prefix, never stored as a Resolution's own ref. */
 export const FULL_HASH_LENGTH = 40;
 
-/** The shortest a displayed/typed hash prefix may ever be (decision 03). */
+/** The shortest a displayed/typed hash prefix may ever be. */
 export const MIN_SHORT_HASH_LENGTH = 4;
 
-/**
- * The permanent, full-length identity hash for one Inbox item: a sha1 of
- * its (Session, line) pair. Hashed rather than shown as the raw pair so
- * every item — across every Session — keys off ONE flat hex string the
- * CLI, the notifier and the Live surface all agree on, git-style.
- */
+/** A sha1 of the (Session, line) pair — one flat hex string every surface agrees on, git-style, rather than the raw pair. */
 export function inboxIdentityHash(session: string, line: number): string {
   return createHash("sha1").update(`${session}\n${line}`).digest("hex");
 }
@@ -35,13 +27,9 @@ function commonPrefixLength(a: string, b: string): number {
 }
 
 /**
- * Git-style shortest-unique-prefix length for every hash in `hashes`, same
- * order as given — never shorter than `minLength`, never longer than the
- * hash itself. Two hashes that collide outright (byte-identical — see
- * `log.ts`'s own doc on the one known, accepted edge case this can arise
- * from) both come back at full length, since no prefix could ever tell
- * them apart; `resolvePrefix` below reports that case as ambiguous rather
- * than ever guessing one.
+ * Git-style shortest-unique-prefix length for every hash in `hashes`. Two
+ * byte-identical hashes both come back at full length, since no prefix
+ * could ever tell them apart.
  */
 export function shortestUniqueLengths(
   hashes: readonly string[],
@@ -98,14 +86,10 @@ export type PrefixMatch =
   | { kind: "not-found" };
 
 /**
- * Resolve a human-typed hash or prefix against the full population of
- * known identity hashes (decision 03: "the hash, or any unique prefix").
- * Case-insensitive (hex). Never guesses: more than one match is reported
- * as `ambiguous`, carrying every matching index so the caller can list
- * them, exactly as the decision demands — "refused with both candidates
- * listed." This is a pure matcher with no length floor of its own; the
- * CLI layer enforces `MIN_SHORT_HASH_LENGTH` on raw user input before
- * ever reaching here.
+ * Resolves a human-typed hash or prefix against the full population.
+ * Never guesses: more than one match comes back `ambiguous`, carrying
+ * every matching index. No length floor of its own — the CLI enforces
+ * `MIN_SHORT_HASH_LENGTH` before reaching here.
  */
 export function resolvePrefix(prefix: string, hashes: readonly string[]): PrefixMatch {
   const needle = prefix.toLowerCase();

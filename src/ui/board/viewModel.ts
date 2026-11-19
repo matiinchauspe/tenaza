@@ -193,7 +193,7 @@ export interface BoardViewModel {
   orderedIds: string[];
 }
 
-/** Kept as its own literal rather than imported from `sessions.ts`, which would pull node-builtin-using neighbors into the browser bundle (ADR 0001). */
+/** Kept as its own literal rather than imported from `sessions.ts`, which would pull node-builtin-using neighbors into the browser bundle. */
 export const NO_MEASURE_TEXT = "sin datos";
 
 function contextDisplayFor(session: BoardSession, contextThresholdTokens: number): ContextDisplay {

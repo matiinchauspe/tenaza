@@ -1,18 +1,7 @@
 /**
- * Ticket 12 (the human's approved logo, "pinch-glow"): the board header's
- * own mark, inline SVG — never an `<img>` pointing at a bundled asset
- * path, so it sizes and sits beside the `TENAZA` wordmark like any other
- * inline element, with no extra request. Dark version only: the Live
- * surface has no light theme at all (`tokens.css`'s own doc comment,
- * decision 04) — "otherwise dark" (the human's own instruction) is the
- * only branch this board ever takes.
- *
- * Source: `.yun/prototypes/tenaza-logo/variants/pinch-glow-dark.svg`,
- * used exactly as given — same viewBox, same shapes, same colors, same
- * gradient id (`tz-glow-dark`). The only translation is XML attribute
- * names to their JSX/DOM equivalents (`stop-color` → `stopColor`,
- * `stroke-width` → `strokeWidth`), which changes nothing about how it
- * renders.
+ * Inline SVG, never an `<img>` pointing at a bundled asset path, so it sizes and sits beside
+ * the `TENAZA` wordmark like any other inline element, with no extra request. Dark version
+ * only: the Live surface has no light theme at all.
  */
 export function TenazaMark({ size = 16 }: { size?: number }) {
   return (

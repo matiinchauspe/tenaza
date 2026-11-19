@@ -1,26 +1,23 @@
 import type { ReactNode } from "react";
 
-/** The four column identities a dot/title color key off (prototype's own `c-<cls>`/`b-<cls>` convention) — kept apart from `StatusBadge`'s own tone, which a column header no longer renders through (the prototype shows an inline dot, never an uppercase badge, for a column heading). */
+/** Kept apart from `StatusBadge`'s own tone — a column header renders a dot, never an uppercase badge. */
 export type ColumnTone = "te-necesita" | "corriendo" | "trabada" | "termino";
 
 export interface ColumnProps {
   title: string;
   count: number;
   tone: ColumnTone;
-  /** Shown instead of the list when `count` is 0 (prototype's own `.empty` placeholder) — es-AR copy, the column's call. */
+  /** Shown instead of the list when `count` is 0 — es-AR copy, the caller's call. */
   emptyMessage: string;
-  /** Ticket 10: TE NECESITA's own header tooltip ("el agente no está esperando…", `viewModel.ts`'s `TE_NECESITA_TOOLTIP`) — `undefined` for every other column, which carries none. */
+  /** `undefined` for every other column, which carries none. */
   tooltip?: string;
   children: ReactNode;
 }
 
 /**
- * One board column (ticket 08) — a labelled region landmark with its own
- * heading, holding a `listbox` of selectable cards. Pure presentational:
- * no fetching, no state — the container decides which cards belong here.
- * The dot + colored title (prototype, decision 04's human fix round) ARE
- * the column's own status signal — color is never the ONLY one, since the
- * title text itself always names the column ("CORRIENDO", "TRABADA", …).
+ * A labelled region landmark with its own heading, holding a `listbox` of selectable cards.
+ * Pure presentational: the container decides which cards belong here. Color is never the
+ * only signal — the title text itself always names the column.
  */
 export function Column({ title, count, tone, emptyMessage, tooltip, children }: ColumnProps) {
   return (

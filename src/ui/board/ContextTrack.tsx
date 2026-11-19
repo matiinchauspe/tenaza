@@ -5,19 +5,12 @@ export interface ContextTrackProps {
 }
 
 /**
- * The context track (ticket 08, q9/AC3/AC4; restyled per the approved
- * prototype's human fix round): a thin continuous 3px bar — not the old
- * discrete 15-cell run — with a 1px amber mark at the Policy's threshold
- * and the overflow past it in red. The percentages below are derived from
- * `computeContextTrack`'s own CELL counts (`contextbar.ts`), never a
- * second, independent "tokens / max" formula: `cells` is always the SAME
- * `BAR_CELLS` the CLI's ANSI bar divides by, so a Session can never show
- * two different fills in two different places, only two different
- * renderers of the identical fraction.
+ * Percentages are derived from `computeContextTrack`'s own cell counts, never a second,
+ * independent "tokens / max" formula — the same `BAR_CELLS` the CLI's ANSI bar divides by, so
+ * a Session never shows two different fills, only two renderers of the same fraction.
  *
- * `role="img"` + `aria-label` carry the whole thing (fill, mark position,
- * flagged) as text for a screen reader; the visible `label` text (`243k` /
- * `⚑243k`) means color is never the only signal here either.
+ * `role="img"` + `aria-label` carry the whole thing as text for a screen reader; the visible
+ * `label` text means color is never the only signal here either.
  */
 export function ContextTrack({ display }: ContextTrackProps) {
   if (display.kind === "unavailable") {

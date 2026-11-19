@@ -24,23 +24,22 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * Has Tenaza just crossed INTO this grave fault, rather than already being
- * in it (orchestrator review, ticket 02)? Reads `state/health.json` as it
- * stood BEFORE this call's own `recordDegraded` — absent, healthy, a
- * non-grave fault, or a DIFFERENT grave message (a distinct fault earns its
- * own alert even while another grave one never cleared) all count as a
- * transition; the SAME grave message repeating does not. Without this, a
- * grave Policy fault — which makes EVERY PreToolUse call grave — would ring
- * once per Bash/MCP call across every parallel agent, not once per fault
- * (the spec's own "a macOS notification... for grave faults", singular per
- * fault, not per call).
+ * Has Tenaza just crossed into this grave fault, rather than already
+ * being in it? Reads `state/health.json` as it stood before this call's
+ * own `recordDegraded` — absent, healthy, a non-grave fault, or a
+ * different grave message (a new fault opening while an old one is still
+ * open) all count as a transition; the same grave message repeating does
+ * not. Without this, a grave Policy fault — which makes every PreToolUse
+ * call grave — would ring once per Bash/MCP call across every parallel
+ * agent, rather than once per fault.
  *
- * Concurrency: this read and the `recordDegraded` write right after it are
- * two separate, non-atomic steps, and `tenaza hook claude` runs as a fresh
- * process per call — two hooks racing on the FIRST grave call can both read
- * "healthy" before either writes, so both notify. Accepted, not fixed with
- * a lock: it costs one duplicate banner on the rare race that opens a
- * grave state, never a banner per ordinary call once it's already open.
+ * Concurrency: this read and the `recordDegraded` write right after it
+ * are two separate, non-atomic steps, and `tenaza hook claude` runs as a
+ * fresh process per call — two hooks racing on the first grave call can
+ * both read "healthy" before either writes, so both notify. Accepted
+ * rather than fixed with a lock: it costs one duplicate banner on the
+ * rare race that opens a grave state, never a banner per ordinary call
+ * once it's already open.
  */
 function enteredGraveState(home: string, degraded: { message: string; grave: boolean }): boolean {
   if (!degraded.grave) return false;
@@ -49,17 +48,15 @@ function enteredGraveState(home: string, degraded: { message: string; grave: boo
 }
 
 /**
- * `hook claude` (ADR 0007, tickets 01-02): the whole dispatch runs through
- * `runClaudeHookSafely`, which never throws — on any fault, known or not,
- * it hands back a non-blocking answer plus a `systemMessage` naming it.
- * This entry point's own job is just the surrounding bookkeeping: read
- * stdin, print whatever comes back, keep `state/health.json` in step
- * (written on a degraded answer, cleared by the next healthy one), and —
- * the ONE call site, so it covers a grave fault however it was noticed
- * (the SessionStart self-check or a PreToolUse call hitting the same
- * Policy state) — fire the macOS notification on the TRANSITION into a
- * grave state only, never on every call it stays grave through (see
- * `enteredGraveState`'s own doc).
+ * `hook claude`: the whole dispatch runs through `runClaudeHookSafely`,
+ * which never throws — on any fault, known or not, it hands back a
+ * non-blocking answer plus a `systemMessage` naming it. This entry
+ * point's own job is just the surrounding bookkeeping: read stdin, print
+ * whatever comes back, keep `state/health.json` in step, and — the one
+ * call site, so it covers a grave fault however it was noticed (the
+ * SessionStart self-check or a PreToolUse call hitting the same Policy
+ * state) — fire the macOS notification on the transition into a grave
+ * state only, never on every call it stays grave through.
  */
 async function runHookClaude(): Promise<number> {
   const home = tenazaHome();
@@ -81,12 +78,13 @@ async function runHookClaude(): Promise<number> {
 }
 
 /**
- * `hook fake` — the test Adapter's own entry point (ADR 0001, ticket 06): a
- * repo-internal tool for the black-box test seam, never wired into a real
- * agent runtime. Naming "claude" and "fake" here, in the CLI's own command
- * dispatch, is unavoidable wiring (routing one argument to one Adapter
- * module) — never the CORE branching ADR 0001 forbids, which lives in
- * `decide.ts`/`sessions.ts` and knows Capabilities only, never this string.
+ * `hook fake` — the test Adapter's own entry point: a repo-internal tool
+ * for the black-box test seam, never wired into a real agent runtime.
+ * Naming "claude" and "fake" here, in the CLI's own command dispatch, is
+ * unavoidable wiring (routing one argument to one Adapter module) — never
+ * the core branching the architecture forbids, which lives in
+ * `decide.ts`/`sessions.ts` and knows Capabilities only, never this
+ * string.
  */
 async function runHookFake(): Promise<number> {
   const raw = await readStdin();
@@ -104,13 +102,12 @@ function runStatus(): number {
 }
 
 /**
- * `tenaza statusline` (ticket 07, q19/q20): Claude Code pipes its own
- * statusline JSON on stdin (model, cost, workspace, …) — Tenaza's line comes
- * entirely from its OWN derived state (no daemon, ADR 0002), never from that
- * payload, so stdin is drained and ignored outright rather than parsed. That
- * also makes AC3 ("accepts the statusline JSON on stdin without failing, and
- * ignores fields it does not use") hold even for malformed or non-JSON
- * input: there is nothing here that could ever throw on it.
+ * `tenaza statusline`: Claude Code pipes its own statusline JSON on stdin
+ * (model, cost, workspace, …) — Tenaza's line comes entirely from its own
+ * derived state, never from that payload, so stdin is drained and ignored
+ * outright rather than parsed. That also means malformed or non-JSON
+ * input never fails this command: there is nothing here that could ever
+ * throw on it.
  */
 async function runStatusline(): Promise<number> {
   await readStdin();
@@ -121,8 +118,7 @@ async function runStatusline(): Promise<number> {
 /**
  * Parse an inbox id argument: a hex string (the hash `status`/the
  * notification showed, or any unique prefix of it), at least
- * `MIN_SHORT_HASH_LENGTH` characters long (decision 03, ADR 0005, ticket
- * 06) — never a bare position any more. Case-insensitive, normalized to
+ * `MIN_SHORT_HASH_LENGTH` characters long. Case-insensitive, normalized to
  * lowercase so `resolvePrefix` (which stores and compares hashes in
  * lowercase hex) matches regardless of how the human typed it.
  */
@@ -146,7 +142,7 @@ function reportUnknown(prefix: string): number {
   return 1;
 }
 
-/** "refused with both candidates listed" (decision 03) — never guesses between them. */
+/** Lists every candidate rather than guessing between them. */
 function reportAmbiguous(prefix: string, candidates: string[]): number {
   process.stderr.write(
     `tenaza: "${prefix}" matches more than one inbox item — be more specific:\n` +
@@ -159,13 +155,12 @@ type ResolvedId = { id: string } | { error: number };
 
 /**
  * Resolve whatever the human typed — the full hash, or any unique prefix
- * of it, at least `MIN_SHORT_HASH_LENGTH` long — to exactly ONE full
- * identity hash, against the FULL history (resolved or not): a human may
+ * of it, at least `MIN_SHORT_HASH_LENGTH` long — to exactly one full
+ * identity hash, against the full history (resolved or not): a human may
  * still type an already-closed item's hash (e.g. running `done` twice),
- * which must report "already closed," never "unknown" (decision 03).
- * Never guesses: `run`/`done`/`dismiss` all funnel through this one
- * resolver so the three commands can never disagree about what a prefix
- * means.
+ * which must report "already closed," never "unknown". `run`/`done`/
+ * `dismiss` all funnel through this one resolver so the three commands
+ * can never disagree about what a prefix means.
  */
 function resolveInboxIdArg(home: string, raw: string | undefined): ResolvedId {
   const prefix = parseInboxIdArg(raw);
@@ -186,7 +181,7 @@ function resolveInboxIdArg(home: string, raw: string | undefined): ResolvedId {
   return { id };
 }
 
-/** The short, human-facing form of a FULL identity hash we already resolved — falls back to the full hash itself if it's somehow absent from the index (should not happen; defensive only). */
+/** The short, human-facing form of a full identity hash we already resolved — falls back to the full hash itself if it's somehow absent from the index (should not happen; defensive only). */
 function displayId(home: string, id: string): string {
   return shortIdIndex(home).get(id) ?? id;
 }
@@ -230,9 +225,8 @@ async function runRun(idArg: string | undefined): Promise<number> {
       return 0;
     }
     if (outcome.kind === "unblockable") {
-      // ADR 0001, ticket 06: this Action already ran once, unblocked — `run`
-      // would execute it a SECOND time, so it refuses outright. Human-facing
-      // CLI copy, es-AR, same as `status`'s own Inbox marker for this case.
+      // This Action already ran once, unblocked — running it again would
+      // execute it a second time, so it refuses outright.
       process.stderr.write(
         `tenaza: inbox ${shown} ya corrió y no se pudo bloquear — no se puede volver a correr. ` +
           `Cerralo con \`tenaza done ${shown}\` o \`tenaza dismiss ${shown}\`.\n`,
@@ -240,8 +234,8 @@ async function runRun(idArg: string | undefined): Promise<number> {
       return 1;
     }
     if (outcome.kind === "not-runnable") {
-      // Decision 07, ticket 04: an `mcp` item has no stored shell command at
-      // all. Human-facing CLI copy, es-AR, same tone as the unblockable case.
+      // An `mcp` item has no stored shell command at all, so there's
+      // nothing to run.
       process.stderr.write(
         `tenaza: inbox ${shown} es una llamada MCP y no tiene comando para correr. ` +
           `Cerralo con \`tenaza done ${shown}\` o \`tenaza dismiss ${shown}\`.\n`,
@@ -249,9 +243,8 @@ async function runRun(idArg: string | undefined): Promise<number> {
       return 1;
     }
     if (outcome.kind === "no-cwd") {
-      // Ticket 06: the Session never started (no cwd to run in at all) —
-      // refuse outright rather than silently run somewhere the human never
-      // asked for (`resolve.ts`'s own doc comment).
+      // The Session never started, so there's no cwd to run in — refuse
+      // rather than silently run somewhere the human never asked for.
       process.stderr.write(
         `tenaza: inbox ${shown} no tiene cwd conocido para su Session — no se corrió nada. ` +
           `Corré el comando a mano: ${outcome.command}\n`,
@@ -259,8 +252,8 @@ async function runRun(idArg: string | undefined): Promise<number> {
       return 1;
     }
     if (outcome.kind === "cwd-missing") {
-      // Ticket 06: the Session's own directory no longer exists (e.g. a
-      // worktree already removed) — same refusal, different reason.
+      // The Session's own directory no longer exists (e.g. a worktree
+      // already removed).
       process.stderr.write(
         `tenaza: inbox ${shown}: el directorio de su Session ya no existe (${outcome.cwd}) — ` +
           `no se corrió nada. Corré el comando a mano: ${outcome.command}\n`,
@@ -278,10 +271,10 @@ async function runRun(idArg: string | undefined): Promise<number> {
 }
 
 /**
- * `tenaza init` (ticket 09, q16): prepare a machine. Prints exactly what it
- * did (or deliberately didn't) to each of the two files it touches — the
- * Policy and Claude Code's own settings — so a human re-running it is never
- * left guessing why nothing changed.
+ * `tenaza init`: prepare a machine. Prints exactly what it did (or
+ * deliberately didn't) to each of the two files it touches — the Policy
+ * and Claude Code's own settings — so a human re-running it is never left
+ * guessing why nothing changed.
  */
 function runInitCommand(): number {
   const result = runInit();
@@ -314,23 +307,19 @@ function runInitCommand(): number {
 }
 
 /**
- * `tenaza open` (ticket 12, decision 05's own "entry from a session"): the
- * CLI half of the plugin's `/tenaza` command — its own markdown command
- * file is a thin wrapper that just runs this and relays its output
- * verbatim, so the actual logic stays testable in bun (ticket's own
- * preference) rather than living in the markdown prompt.
+ * `tenaza open`: the CLI half of the plugin's `/tenaza` command — its own
+ * markdown command file is a thin wrapper that just runs this and relays
+ * its output verbatim, so the actual logic stays testable in bun rather
+ * than living in the markdown prompt.
  *
- * Reuses the EXACT SAME heartbeat-freshness rule the live-answering hold
+ * Reuses the same heartbeat-freshness rule the live-answering hold
  * already reads (`isHeartbeatFresh`/`DEFAULT_HEARTBEAT_STALE_MS`,
- * `daemonlink.ts`) — never a second threshold for "is the Daemon up"
- * (review lesson: don't invent a second one). Daemon up → opens the view
- * with its token URL, same `buildDaemonUrl`/`openBrowser` `tenaza ui`
- * itself uses when it hands off to an already-running instance. Down →
- * starts nothing at all (ADR 0007's own "never on its own initiative")
- * and prints how to start it, exactly as the spec's own wording: `brew
- * services start tenaza`, or `tenaza ui` by hand. Always exits 0 — a
- * Daemon that happens to be down is an ordinary, expected outcome here,
- * never a CLI error.
+ * `daemonlink.ts`) rather than a second threshold for "is the Daemon up".
+ * Daemon up → opens the view with its token URL, the same
+ * `buildDaemonUrl`/`openBrowser` `tenaza ui` itself uses when it hands
+ * off to an already-running instance. Down → starts nothing at all and
+ * prints how to start it by hand. Always exits 0 — a Daemon that happens
+ * to be down is an ordinary, expected outcome here, never a CLI error.
  */
 async function runOpen(): Promise<number> {
   const home = tenazaHome();
@@ -351,18 +340,16 @@ async function runOpen(): Promise<number> {
 }
 
 /**
- * `tenaza ui --port <n> [--no-open]` (ticket 07's `--port`; `--no-open`
- * added ticket 12). An invalid or dangling `--port` is a clear argument
- * error, never a silent fallback to the default.
+ * `tenaza ui --port <n> [--no-open]`. An invalid or dangling `--port` is a
+ * clear argument error, never a silent fallback to the default.
  *
  * `--no-open` is what the Homebrew `service` block's own `run` command
- * passes: a LaunchAgent that pops a browser window on every
- * (re)start — a machine reboot, a KeepAlive restart after a crash, not
- * just the one `brew services start tenaza` the human actually typed —
- * would be Tenaza acting "on its own initiative" the same way an
- * auto-started Daemon would (ADR 0007, spec's own "nothing starts on its
- * own"). A human running `tenaza ui` by hand never passes this, so the
- * browser still opens for them, unchanged.
+ * passes: a LaunchAgent that pops a browser window on every (re)start — a
+ * machine reboot, a KeepAlive restart after a crash, not just the one
+ * `brew services start tenaza` the human actually typed — would be Tenaza
+ * acting on its own initiative the same way an auto-started Daemon would.
+ * A human running `tenaza ui` by hand never passes this, so the browser
+ * still opens for them, unchanged.
  */
 function parseUiArgs(args: string[]): { port?: number; open: boolean } | { error: string } {
   let port: number | undefined;
@@ -387,10 +374,10 @@ function parseUiArgs(args: string[]): { port?: number; open: boolean } | { error
 async function main(argv: string[]): Promise<number> {
   const [command, subcommand] = argv;
 
-  // `tenaza --version` (ticket 05): prints the SAME single-source constant
-  // `health.ts`'s self-check already reads — never a second, independently
-  // bumped copy (e.g. `package.json`'s own version, which a compiled
-  // `bun build --compile` binary cannot read at runtime anyway).
+  // Prints the same single-source constant `health.ts`'s self-check
+  // already reads — never a second, independently bumped copy (e.g.
+  // `package.json`'s own version, which a compiled `bun build --compile`
+  // binary cannot read at runtime anyway).
   if (command === "--version") {
     process.stdout.write(`${TENAZA_VERSION}\n`);
     return 0;
@@ -442,9 +429,9 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "label") {
-    // The real work happens in the PreToolUse hook, which alone knows this
-    // call's agent_id/session_id (ADR 0003) — this subprocess has neither,
-    // so it does nothing with its args and only ever exits 0, whatever they
+    // The real work happens in the PreToolUse hook, which alone knows
+    // this call's agent_id/session_id — this subprocess has neither, so
+    // it does nothing with its args and only ever exits 0, whatever they
     // are. Never fails: a confusing error here would be the opposite of
     // the point of announcing this way.
     return 0;

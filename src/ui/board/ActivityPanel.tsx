@@ -5,7 +5,7 @@ export interface ActivityPanelProps {
   entries: readonly ActivityFeedEntry[];
 }
 
-/** A plain wall-clock reading of `ts` (same convention the BC2 prototype's own `#log` used: "when I observed this," never a relative "hace Ns" — the panel already orders entries newest-first, so an absolute time reads better here). An unparsable `ts` (should never happen — every entry builds its own) degrades to an em dash rather than "Invalid Date." */
+/** Absolute, never relative "hace Ns": the panel already orders entries newest-first, so an absolute time reads better here. */
 function formatClock(ts: string): string {
   const date = new Date(ts);
   return Number.isNaN(date.getTime())
@@ -14,17 +14,9 @@ function formatClock(ts: string): string {
 }
 
 /**
- * Ticket 12 (spec "Activity panel (l)"): a small panel, bottom-right,
- * closed by default — `l` (or a selected-session click elsewhere) never
- * mounts it; `BoardApp` owns `open` entirely. Ported from the approved
- * BC2 prototype's own `#feed`/`#log`
- * (`.yun/prototypes/tenaza-live-surface/PROTOTYPE-live-surface-BC2.ts:244-270,412`)
- * into this project's tokens.css style — same position, same density,
- * BEM selectors instead of the prototype's one-letter classes, same as
- * every other ported block in this file (`tokens.css`'s own doc comment).
- * Pure presentational: `entries` is already newest-first and already
- * capped (`useActivityFeed.ts`'s own `ACTIVITY_FEED_CAPACITY`) — this
- * component renders exactly what it's handed, nothing more.
+ * `BoardApp` owns `open` entirely — nothing here ever toggles it. Pure presentational:
+ * `entries` arrives already newest-first and already capped, so this component renders
+ * exactly what it's handed.
  */
 export function ActivityPanel({ open, entries }: ActivityPanelProps) {
   if (!open) return null;

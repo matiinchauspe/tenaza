@@ -5,16 +5,14 @@ import { appendEvent } from "../log";
 import { isShellRule } from "../policy";
 
 /**
- * A test Adapter (ADR 0001, ticket 06): it emits the same Events every real
- * Adapter does, but DELIBERATELY declares fewer Capabilities than the Claude
- * Adapter does — no `measure`, no `block` — so tests prove the core degrades
- * by Capability, never by runtime name. It is never wired into a real agent
- * runtime; it exists only behind `tenaza hook fake`, for the test seam
- * itself.
+ * A test Adapter: emits the same Events every real Adapter does, but
+ * deliberately declares fewer Capabilities than the Claude Adapter — no
+ * `measure`, no `block` — so tests prove the core degrades by Capability,
+ * never by runtime name. Never wired into a real agent runtime.
  */
 export const FAKE_CAPABILITIES: Capability[] = ["observe"];
 
-/** A new Session (optionally a subagent of `parent`), mirroring a real runtime's start hook. */
+/** Mirrors a real runtime's start hook. */
 export interface FakeStartPayload {
   kind: "start";
   session: string;
@@ -29,7 +27,6 @@ export interface FakeActionPayload {
   command: string;
 }
 
-/** A Session ending. */
 export interface FakeEndPayload {
   kind: "end";
   session: string;
@@ -48,10 +45,10 @@ function normalizeFakeAction(payload: FakeActionPayload): Action {
 }
 
 /**
- * Decide one fake Action against the Policy, declaring this Adapter's own
- * (narrower) Capabilities. `decideAction` is the one place that enforces
- * ADR 0001's degradation — this Adapter never checks `block` itself, it
- * only reports whatever the core already decided, honestly.
+ * Decides one fake Action against the Policy, declaring this Adapter's own
+ * narrower Capabilities. `decideAction` is the one place that enforces the
+ * degradation — this Adapter never checks `block` itself, it only reports
+ * whatever the core already decided.
  */
 async function handleFakeAction(
   home: string,

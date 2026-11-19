@@ -8,41 +8,29 @@ import { DEFAULT_DAEMON_PORT, notifyRecorderPath, notifySoundStatePath, tenazaHo
 import { buildSessionIndex, categoryWord, deriveProject, roleOf, type SessionNode } from "./sessions";
 import { describeAction, UNBLOCKED_MARKER } from "./status";
 
-/** Ticket 10: "te espera tu respuesta en la vista" — the 🟡 wording for a FRESHLY BORN LIVE item, distinct from both the enforced-deny ("tenaza run <id>") and unblocked ("ya corrió") wordings: nothing has run yet, and nothing can be `tenaza run` either — the agent itself is paused, waiting on the Live surface. */
+/** Wording for a freshly-born live item — nothing has run yet, and nothing can be `tenaza run` either, since the agent itself is paused on the Live surface. */
 const LIVE_HOLD_MARKER = "te espera tu respuesta en la vista";
 
-/**
- * The single notifier port (ticket 08): everything upstream builds one of
- * these, pure, and `sendNotification` is the only place that decides HOW it
- * reaches the human. Nothing upstream of this file knows macOS exists.
- */
+/** The single notifier port: `sendNotification` is the only place that decides how a Notification reaches the human. */
 export interface Notification {
-  /** A stable, deterministic key for this notification's identity — `inbox-<id>` or `threshold-<session>` (never random, never time-based): see `sendNotification`'s own doc for what this does and does not buy. */
+  /** A stable, deterministic key for this notification's identity — `inbox-<id>` or `threshold-<session>` (never random, never time-based). */
   tag: string;
   title: string;
   subtitle: string;
   message: string;
-  /** Ticket 10: "Clicking the 🟡 notification opens the view" — the Daemon URL `sendMacNotification` hands to `terminal-notifier -open` when it's on PATH. `undefined` when no Daemon has ever written a token (nothing to open, or the plain `osascript` sender anyway, which cannot act on a click regardless). Only `buildInboxOpenedNotification` ever sets this — the threshold/grave-fault notifications stay exactly as they were. */
+  /** The Daemon URL `sendMacNotification` hands to `terminal-notifier -open`, so clicking opens the view. `undefined` when no Daemon has ever written a token. Only `buildInboxOpenedNotification` sets this. */
   openUrl?: string;
 }
 
-/** What the recorder keeps: the Notification plus whether THIS send actually played a sound. */
+/** What the recorder keeps: the Notification plus whether this send actually played a sound. */
 export interface RecordedNotification extends Notification {
   sound: boolean;
 }
 
-/**
- * "A burst window (one sound per ~2s)" — the spec's own anti-spam rule.
- * Never blocks the notification itself (ticket 06's "never silently drop"
- * ethos applies here too): every matching Event still notifies, this only
- * throttles the SOUND across a burst of them.
- */
+/** A burst window (one sound per ~2s) — never blocks the notification itself, only throttles the sound across a burst. */
 export const NOTIFY_BURST_WINDOW_MS = 2000;
 
-/**
- * Pure: should THIS send play a sound, given when one last did? No prior
- * sound (a fresh `TENAZA_HOME`, or nothing sent yet) always plays one.
- */
+/** Pure: should this send play a sound, given when one last did? No prior sound always plays one. */
 export function shouldPlaySound(
   lastSoundAt: Date | undefined,
   now: Date,
@@ -53,12 +41,10 @@ export function shouldPlaySound(
 }
 
 /**
- * Pure: has `sample` just crossed `thresholdTokens` for the FIRST time —
- * i.e. every sample this Session had before now was below it, and this one
- * is not? `previousMax` is the Session's own highest `usage.sampled` value
- * before this one (never the latest alone — see `maxUsageSample`'s own doc
- * for why). `undefined` means "never sampled before," which can only ever
- * be a crossing, not a repeat.
+ * Pure: has `sample` just crossed `thresholdTokens` for the first time?
+ * `previousMax` is the Session's highest `usage.sampled` value before
+ * this one, never the latest alone — `undefined` can only ever be a
+ * crossing.
  */
 export function shouldNotifyThresholdCrossing(
   previousMax: number | undefined,
@@ -70,13 +56,10 @@ export function shouldNotifyThresholdCrossing(
 }
 
 /**
- * The highest `usage.sampled` value a Session's log has ever carried — NOT
- * the latest one (which `sessions.ts`'s `SessionNode.contextTokens` already
- * tracks, "last write wins," for the context bar). Crossing detection needs
- * the running MAX instead: context can in principle read lower on a later
- * sample than an earlier one (e.g. after a compaction), and "once per
- * Session" must stay true even then — a Session that already crossed must
- * never notify again just because one later sample happened to read lower.
+ * The highest `usage.sampled` value a Session's log has ever carried, not
+ * the latest — context can read lower on a later sample (after a
+ * compaction, say), and "once per Session" must hold even then, so a
+ * Session that already crossed must never notify again on a lower one.
  */
 export function maxUsageSample(events: Event[]): number | undefined {
   let max: number | undefined;
@@ -88,26 +71,14 @@ export function maxUsageSample(events: Event[]): number | undefined {
 }
 
 /**
- * 🟡 — a new Inbox item (ticket 08, q19's own worked example — ids updated
- * for ticket 06's short hashes):
- * `🟡 Tenaza · te espera · inbox 3a7f` / `reservee / RES-131 / sesión b71` /
- * `Bash: gh pr merge 58 --merge · tenaza run 3a7f`. An `mcp` Action (ticket
- * 04) describes the same way `status`'s Inbox line does (`describeAction`):
- * the tool's own name plus a short argument summary, never blank. An
- * UNBLOCKED item (ticket 06, ADR 0001) still notifies — the human still
- * needs to know it happened — but the message never says `tenaza run <id>`,
- * which would be wrong: `run` REFUSES on an unblocked item (`resolve.ts`).
- * It gets the SAME es-AR marker `status`'s own Inbox line already uses for
- * it instead, so the one piece of copy a human reads twice (notification,
- * then `status`) never disagrees with itself.
+ * 🟡 — a new Inbox item. An unblocked item still notifies, since the
+ * human still needs to know it happened, but never says
+ * `tenaza run <id>` — `run` refuses on an unblocked item.
  *
- * `shortId` (decision 03, ADR 0005, ticket 06) is the item's DISPLAY hash —
- * the shortest unique prefix of `row.id` at the moment this fired — shown
- * in the title and the `tenaza run` hint, exactly what a human would type
- * back. `tag` stays keyed on `row.id`, the item's FULL, permanent identity:
- * a display hash is only ever the shortest prefix UNIQUE RIGHT NOW, so it
- * could in principle lengthen as later items open — the full hash is what
- * this notification's own bookkeeping key must never depend on shifting.
+ * `shortId` is `row.id`'s shortest unique prefix at the moment this
+ * fired, shown in the hint a human would type back. `tag` stays keyed on
+ * the full hash instead, since a display prefix could lengthen later as
+ * new items open — this key must never depend on that shifting.
  */
 export function buildInboxOpenedNotification(
   row: InboxRow,
@@ -133,13 +104,9 @@ export function buildInboxOpenedNotification(
 }
 
 /**
- * 🔴 — a Session crossing the Flag threshold, once per Session (q19):
- * `🔴 Tenaza · pasó 200k` / project / ticket / Session / tokens. The
- * threshold in the TITLE reflects the Policy's ACTUAL `thresholdTokens`
- * (ticket 07's own rule for the statusline's `⚑` suffix, applied here too)
- * rather than a hardcoded "200k" — the spec's worked example happens to use
- * the default, but a custom threshold must never leave this notification
- * disagreeing with the one that actually fired it.
+ * 🔴 — a Session crossing the Flag threshold. The threshold in the title
+ * reflects the Policy's actual `thresholdTokens`, never a hardcoded
+ * "200k" — it must never disagree with the one that actually fired it.
  */
 export function buildThresholdCrossedNotification(context: {
   project: string;
@@ -176,15 +143,12 @@ export function buildParkedNotification(context: {
 }
 
 /**
- * 🔴 — Tenaza itself is gravely degraded (ADR 0007, ticket 02): "binary
- * missing" can never reach this call site at all (nothing Tenaza owns runs
- * when its own binary isn't on PATH — that case prints its guard message
- * straight from `hooks.json`'s shell form, no notifier involved), so in
- * practice this fires for the OTHER grave case decision 01 names: no
- * last-known-good Policy ever, where every Rule is off. `message` carries
- * whatever `degraded.message` already says (English, same as every other
- * systemMessage) — only the title/subtitle chrome around it is es-AR, per
- * the project's own human-facing-copy split.
+ * 🔴 — Tenaza itself is gravely degraded. "binary missing" can't reach
+ * this call site — that case prints its guard message straight from
+ * `hooks.json`, no notifier involved — so in practice this fires for the
+ * other grave case: no last-known-good Policy ever, every Rule off.
+ * `message` carries `degraded.message` in English; only the
+ * title/subtitle chrome is es-AR.
  */
 export function buildGraveFaultNotification(message: string): Notification {
   return {
@@ -196,18 +160,15 @@ export function buildGraveFaultNotification(message: string): Notification {
 }
 
 /**
- * Fire 🔴 for a grave fault — the ONE call site (`cli.ts`'s `runHookClaude`,
- * right where `degraded.grave` is already decided, so it covers a grave
- * fault however it was noticed: the SessionStart self-check or a PreToolUse
- * call hitting the same Policy state). Swallows its own lookups failing
- * too, not just `sendNotification`'s own guard — same shape as
- * `notifyNewInboxItem`/`notifyThresholdCrossed` above.
+ * Fire 🔴 for a grave fault — the one call site, right where
+ * `degraded.grave` is already decided, so it covers a grave fault however
+ * it was noticed. Swallows its own lookups failing too, not just
+ * `sendNotification`'s own guard.
  */
 export function notifyGraveFault(home: string, message: string, now: Date = new Date()): void {
   try {
     sendNotification(home, buildGraveFaultNotification(message), now);
   } catch {
-    // See `sendNotification`'s own doc.
   }
 }
 
@@ -230,7 +191,7 @@ function appendRecorder(home: string, recorded: RecordedNotification): void {
   appendFileSync(file, `${JSON.stringify(recorded)}\n`, "utf8");
 }
 
-/** Read back every notification the recorder seam captured, in order — the test oracle for "what would have been sent." */
+/** Read back every notification the recorder seam captured, in order — the test oracle for what would have been sent. */
 export function readNotificationRecorder(home: string = tenazaHome()): RecordedNotification[] {
   const file = notifyRecorderPath(home);
   if (!existsSync(file)) return [];
@@ -244,21 +205,17 @@ function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/** The argv `sendMacNotification` would actually spawn — split out as a PURE function (ticket 10) so the terminal-notifier-vs-osascript choice is unit-testable without ever touching a real process or PATH. */
+/** The argv `sendMacNotification` would actually spawn — split out as a pure function so the terminal-notifier-vs-osascript choice is unit-testable without touching a real process or PATH. */
 export interface MacNotifierCommand {
   tool: "terminal-notifier" | "osascript";
   argv: string[];
 }
 
 /**
- * Ticket 10: "Clicking the 🟡 notification opens the view" — `osascript
- * display notification` has no click-action parameter at all (see the doc
- * below), so a clickable notification needs `terminal-notifier -open <url>`
- * instead. Decided here, every time, rather than assumed: `terminal-notifier`
- * is an EXTRA Homebrew dependency the human may not have installed, and an
- * item with no `openUrl` at all (no Daemon has ever run) has nothing to open
- * regardless — either reason falls through to the unchanged `osascript`
- * path, with no click action, exactly as before ticket 10.
+ * `osascript display notification` has no click-action parameter, so a
+ * clickable notification needs `terminal-notifier -open <url>` instead.
+ * Falls through to `osascript` (no click) when `terminal-notifier` isn't
+ * installed, or when there's no `openUrl` to open anyway.
  */
 export function buildMacNotifierCommand(
   notification: Notification,
@@ -290,18 +247,12 @@ export function buildMacNotifierCommand(
 }
 
 /**
- * The real macOS sender: `terminal-notifier -open <url>` when it's on PATH
- * and there's a URL to open (ticket 10), else `osascript -e 'display
- * notification …'` — ships with every macOS, so installing Tenaza needs
- * nothing extra for the FALLBACK (no `terminal-notifier`, no new Homebrew
- * dependency required). The tradeoff, stated plainly rather than papered
- * over: `display notification` has no identifier/group parameter, so it
- * cannot ask Notification Center to REPLACE an earlier banner the way a
- * stable tag would with a tool that supports one, NOR can it act on a
- * click at all — `tag` here is Tenaza's own bookkeeping key, not an OS-level
- * one (see `Notification.tag`'s own doc). Fired with `Bun.spawn` and never
- * awaited: the hook must not block on, or fail because of, the human's
- * notification center.
+ * `terminal-notifier -open <url>` when it's on PATH and there's a URL to
+ * open, else `osascript -e 'display notification …'`, which ships with
+ * every macOS. The tradeoff: `display notification` can't replace an
+ * earlier banner by tag, or act on a click at all — `tag` here is
+ * Tenaza's own bookkeeping key, not an OS-level one. Fired with
+ * `Bun.spawn` and never awaited, so the hook never blocks on it.
  */
 function sendMacNotification(notification: Notification, sound: boolean): void {
   const hasTerminalNotifier = Bun.which("terminal-notifier") !== null;
@@ -310,22 +261,12 @@ function sendMacNotification(notification: Notification, sound: boolean): void {
 }
 
 /**
- * The notifier port itself (ticket 08). Every caller funnels through here,
- * and this is the ONLY function that decides where a Notification actually
- * goes:
- *   - `TENAZA_NOTIFY_RECORDER` set (any truthy value) → append to the
- *     recorder file under THIS `home` instead of touching macOS at all —
- *     the test seam the ticket names ("swap the macOS sender for a recorder
- *     through the environment"). A repo-wide `bunfig.toml` preload sets
- *     this for every `bun test` run, so no test — old or new, unit or
- *     black-box — can ever fire a real notification by omission.
- *   - unset → the real macOS sender.
- * Either way, whether to actually PLAY A SOUND this time is decided first,
- * from the same burst-window state, so the recorder and the real sender
- * agree on it.
- *
- * Never throws (AC: "a failing notifier never fails the hook or changes its
- * allow/deny answer") — every step from here down is inside the guard.
+ * The notifier port itself — the only function that decides where a
+ * Notification actually goes. `TENAZA_NOTIFY_RECORDER` set → append to
+ * the recorder file instead of touching macOS (a repo-wide preload sets
+ * this for every `bun test` run). Unset → the real macOS sender. Never
+ * throws — a failing notifier must never fail the hook or change its
+ * allow/deny answer.
  */
 export function sendNotification(home: string, notification: Notification, now: Date = new Date()): void {
   try {
@@ -338,12 +279,10 @@ export function sendNotification(home: string, notification: Notification, now: 
     }
     sendMacNotification(notification, sound);
   } catch {
-    // A failing notifier (no osascript, a denied permission, a read/write
-    // error on its own small state file, …) must never fail the hook.
   }
 }
 
-/** This one Session's project, role and `ticket` Label, the same way `tenaza status`'s tree row derives them — never the full multi-Session tree, which this doesn't need. */
+/** This one Session's project, role and `ticket` Label — never the full multi-Session tree, which this doesn't need. */
 function sessionContext(home: string, session: string): { project: string; role: string; ticket: string | undefined } {
   const index = buildSessionIndex(readSessionEvents(session, home));
   const node: SessionNode = index.get(session) ?? { id: session, capabilities: [], labels: {} };
@@ -351,38 +290,28 @@ function sessionContext(home: string, session: string): { project: string; role:
 }
 
 /**
- * Fire 🟡 for the Inbox item `fullId` names — the ONE call site for it
- * (`decide.ts`, at the moment it opens the item, for both the enforced deny
- * and the unblocked-but-still-surfaced case, ticket 06). `shortId` is the
- * SAME display hash `decide.ts` is about to hand back to the agent/CLI, so
- * the notification's text and the deny message never disagree. Swallows
- * its own lookups failing too, not just `sendNotification`'s own guard —
- * nothing downstream of a human match may ever crash the hook.
+ * Fire 🟡 for the Inbox item `fullId` names. `shortId` is the same
+ * display hash the caller is about to hand back to the agent/CLI, so the
+ * notification's text and the deny message never disagree. Swallows its
+ * own lookups failing too — nothing downstream of a human match may ever
+ * crash the hook.
  */
 export function notifyNewInboxItem(home: string, fullId: string, shortId: string, now: Date = new Date()): void {
   try {
     const row = findInboxRow(home, fullId);
     if (!row) return;
     const context = sessionContext(home, row.session);
-    // Ticket 10: the URL `-open` carries — ONLY when a Daemon has ever
-    // written a token (never a bare guess with nothing to open): ALWAYS
-    // the default port either way (same documented, accepted gap
-    // `fence.ts`'s own write-route pattern already carries: no file names
-    // which port a NON-default `tenaza ui --port <n>` bound to).
+    // Only set when a Daemon has ever written a token; always the default
+    // port, since no file names which port a non-default
+    // `tenaza ui --port <n>` bound to.
     const token = readDaemonToken(home);
     const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
     sendNotification(home, buildInboxOpenedNotification(row, shortId, context, openUrl), now);
   } catch {
-    // See `sendNotification`'s own doc — the same guarantee, one level up.
   }
 }
 
-/**
- * Fire 🔴 for `session` crossing `thresholdTokens` with this `contextTokens`
- * sample — the ONE call site for it (`adapters/claude.ts`'s `sampleUsage`,
- * at the moment it appends the crossing `usage.sampled` Event, per
- * `shouldNotifyThresholdCrossing`).
- */
+/** Fire 🔴 for `session` crossing `thresholdTokens` with this `contextTokens` sample, per `shouldNotifyThresholdCrossing`. */
 export function notifyThresholdCrossed(
   home: string,
   session: string,
@@ -398,7 +327,6 @@ export function notifyThresholdCrossed(
       now,
     );
   } catch {
-    // See `sendNotification`'s own doc.
   }
 }
 

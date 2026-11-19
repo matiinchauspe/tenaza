@@ -59,14 +59,12 @@ import { detectRow, planFocus, reachFor, resolveTmuxOuterLive, type LiveFacts } 
 import { TENAZA_VERSION } from "./version";
 import index from "./ui/index.html";
 
-/** Re-exported from `paths.ts` (its real home — see that file's own doc comment on why) so every EXISTING caller that looks for it here, `tenaza ui`'s own default included, is unaffected. */
+/** Re-exported from `paths.ts` so existing callers that look for it here — `tenaza ui`'s own default included — are unaffected. */
 export { DEFAULT_DAEMON_PORT };
 
 /**
- * Re-exported from `daemonlink.ts` (its real home, as of ticket 10 — see
- * that module's own doc comment on why the heartbeat/token surface moved
- * out of this file) so every EXISTING caller that looked for them HERE
- * (ticket 07's own tests included) is unaffected.
+ * Re-exported from `daemonlink.ts`, their real home, so existing callers
+ * that looked for them here are unaffected.
  */
 export {
   buildDaemonUrl,
@@ -80,10 +78,10 @@ export {
   writeDaemonToken,
 };
 
-/** Overridable via `TENAZA_SSE_POLL_MS` (same reasoning as the heartbeat). */
+/** Overridable via `TENAZA_SSE_POLL_MS`, so a test never waits the real poll interval. */
 export const DEFAULT_SSE_POLL_INTERVAL_MS = 500;
 
-/** How long `GET /health` gets to answer before a second launch gives up and treats the port as free (ticket 07: a stale `daemon.alive`/`daemon.token` must not block a new launch — this is the OTHER half, a hung or absent listener). */
+/** How long `GET /health` gets to answer before a second launch gives up and treats the port as free — the hung-or-absent-listener half of guarding against a new launch getting blocked (a stale `daemon.alive`/`daemon.token` is the other half, handled elsewhere). */
 const PROBE_TIMEOUT_MS = 500;
 
 /** The cookie a browser keeps once the page has seen a valid `?token=`. */
@@ -108,14 +106,14 @@ function removeIfExists(file: string): void {
   }
 }
 
-/** Clean shutdown hygiene (Ctrl-C): drop this launch's own alive/token files rather than leaving them to merely go stale. Never required for correctness — a crashed Daemon leaves the SAME files behind, and `probeExistingDaemon` below never trusts their mere presence either way — but tidier, and it closes the (harmless) window where a leftover token could still open a URL for a Daemon that already exited cleanly. */
+/** Not required for correctness — a crashed Daemon leaves the same files behind, and `probeExistingDaemon` below never trusts their mere presence either way — but it closes the harmless window where a leftover token could still open a URL for a Daemon that already exited cleanly. */
 export function clearDaemonFiles(home: string): void {
   removeIfExists(daemonAlivePath(home));
   removeIfExists(daemonTokenPath(home));
 }
 
 // ---------------------------------------------------------------------------
-// The opener test seam (mirrors notify.ts's TENAZA_NOTIFY_RECORDER exactly)
+// The opener test seam
 // ---------------------------------------------------------------------------
 
 function appendOpenRecorder(home: string, url: string): void {
@@ -124,7 +122,7 @@ function appendOpenRecorder(home: string, url: string): void {
   appendFileSync(file, `${JSON.stringify({ url })}\n`, "utf8");
 }
 
-/** Read back every URL the opener seam captured, in order — the test oracle for "what would have been opened." */
+/** Read back every URL the opener seam captured, in order — the test oracle for what would have been opened. */
 export function readOpenRecorder(home: string = tenazaHome()): string[] {
   const file = openRecorderPath(home);
   if (!existsSync(file)) return [];
@@ -135,14 +133,11 @@ export function readOpenRecorder(home: string = tenazaHome()): string[] {
 }
 
 /**
- * Open `url` in the human's browser — the ONLY function that decides HOW
- * (ticket 07's own "never actually open a browser in tests; make the
- * opener injectable/disabled"), same shape as `notify.ts`'s
- * `sendNotification`:
+ * Open `url` in the human's browser — the only function that decides how:
  *   - `TENAZA_OPEN_RECORDER` set → append to the recorder file instead of
  *     touching the OS at all.
  *   - unset → spawn the real `open <url>` (macOS).
- * Never throws — a failing opener must never fail the Daemon that just
+ * Never throws — a failing opener must never fail a Daemon that already
  * started successfully.
  */
 export function openBrowser(home: string, url: string): void {
@@ -153,7 +148,6 @@ export function openBrowser(home: string, url: string): void {
     }
     Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" });
   } catch {
-    // See the doc comment above.
   }
 }
 
@@ -161,18 +155,7 @@ export function openBrowser(home: string, url: string): void {
 // Derived state (what the SSE stream pushes)
 // ---------------------------------------------------------------------------
 
-/**
- * One Session's board row (ticket 08): resolved to a `project` and the
- * STRUCTURAL `role` server-side — `deriveProject` shells out to `git` and
- * can never ship to a browser bundle, and `role` here is deliberately NOT
- * `sessions.ts`'s own `roleOf` (which folds the `ticket` Label into the
- * fallback for the CLI's one compact line) — the board shows `ticket` and
- * `role` as separate fields, per the spec's own comma-separated list.
- * Everything else is a plain, time-independent fact; the board's pure
- * functions (`src/board.ts`) do the time-based classification against a
- * ticking clock.
- */
-/** An `Action` (`contract/event.ts`), flattened to the `ActionSummary` shape the board's contract shares between an Inbox row's "tool + command" and a Session row's "last signal" — `command` only for a `shell` Action, same as `toBoardInboxItem`'s own previous inline version. */
+/** An `Action`, flattened to the shape the board's contract shares between an Inbox row's "tool + command" and a Session row's "last signal" — `command` only for a `shell` Action. */
 function toActionSummary(action: Action): ActionSummary {
   return {
     kind: action.kind,
@@ -182,13 +165,10 @@ function toActionSummary(action: Action): ActionSummary {
 }
 
 /**
- * Ticket 11: this Session's own static terminal reach — "a subagent's card
- * focuses its PARENT's terminal" (spec) resolved HERE, against the FULL
- * (unfiltered) index, since a subagent's own `session.started` never
- * carries a `terminal` field at all (`adapters/claude.ts`'s
- * `handleSubagentStart`). `fullIndex` is the SAME index `buildBoardPayload`
- * already built for `toBoardInboxItem`'s own project/ticket lookup — never
- * a second rebuild.
+ * A subagent's card focuses its parent's terminal: resolved here against
+ * the FULL, unfiltered index, since a subagent's own `session.started`
+ * never carries a `terminal` field at all. `fullIndex` is the same index
+ * `buildBoardPayload` already built — never rebuilt here.
  */
 function terminalInfoFor(
   node: SessionNode,
@@ -200,6 +180,16 @@ function terminalInfoFor(
   return { reach: level, appLabel, needsTcc };
 }
 
+/**
+ * One session's board row: resolved to a `project` and the structural
+ * `role` server-side — `deriveProject` shells out to `git` and can never
+ * ship to a browser bundle, and `role` here is deliberately not
+ * `sessions.ts`'s own `roleOf` (which folds the `ticket` Label into its
+ * fallback for the CLI's one compact line) — the board shows `ticket` and
+ * `role` as separate fields. Everything else is a plain, time-independent
+ * fact; `board.ts`'s pure functions do the time-based classification
+ * against a ticking clock.
+ */
 function toBoardSession(
   node: SessionNode,
   resolutions: ReadonlyMap<string, ResolutionTraceEntry[]>,
@@ -208,10 +198,8 @@ function toBoardSession(
   resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardSession {
   const terminal = terminalInfoFor(node, fullIndex);
-  // Ticket 05: `turnWaitSince` already resolves against the SAME
-  // touched-merged `lastEventTs` `nativeWait` below reads, and already
-  // defers to a more specific native wait when one is current — never
-  // computed twice, never double-badged.
+  // `turnWaitSince` already defers to a more specific native wait when
+  // one is current — never double-badged.
   const turnWait = turnWaitSince(node);
   return {
     id: node.id,
@@ -226,35 +214,32 @@ function toBoardSession(
     hasMeasureCapability: node.capabilities.includes("measure"),
     contextTokens: node.contextTokens,
     lastSignal: node.lastAction ? toActionSummary(node.lastAction) : undefined,
-    // Ticket 10: newest-first, already derived (`deriveResolutionTraceBySession`) — never re-sorted or re-filtered here.
+    // Newest-first, already derived by `deriveResolutionTraceBySession` — never re-sorted or re-filtered here.
     resolutions: resolutions.get(node.id) ?? [],
     terminalReach: terminal.reach,
     terminalAppLabel: terminal.appLabel,
     terminalNeedsTcc: terminal.needsTcc,
-    // Ticket 14: `node.lastEventTs` here already carries `buildBoardPayload`'s
-    // own touched-file merge (below) — `nativeWaitFor` reads it to tell a
-    // CURRENT native wait apart from a stale one any later activity, ordinary
-    // tool calls included, already superseded.
+    // `node.lastEventTs` already carries the touched-file merge (below) —
+    // `nativeWaitFor` uses it to tell a current native wait from a stale
+    // one any later activity has superseded.
     nativeWait: nativeWaitFor(node),
-    // Ticket 05 (AC3): `backgroundCount` is this Session's own still-running
-    // descendants — computed only when `turnWait` is actually present, so a
-    // working/ended Session never pays for a traversal nobody will read.
+    // `backgroundCount` is computed only when `turnWait` is present, so a
+    // working/ended session never pays for a traversal nobody will read.
     turnWait: turnWait ? { since: turnWait, backgroundCount: countActiveDescendants(node.id, childrenOf) } : undefined,
   };
 }
 
-/** One pending Inbox item's board row — the owning Session's `project`/`ticket` resolved the SAME way a Session row's are, from the FULL (unfiltered) index: an Inbox item's own Session is never noise (it carries an `action.decided` Event, which `isNoiseSession` never matches), but resolving against the full index rather than the already-filtered list costs nothing and never depends on that happening to stay true. */
+/** One pending Inbox item's board row — `project`/`ticket` resolved from the FULL, unfiltered index: an Inbox item's own session is never noise, but resolving against the full index rather than relying on that costs nothing and stays correct either way. */
 function toBoardInboxItem(
   row: InboxItem,
   fullIndex: ReadonlyMap<string, SessionNode>,
   resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardInboxItem {
   const session = fullIndex.get(row.session);
-  // Ticket 11: "from any card" (spec) — resolved from the OWNING Session,
-  // same convention `project`/`ticket` already use on this row. A Session
-  // this payload has never observed at all (should not happen — an Inbox
-  // item's own Session always carries at least its `action.decided` Event)
-  // degrades to "unknown," never a crash.
+  // Resolved from the owning session. A session this payload never
+  // observed (shouldn't happen — an Inbox item's own session always
+  // carries at least its `action.decided` Event) degrades to "unknown,"
+  // never a crash.
   const terminal = session ? terminalInfoFor(session, fullIndex) : { reach: "unknown" as const, appLabel: undefined, needsTcc: false };
   return {
     id: row.id,
@@ -272,30 +257,24 @@ function toBoardInboxItem(
 }
 
 /**
- * The Live surface's own payload (ticket 08, decision 04) — what `/events`
- * pushes, and the ONE shape `src/contract/live.ts` and the React client
- * agree on. Sessions and the Inbox, derived from the logs exactly like
- * `status` does — nothing kept beside them (ADR 0002) — minus the SAME
- * noise `renderSessionTree` already hides (`isNoiseSession`, reused here
- * rather than re-derived, so the board and `tenaza status` can never show
- * a different Session count for the same logs), plus the Policy numbers
- * (`stallMinutes`, `contextThresholdTokens`) the client's pure functions
- * need and must never hardcode a second copy of.
+ * The Live surface's own payload — what `/events` pushes, and the one
+ * shape `contract/live.ts` and the React client agree on. Sessions and
+ * the Inbox are derived from the logs on every call, filtered through the
+ * same noise check `renderSessionTree` already uses (`isNoiseSession`,
+ * reused rather than re-derived, so the board and `tenaza status` can
+ * never show a different session count for the same logs), plus the
+ * Policy numbers the client's pure functions need and must never hardcode
+ * a second copy of.
  *
- * `cache` and `resolveGitRoot` (ticket 13, criterion 3) are BOTH OPTIONAL
- * and change nothing about the VALUE returned — only how cheaply it gets
- * there. Omitted (every caller before this ticket, and every test that
- * calls this directly), every Session log is read and parsed fresh and
- * every Session's project is resolved with its own fresh `git` spawn,
- * exactly as before. Passed (only `startStateWatcher`'s own tick and
- * `eventsResponse`'s connect-time push, both via `DaemonContext`), a
- * Session log whose (mtime, size) hasn't moved since `cache` last saw it is
- * never re-read, and a `cwd` `resolveGitRoot` has already resolved is never
- * spawned twice — proven byte-identical to the fully-uncached path by this
- * ticket's own differential tests (`test/daemon.test.ts`). `resolveGitRoot`
- * turned out to be where the MEASURED ~440 ms at real scale actually came
- * from (not the log reads `cache` alone addresses — see
- * `createCachingGitRootResolver`'s own doc comment in `sessions.ts`).
+ * `cache` and `resolveGitRoot` are both optional and change nothing about
+ * the value returned — only how cheaply it gets there. Omitted, every
+ * session log is read and parsed fresh and every session's project is
+ * resolved with its own fresh `git` spawn. Passed, a session log whose
+ * (mtime, size) hasn't moved since `cache` last saw it is never re-read,
+ * and a `cwd` `resolveGitRoot` has already resolved is never spawned
+ * twice. Of the two, `resolveGitRoot` is what actually avoids the
+ * expensive part — repeated `git` spawns, not the log reads `cache` alone
+ * addresses.
  */
 export function buildBoardPayload(
   home: string,
@@ -303,30 +282,17 @@ export function buildBoardPayload(
   resolveGitRoot?: (cwd: string) => string | undefined,
 ): BoardPayload {
   const events = cache ? readAllSessionEventsCached(home, cache).events : readAllSessionEvents(home);
-  // Deepening ticket 01 ("every surface reads one closed-out Session
-  // index"): `closedOutSessionIndex` folds each Session's own "last
-  // ordinary activity" touch (`toolcalls.ts`'s `touchSession`) into its
-  // `lastEventTs` BEFORE `closeDeadProcesses`/`closeSilentPidlessSessions`
-  // run (ticket 14 AC3 / ticket 02 AC1 / ticket 06, now one fixed order
-  // instead of three call sites re-assembling it by hand). This is also
-  // what lets `nativeWaitFor` (`toBoardSession`, below) tell a CURRENT
-  // native prompt apart from one any later ordinary activity has already
-  // superseded, with no second Event ever written for that transition.
+  // `closedOutSessionIndex` folds each session's own touch
+  // (`toolcalls.ts`'s `touchSession`) into `lastEventTs` BEFORE the
+  // close-detection checks run — one fixed order, not several call sites
+  // re-deriving it by hand.
   const fullIndex = closedOutSessionIndex(events, readTouchedTimestamps(home));
   const eventTypes = eventTypesBySession(events);
-  // Ticket 11: an archived Session's card is hidden from the BOARD alone
-  // (never `tenaza status` — `sessions.ts`'s `isArchived` doc) — filtered
-  // the SAME way noise already is, so a card that was both noise AND
-  // somehow archived (should never happen — noise carries no
-  // `action.decided` match, let alone an ended state to archive) is still
-  // dropped exactly once.
-  //
-  // Orchestrator review, 2026-10-27: NEVER a permanent Set of ever-archived
-  // ids — `isArchived` re-judges each node's OWN `lastEventTs` against its
-  // latest archive ts on every read, so a Session resumed after being
-  // archived (a fresh SessionStart/tool Event landing later) comes straight
-  // back the next time this is computed, exactly like every other
-  // time-based classification here (TIME IS STATE).
+  // An archived session's card is hidden from the board alone, never
+  // `tenaza status`, filtered the same way noise already is. `isArchived`
+  // re-judges each node's own `lastEventTs` against its latest archive ts
+  // on every read rather than a permanent set, so a session resumed after
+  // being archived comes straight back the next time this runs.
   const archivedAt = latestArchiveTimestamps(home);
   const visibleSessions = [...fullIndex.values()].filter(
     (node) =>
@@ -335,11 +301,10 @@ export function buildBoardPayload(
   );
   const policy = loadPolicy(home);
   const resolutions = deriveResolutionTraceBySession(home);
-  // Ticket 05 (AC3): built ONCE per read against the FULL index — a noise or
-  // archived child is always `endedAt`-set (`isNoiseSession`'s own doc) and
-  // so never counts toward `countActiveDescendants` anyway, which is what
-  // lets this reuse the unfiltered structure safely, same convention
-  // `terminalInfoFor` above already follows for its own parent walk.
+  // Built once per read against the FULL index — a noise or archived
+  // child is always `endedAt`-set, so it never counts toward
+  // `countActiveDescendants` anyway, which is what makes reusing the
+  // unfiltered structure here safe.
   const childrenOf = childrenIndex([...fullIndex.values()]);
 
   return {
@@ -355,36 +320,25 @@ export function buildBoardPayload(
 }
 
 /**
- * A cheap signature of everything the derived state above could possibly
- * depend on — every Session's own `*.jsonl` log (name/size/mtime) plus the
- * human log's own, the SAME files `buildBoardPayload` actually reads — so
- * the watcher below can tell "nothing changed" from "something did" WITHOUT
- * recomputing the (more expensive) derived state on every tick.
+ * A cheap signature of every file the derived state above could possibly
+ * depend on — each session's own `*.jsonl` log (name/size/mtime) plus the
+ * human log's own, the same files `buildBoardPayload` actually reads — so
+ * the watcher below can tell "nothing changed" from "something did"
+ * without recomputing the more expensive derived state on every tick.
  *
- * `*.touched` (ticket 14) is included for exactly the opposite reason
- * `<session>.toolcalls` stays excluded below: `buildBoardPayload` NOW reads
- * it (the touched-file merge, above) — it is a real input to the derived
- * state, so leaving it out of this signature would mean an ordinary tool
- * call's own touch could bump `lastEventTs` on disk and the watcher would
- * never notice, silently reintroducing the exact "busy agent reads frozen"
- * gap AC3 exists to close. This is still "transitions, not calls": the
- * payload-equality check below (`startStateWatcher`) still coalesces every
- * touch inside one poll interval into at most one push, the SAME free
- * coalescing every other file change here already gets — nothing here
- * pushes PER call, only per POLL TICK that found something the last push
- * didn't already carry.
+ * `*.touched` is included because `buildBoardPayload` now reads it (the
+ * touched-file merge, above) — leaving it out would mean an ordinary tool
+ * call's own touch could bump `lastEventTs` on disk with the watcher
+ * never noticing, reintroducing a "busy agent reads frozen" gap. The
+ * payload-equality check in `startStateWatcher` still coalesces every
+ * touch inside one poll interval into at most one push — nothing here
+ * pushes per call, only per tick that found something new.
  *
- * Deliberately excludes `<session>.toolcalls` (orchestrator review,
- * unchanged by ticket 14): that counter lives beside a Session's log
- * (`paths.ts`'s own `sessionsDir`) and is bumped on EVERY `PostToolUse`
- * call (`toolcalls.ts`), not just the ones that change derived state —
- * `buildBoardPayload` never reads IT at all (only a `usage.sampled` Event,
- * written on every 25th call, feeds the context bar; the NEW `.touched`
- * signal above is a SEPARATE file with a SEPARATE writer, serving a
- * SEPARATE purpose). Including `.toolcalls` here would still make nearly
- * every tick under ordinary tool-call traffic recompute for a value that
- * provably cannot have changed — the "transitions, not calls" rule this
- * signature exists to uphold, for THAT file specifically.
+ * Deliberately excludes `<session>.toolcalls`: that counter is bumped on
+ * every `PostToolUse` call, not just the ones that change derived state,
+ * and `buildBoardPayload` never reads it at all. Including it would make
+ * nearly every tick under ordinary tool-call traffic recompute for a
+ * value that provably cannot have changed.
  */
 function computeStateSignature(home: string): string {
   const parts: string[] = [];
@@ -420,37 +374,27 @@ function encodeSseEvent(data: unknown): Uint8Array {
 }
 
 /**
- * The state watcher (ticket 07): POLLING `~/.tenaza/state/`, not
- * `fs.watch`. Decided and justified, not defaulted to:
- *   - `fs.watch` has no portable recursive mode (Linux lacks `recursive`
- *     entirely; macOS's FSEvents-backed one is known to coalesce, reorder,
- *     or occasionally miss rapid successive writes to the same file —
- *     exactly the shape of two parallel hooks appending to one Session's
- *     log in the same instant, the case this project already has a
- *     regression fixture for elsewhere).
+ * Polls `~/.tenaza/state/` on an interval rather than using `fs.watch`:
+ *   - `fs.watch` has no portable recursive mode (Linux lacks it entirely;
+ *     macOS's FSEvents-backed one is known to coalesce, reorder, or miss
+ *     rapid successive writes to the same file — exactly the shape of two
+ *     parallel hooks appending to one session's log at once).
  *   - A cheap stat-based signature, polled on a fixed interval, degrades
- *     predictably instead: worst case it adds one interval's latency, never
- *     a missed or duplicated event, and it is identical code on every OS
- *     Bun targets.
- *   - Polling also coalesces bursts FOR FREE (ticket 07's own "coalesce
- *     bursts" requirement): several writes inside one interval collapse
- *     into the single recompute-and-push that interval's tick does, with no
- *     separate debounce timer to get wrong.
- * The one-time cost: up to one poll interval of latency between a write and
- * the SSE push. `TENAZA_SSE_POLL_MS` shortens that for tests; production
- * keeps the default.
+ *     predictably instead: worst case it adds one interval's latency,
+ *     never a missed or duplicated event, and it's identical code on
+ *     every OS Bun targets.
+ *   - Polling also coalesces bursts for free: several writes inside one
+ *     interval collapse into the single recompute-and-push that tick
+ *     does, with no separate debounce timer to get wrong.
+ * The cost: up to one poll interval of latency between a write and the
+ * SSE push. `TENAZA_SSE_POLL_MS` shortens that for tests.
  *
- * `cache` and `resolveGitRoot` (ticket 13, criterion 3): the Daemon's own
- * per-process log cache and git-root memoization (`DaemonContext.logCache`
- * / `.resolveGitRoot`), both threaded into `buildBoardPayload` so a tick
- * never pays to re-read-and-reparse a Session log that didn't change, or
- * re-spawn `git` for a `cwd` it already resolved — the measured ~440 ms
- * cost at 1165 Sessions (profiling found the SECOND one, not the first,
- * was where almost all of it actually went — see `buildBoardPayload`'s own
- * doc comment) that grew with total history regardless of how little
- * actually changed. Both optional only so a caller without them still gets
- * the pre-ticket-13 behavior byte-for-byte; `runUi` below always has both
- * to pass.
+ * `cache` and `resolveGitRoot` are the Daemon's own per-process log cache
+ * and git-root memoization, threaded into `buildBoardPayload` so a tick
+ * never pays to re-read a session log that didn't change or re-spawn
+ * `git` for a `cwd` it already resolved (see that function's own doc for
+ * which one actually matters). Both optional only so a caller without
+ * them still gets the same value; `runUi` below always passes both.
  */
 export function startStateWatcher(
   home: string,
@@ -467,13 +411,12 @@ export function startStateWatcher(
       if (signature === lastSignature) return;
       lastSignature = signature;
 
-      // The stat signature changing is necessary, not sufficient: a usage
-      // sample that leaves the context bar's own number unchanged, or a
-      // torn line `readLogTolerant` skips either way (ADR 0007), can still
-      // move an mtime/size without moving the DERIVED value a client would
-      // ever see. Comparing the actual serialized payload — not just the
-      // stat signature — is what makes this push on "a change your client
-      // could observe," never on "a tick where some file's mtime moved."
+      // The stat signature changing is necessary, not sufficient — a usage
+      // sample that leaves the context bar's number unchanged, or a torn
+      // line the reader skips either way, can still move an mtime/size
+      // without moving the derived value a client would ever see.
+      // Comparing the serialized payload, not just the signature, is what
+      // makes this push on a change a client could observe.
       const payload = JSON.stringify(buildBoardPayload(home, cache, resolveGitRoot));
       if (payload === lastPayload) return;
       lastPayload = payload;
@@ -487,7 +430,7 @@ export function startStateWatcher(
         }
       }
     } catch {
-      // A watcher tick must never crash the Daemon's own process.
+      // A watcher tick must never crash the Daemon's process.
     }
   };
 
@@ -503,7 +446,6 @@ export function startStateWatcher(
 // Auth (token-gated writes; reads stay open)
 // ---------------------------------------------------------------------------
 
-/** Pull `tenaza_token` out of a `Cookie` header, if present. */
 function cookieToken(req: Request): string | undefined {
   const header = req.headers.get("cookie");
   if (!header) return undefined;
@@ -515,16 +457,14 @@ function cookieToken(req: Request): string | undefined {
 }
 
 /**
- * Does this request carry the Daemon's own current token — as the cookie a
- * prior page load already set, or (first load / a bare curl / a STALE
- * cookie from a previous launch) the `?token=` query parameter? The token
- * rotates every launch (decision 05: "a random token per Daemon launch"),
- * so a browser tab left open across a restart carries a cookie that no
- * longer matches — that must fall through to the query form rather than
- * fail outright, exactly like no cookie at all. A bare request with
- * neither is unauthorized (ticket 07's own "bare request → 403"). Not a
- * security boundary (decision 05: agents run as the same user as the
- * Daemon) — a plain string compare is enough.
+ * Does this request carry the Daemon's own current token — the cookie a
+ * prior page load set, or (first load, a bare curl, or a stale cookie from
+ * a previous launch) the `?token=` query parameter? The token rotates
+ * every launch, so a browser tab left open across a restart carries a
+ * cookie that no longer matches — that falls through to the query form
+ * rather than failing outright, same as no cookie at all. Not a security
+ * boundary — agents run as the same user as the Daemon — so a plain
+ * string compare is enough.
  */
 export function isAuthorizedRequest(req: Request, token: string): boolean {
   const fromCookie = cookieToken(req);
@@ -541,9 +481,9 @@ interface DaemonContext {
   home: string;
   token: string;
   clients: Set<SseController>;
-  /** Ticket 13: this Daemon's own per-process log cache, warmed across every connect-time push and watcher tick alike — see `buildBoardPayload`'s own doc comment. */
+  /** Warmed across every connect-time push and watcher tick alike. */
   logCache: SessionLogCache;
-  /** Ticket 13, criterion 3: this Daemon's own per-process `cwd → git root` memoization (`sessions.ts`'s `createCachingGitRootResolver`) — the ACTUAL measured cause of the per-tick cost, never invalidated within one Daemon's run. */
+  /** Never invalidated within one Daemon's run. */
   resolveGitRoot: (cwd: string) => string | undefined;
 }
 
@@ -552,21 +492,14 @@ function healthResponse(): Response {
 }
 
 /**
- * `GET /auth?token=` (ticket 08 fix) — the ONE route a browser load now
- * carries the token in the URL for. `Bun.serve`'s `routes` table claims
- * `/` entirely for the static bundled page (decision 05's "open read, no
- * token" still holds for it), which left no per-request handler free to
- * set the HttpOnly cookie ticket 07's placeholder `indexResponse` used to
- * set inline — the regression this ticket shipped instead was a
- * CLIENT-SIDE `document.cookie` write from `main.tsx`, which can never be
- * HttpOnly, has no server-side check at all, and leaves the token sitting
- * in the URL the user's tab keeps. This route restores the server-side
- * shape: validate the token against THIS launch's own (never trust the
- * query blindly), set the SAME `HttpOnly; SameSite=Strict; Path=/` cookie
- * `indexResponse` used to, then 302 the browser on to the plain `/` — the
- * token never lingers in the address bar the human actually lands on. An
- * invalid or missing token sets no cookie and answers 401, never falling
- * through to the page: there is no path through this function that redirects
+ * `GET /auth?token=` — the one route a browser load carries the token in
+ * the URL for. `Bun.serve`'s `routes` table claims `/` entirely for the
+ * static bundled page, leaving no per-request handler there to set the
+ * HttpOnly cookie, so that has to happen on its own route instead: this
+ * one validates the token against THIS launch's own, sets the cookie, and
+ * 302s on to the plain `/` — the token never lingers in the address bar
+ * the human lands on. An invalid or missing token sets no cookie and
+ * answers 401: there is no path through this function that redirects
  * without having just set a correct cookie.
  */
 function authResponse(ctx: DaemonContext, url: URL): Response {
@@ -574,11 +507,10 @@ function authResponse(ctx: DaemonContext, url: URL): Response {
     return new Response("unauthorized\n", { status: 401 });
   }
   const headers = new Headers({ location: "/" });
-  // `Strict`, not `Lax` — same reasoning `indexResponse` carried: the
-  // deny-by-default gate covers GET on every non-read path too, so a
-  // `Lax` cookie (sent on a cross-site top-level GET navigation) would
-  // hand an attacker-controlled page the same cookie a legitimate
-  // same-site GET gets.
+  // `Strict`, not `Lax`: a `Lax` cookie (sent on a cross-site top-level GET
+  // navigation) would hand an attacker-controlled page the same cookie a
+  // legitimate same-site GET gets, and the deny-by-default gate below
+  // covers GET on every non-read path too.
   headers.append("set-cookie", `${TOKEN_COOKIE_NAME}=${ctx.token}; HttpOnly; SameSite=Strict; Path=/`);
   return new Response(null, { status: 302, headers });
 }
@@ -588,25 +520,14 @@ function authResponse(ctx: DaemonContext, url: URL): Response {
  * the current derived state immediately on connect, then whatever
  * `startStateWatcher` enqueues later.
  *
- * `server.timeout(req, 0)` (ticket 13, criterion 2): disables `Bun.serve`'s
- * own idle timeout for THIS request's connection — "reset the idle timeout
- * … `0` means no timeout," confirmed against the installed Bun version
- * (1.4.3) both in its own type declarations (`serve.d.ts`) and empirically.
- * The measured cause was that idle timeout (its documented default is 10 s;
- * a quiet `/events` connection — nothing written between board changes —
- * dropped at ~10–12 s every time this was probed). An SSE comment keepalive
- * was tried FIRST and discarded: on THIS Daemon's exact `Bun.serve` shape —
- * `routes` claiming `/` alongside `fetch` handling everything else — a
- * periodic write to the stream controller did NOT reset the per-connection
- * idle clock the way it does on a `fetch`-only server (confirmed
- * empirically: a comment every 150 ms still dropped at the SAME ~4 s a
- * silent stream did, with `idleTimeout` shortened for the probe). The
- * per-request override is the mechanism that actually works for this
- * server's shape, so it is the only one shipped — see the ticket's own
- * report for the full probe. `clients.delete` on `cancel()`/a failed
- * `enqueue()` is unaffected: a connection that genuinely closes (the
- * browser tab, a network drop the OS eventually notices) is still cleaned
- * up the same way; only the SERVER-INITIATED idle drop is gone.
+ * `server.timeout(req, 0)` disables `Bun.serve`'s own idle timeout for
+ * this connection — without it, a quiet `/events` connection gets dropped
+ * after a short idle window. A periodic SSE comment keepalive does NOT
+ * reset that idle clock on this server's shape (`routes` claiming `/`
+ * alongside `fetch` handling everything else) the way it would on a
+ * `fetch`-only server, so the per-request override is the only mechanism
+ * that actually works here. `clients.delete` on `cancel()`/a failed
+ * `enqueue()` is unaffected — only the server-initiated idle drop is gone.
  */
 function eventsResponse(ctx: DaemonContext, req: Request, server: ReturnType<typeof Bun.serve>): Response {
   server.timeout(req, 0);
@@ -631,13 +552,13 @@ function eventsResponse(ctx: DaemonContext, req: Request, server: ReturnType<typ
 }
 
 // ---------------------------------------------------------------------------
-// Write routes (ticket 09): resolve a pending Inbox item from the view
+// Write routes: resolve a pending Inbox item from the view
 // ---------------------------------------------------------------------------
 
-/** `POST /items/<id>/run|done|dismiss|answer` (ticket 09 shipped the first three; ticket 10 adds `answer`) — ticket 11 adds its own paths alongside this one ONLY if they share this exact `/items/<id>/…` shape, never by widening this pattern. `id` is the item's FULL identity hash (ADR 0005) — the board's own contract (`contract/live.ts`) never carries anything shorter, so the view has no prefix to resolve. */
+/** `POST /items/<id>/run|done|dismiss|answer`. A future action route is only added here if it shares this exact `/items/<id>/…` shape — never by widening this pattern. `id` is the item's full identity hash: the board's own contract never carries anything shorter, so there's no prefix to resolve. */
 const ITEM_ACTION_PATTERN = /^\/items\/([0-9a-f]{4,64})\/(run|done|dismiss|answer)$/;
 
-/** A refusal `startInboxItemRunStream` reported WITHOUT ever spawning anything — translated to a client error the view can show inline, never a 200 with no content. `already-resolved`/`unblockable`/`not-runnable` are all "this item's own state forbids it" (409); `no-cwd`/`cwd-missing` are "Tenaza cannot resolve where to run it" (422) — distinct enough from a plain conflict to point the human at a different fix (the stored command itself, printed back, same as the CLI's own refusal messages). */
+/** A refusal with nothing spawned, translated to a client error the view shows inline. `already-resolved`/`unblockable`/`not-runnable` are "this item's own state forbids it" (409); `no-cwd`/`cwd-missing` get 422 instead — distinct enough to point the human at a different fix. */
 function runRefusalResponse(refusal: RunRefusal): Response {
   if (refusal.kind === "no-cwd" || refusal.kind === "cwd-missing") {
     return Response.json({ error: refusal.kind, ...refusal }, { status: 422 });
@@ -645,24 +566,20 @@ function runRefusalResponse(refusal: RunRefusal): Response {
   return Response.json({ error: refusal.kind }, { status: 409 });
 }
 
-/** Review fix: spawning the shell itself threw (`startInboxItemRunStream`'s own try/catch) — 500, with the raw message, rather than an uncaught exception reaching `Bun.serve`'s own generic (message-less) error response. */
+/** Spawning the shell itself threw — answers 500 with the raw message rather than letting an uncaught exception reach `Bun.serve`'s own generic, message-less error response. */
 function spawnFailedResponse(message: string): Response {
   return Response.json({ error: "spawn-failed", message }, { status: 500 });
 }
 
 /**
- * `POST /items/<id>/run` (decisions 05, 06, ticket 09): start the item's
- * stored command through the view's own streaming run
- * (`startInboxItemRunStream`, `resolve.ts`) and hand its `ReadableStream`
- * straight back as the response body — chunked, so the card can render
- * output as it arrives rather than waiting for the whole run to finish.
- * `content-type: text/plain` deliberately: this is raw combined
- * stdout+stderr, never a structured envelope — the run's own outcome
- * (closed as `done`, or left open) is never carried IN this response at
- * all; it is derived from the Inbox exactly like every other resolution
- * (ADR 0002), which is what lets the board's OWN `/events` SSE be the one
- * place a client ever needs to check for it, the instant the stream here
- * ends.
+ * `POST /items/<id>/run`: starts the item's stored command and hands its
+ * `ReadableStream` straight back as the response body — chunked, so the
+ * card can render output as it arrives. `content-type: text/plain`
+ * deliberately: this is raw combined stdout+stderr, never a structured
+ * envelope. The run's own outcome is never carried in this response at
+ * all — it's derived from the Inbox like every other resolution, which is
+ * what lets the board's own `/events` SSE be the one place a client needs
+ * to check for it once the stream here ends.
  */
 function runItemResponse(ctx: DaemonContext, id: string): Response {
   try {
@@ -678,7 +595,7 @@ function runItemResponse(ctx: DaemonContext, id: string): Response {
   }
 }
 
-/** `POST /items/<id>/done|dismiss`: close the item by hand, exactly as the CLI's own `done`/`dismiss` do (`resolveInboxItem`, unchanged from ticket 06) — never executes anything. */
+/** `POST /items/<id>/done|dismiss`: closes the item by hand, exactly as the CLI's own `done`/`dismiss` do — never executes anything. */
 function resolveItemResponse(ctx: DaemonContext, id: string, outcome: ResolutionOutcome): Response {
   try {
     const result = resolveInboxItem(ctx.home, id, outcome);
@@ -690,16 +607,12 @@ function resolveItemResponse(ctx: DaemonContext, id: string, outcome: Resolution
 }
 
 /**
- * `POST /items/<id>/answer` (ticket 10, decision 06): the ONE write route
- * the browser's own TE ESPERA card ever posts to — appending the human's
- * raw answer (`postLiveAnswer`, `resolve.ts`) for the item's own HELD hook
- * to read back and act on. This route never closes the item itself, and
- * never touches the agent's own call — it only records what the human
- * said. A malformed body (no valid JSON, or `answer` not exactly
- * `"approve"`/`"reject"`) is a plain 400, never a 500 or a silent accept; a
- * refusal `postLiveAnswer` reports WITHOUT writing anything (already
- * resolved, or no longer live) is a 409 — the SAME "this item's own state
- * forbids it" shape `runRefusalResponse` already uses for `run`.
+ * `POST /items/<id>/answer`: the one write route the browser's TE ESPERA
+ * card posts to — appends the human's raw answer for the item's own held
+ * hook to read back and act on. Never closes the item itself, and never
+ * touches the agent's own call — only records what the human said. A
+ * malformed body is a plain 400, never a 500 or a silent accept; a refusal
+ * with nothing written (already resolved, or no longer live) is a 409.
  */
 async function answerItemResponse(ctx: DaemonContext, id: string, req: Request): Promise<Response> {
   let body: { answer?: unknown; message?: unknown };
@@ -723,7 +636,7 @@ async function answerItemResponse(ctx: DaemonContext, id: string, req: Request):
   }
 }
 
-/** Dispatch one `/items/<id>/<action>` write — `undefined` when `pathname` doesn't even match the shape, so the caller falls through to the SAME bare 404 any other unrecognized path already gets. */
+/** Dispatch one `/items/<id>/<action>` write — `undefined` when `pathname` doesn't match the shape, so the caller falls through to the same bare 404 any other unrecognized path gets. */
 async function itemActionResponse(ctx: DaemonContext, pathname: string, req: Request): Promise<Response | undefined> {
   const match = ITEM_ACTION_PATTERN.exec(pathname);
   if (!match) return undefined;
@@ -735,18 +648,17 @@ async function itemActionResponse(ctx: DaemonContext, pathname: string, req: Req
 }
 
 // ---------------------------------------------------------------------------
-// Write routes (ticket 11): go to the agent's terminal + archive a card.
-// Neither shares `ITEM_ACTION_PATTERN`'s `/items/<id>/…` shape (`fence.ts`'s
-// own doc comment on why), so they get their own pattern and dispatcher.
+// Write routes: go to the agent's terminal, and archive a card. Neither
+// shares `ITEM_ACTION_PATTERN`'s `/items/<id>/…` shape, so they get their
+// own pattern and dispatcher.
 // ---------------------------------------------------------------------------
 
-/** `id` here is a SESSION id (Claude Code's own `session_id`/`agent_id`) — never an Inbox item's hash, and never constrained to a hex shape the way `ITEM_ACTION_PATTERN` is, since a runtime's own session ids are opaque strings this project does not define. */
+/** `id` here is a session id (Claude Code's own `session_id`/`agent_id`) — never an Inbox item's hash, and not constrained to a hex shape like `ITEM_ACTION_PATTERN` is, since a runtime's session ids are opaque strings this project doesn't define. */
 const SESSION_ACTION_PATTERN = /^\/sessions\/([^/]+)\/(focus|archive)$/;
 
 /**
- * This Session's own locator (or, for a subagent, its PARENT's — "a
- * subagent's card focuses its parent's terminal," spec) — resolved against
- * the FULL cross-Session index, exactly like `toBoardSession`'s own
+ * This session's own locator (or, for a subagent, its parent's) —
+ * resolved against the FULL cross-session index, the same way
  * `terminalInfoFor` does for the board payload, so a click and the card's
  * own pre-click label can never resolve to two different terminals.
  */
@@ -759,17 +671,13 @@ function resolveFocusLocator(home: string, id: string): TerminalLocator | undefi
 }
 
 /**
- * `POST /sessions/<id>/focus` (decision 09, ticket 11): the Daemon runs the
- * focus command ONLY on this click — never on its own (spec's own
- * "never," ADR 0007's whole "Tenaza running any command on its own
- * initiative" being out of scope). Resolves the live tmux outer app HERE,
- * server-side, the one place a real process can be spawned — `planFocus`
- * itself stays pure and never does. Fire-and-forget past that point, same
- * shape every other port in this project already has: a failing or
- * partial focus (the exact step failed, only the app raised) is never
- * worse than before this ticket existed, so this always answers `{ ok:
- * true }` once a plan was built at all; `level` rides along for the
- * human's own curiosity, never asserted on by the view.
+ * `POST /sessions/<id>/focus`: the Daemon runs the focus command only on
+ * this click, never on its own. Resolves the live tmux outer app here,
+ * server-side — the one place a real process can be spawned; `planFocus`
+ * itself stays pure and never does. Fire-and-forget past that point: a
+ * failing or partial focus is never worse than not focusing at all, so
+ * this always answers `{ ok: true }` once a plan was built; `level` rides
+ * along for the human's own curiosity, never asserted on by the view.
  */
 function focusSessionResponse(ctx: DaemonContext, id: string): Response {
   let locator: TerminalLocator | undefined;
@@ -791,12 +699,12 @@ function focusSessionResponse(ctx: DaemonContext, id: string): Response {
   return Response.json({ ok: true, level: plan.level });
 }
 
-/** A refusal `archiveSession` reported WITHOUT appending anything — "this Session's own state forbids it" (409), the same shape `runRefusalResponse`/`resolveItemResponse` already use for an Inbox item. */
+/** A refusal with nothing appended — "this session's own state forbids it," answered as 409. */
 function archiveRefusalResponse(refusal: ArchiveRefusal): Response {
   return Response.json({ error: refusal.kind }, { status: 409 });
 }
 
-/** `POST /sessions/<id>/archive` (ticket 11, added 2026-10-27): the human's `x`/archivar click on a TERMINÓ card. Idempotent — a repeat archive still 200s (`alreadyArchived: true`), same convention `/items/<id>/done` already follows. */
+/** `POST /sessions/<id>/archive`: the human's `x`/archivar click on a TERMINÓ card. Idempotent — a repeat archive still 200s with `alreadyArchived: true`. */
 function archiveSessionResponse(ctx: DaemonContext, id: string): Response {
   try {
     const result = archiveSession(ctx.home, id);
@@ -819,29 +727,20 @@ function sessionActionResponse(ctx: DaemonContext, pathname: string): Response |
 }
 
 /**
- * The Daemon's routing table for everything `routes` (below) doesn't claim
- * (ticket 07, narrowed by ticket 08, extended by ticket 09). `GET /` moved
- * OFF this fetch handler and onto `Bun.serve`'s own `routes` table — the
- * bundled React page is a static HTML-import route now, which is what
- * gives it (and every asset it references) Bun's automatic bundling AND,
- * per decision 05, the SAME "open read, no token" treatment every other
- * static route gets for free: there is no per-request logic a static route
- * could skip, unlike the old `indexResponse` it replaces. `GET /health`,
- * `GET /events` and `GET /auth` are the only OPEN reads still answered
- * HERE — `/auth` validates the token itself, so it cannot sit behind the
- * token gate below. Everything else — any other path, any non-GET method,
- * including every write route ticket 09 (`run`, `done`, `dismiss`), ticket
- * 10 (`answer`) and ticket 11 (`/sessions/<id>/focus`, `/sessions/<id>/archive`
- * — their own pattern, never nested under `/items/`) add — is DENIED BY
- * DEFAULT unless it carries the token: `itemActionResponse` and
- * `sessionActionResponse` are called only AFTER that gate, never wrapped
- * around any route individually, so there is no path to "write" here that
- * could ever be written without it.
+ * The Daemon's routing table for everything `routes` (below) doesn't
+ * claim. `GET /` is a static HTML-import route on `Bun.serve`'s own
+ * `routes` table instead — that gives it (and every asset it references)
+ * Bun's automatic bundling and the same "open read, no token" treatment
+ * every other static route gets for free. `GET /health`, `GET /events`
+ * and `GET /auth` are the only open reads still answered here — `/auth`
+ * validates the token itself, so it can't sit behind the token gate
+ * below. Everything else is denied by default unless it carries the
+ * token: `itemActionResponse` and `sessionActionResponse` are called only
+ * AFTER that gate, never wrapped around any route individually, so there
+ * is no path to a write here that could skip it.
  *
- * Takes `server` as the handler's own second parameter (`Bun.serve`'s own
- * shape — `fetch(req, server)`) ONLY so `/events` can call
- * `server.timeout(req, 0)` (ticket 13, criterion 2) — no other route needs
- * it.
+ * Takes `server` as the handler's second parameter only so `/events` can
+ * call `server.timeout(req, 0)` — no other route needs it.
  */
 export function createFetchHandler(
   ctx: DaemonContext,
@@ -876,14 +775,14 @@ export type DaemonProbeResult =
   | { kind: "free" };
 
 /**
- * Identify whether a Tenaza is ALREADY serving on `port` by its `/health`
- * RESPONSE — never by the port merely being busy (ticket 07's own
- * distinction): a stale `daemon.alive`/`daemon.token` from a crashed Daemon
- * is never consulted here, so it can never block a new launch either. Three
- * outcomes: a live Tenaza (`"tenaza"`), something else answering on that
- * port (`"other"`, e.g. another dev server) — or nothing answering at all
- * (`"free"`, including a hung non-HTTP listener that a short timeout gives
- * up on exactly like a refused connection).
+ * Identifies whether a Tenaza is already serving on `port` by its
+ * `/health` response — never by the port merely being busy: a stale
+ * `daemon.alive`/`daemon.token` from a crashed Daemon is never consulted
+ * here, so it can never block a new launch either. Three outcomes: a live
+ * Tenaza (`"tenaza"`), something else answering (`"other"`, e.g. another
+ * dev server), or nothing answering at all (`"free"`, including a hung
+ * non-HTTP listener that a short timeout gives up on like a refused
+ * connection).
  */
 export async function probeExistingDaemon(
   port: number,
@@ -918,16 +817,14 @@ export interface RunUiOptions {
   port?: number;
   home?: string;
   /**
-   * Ticket 12: `false` for the Homebrew `service` block's own launch
+   * `false` for the Homebrew `service` block's own launch
    * (`tenaza ui --no-open`) — never pop a browser window on a LaunchAgent
-   * (re)start nobody just asked for (`cli.ts`'s `parseUiArgs` own doc
-   * comment has the full reasoning). Defaults to `true`: a human running
-   * `tenaza ui` by hand is unaffected.
+   * (re)start nobody asked for. Defaults to `true`.
    */
   open?: boolean;
 }
 
-/** Writes straight to process.stdout/stderr, same as every other command in `cli.ts` — tests observe this at the real black-box seam (spawn the CLI, read its stdout), never by importing this module's internals. */
+/** Writes straight to process.stdout/stderr — tests observe this at the black-box seam (spawn the CLI, read its stdout), never by importing this module's internals. */
 function print(line: string): void {
   process.stdout.write(`${line}\n`);
 }
@@ -937,11 +834,10 @@ function printErr(line: string): void {
 }
 
 /**
- * `tenaza ui` (ticket 07): serve the Daemon on `--port` (default 4747) until
- * Ctrl-C. Single instance first (the port is the lock, decision 05): a
- * Tenaza already there is opened, not duplicated; a non-Tenaza holder — or
- * a genuine bind race — gets a clear message, never a raw `EADDRINUSE`
- * (ticket 07's own AC).
+ * `tenaza ui`: serves the Daemon on `--port` (default 4747) until Ctrl-C.
+ * Single instance first — the port is the lock: a Tenaza already there is
+ * opened, not duplicated; a non-Tenaza holder, or a genuine bind race,
+ * gets a clear message, never a raw `EADDRINUSE`.
  */
 export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const home = options.home ?? tenazaHome();
@@ -949,23 +845,18 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const shouldOpen = options.open ?? true;
 
   /**
-   * Register SIGINT/SIGTERM as the very FIRST thing this function does —
-   * well before the bind, let alone the startup line a caller might be
-   * waiting on. This is deliberate, not incidental ordering: a process
-   * that prints "serving on ..." and is signaled within the SAME instant
-   * (exactly what a test driving this over a pipe does, the instant it
-   * sees that line) can still take the runtime's OWN default
-   * signal-terminates-the-process disposition — exit 130, not "Ctrl-C
-   * stops it" (ticket 07's own words) — if the OS-level signal watcher
-   * underneath `process.on` hasn't finished wiring up yet (observed
-   * directly: registering right before the `await` below raced and lost
-   * to an immediate `kill -INT` about half the time; registering here,
-   * first, gave the runtime's signal plumbing the whole probe+bind
-   * sequence's worth of wall-clock time to settle, and it never raced
-   * again). `shutdown` starts as a no-op and is replaced once there is
-   * something real to tear down — a signal before that point (impossible
-   * in practice; probing + binding is near-instant) would simply resolve
-   * immediately with nothing to clean up yet.
+   * Registered as the very first thing this function does, well before
+   * the bind or the startup line a caller might be waiting on — a
+   * deliberate ordering, not incidental. A process signaled in the same
+   * instant it prints "serving on ..." can still fall through to the
+   * runtime's own default signal-terminates-the-process disposition (exit
+   * 130, not a clean stop) if the OS-level signal watcher underneath
+   * `process.on` hasn't finished wiring up yet; registering it here,
+   * before the probe+bind sequence, gives that wiring the whole
+   * sequence's worth of time to settle. `shutdown` starts as a no-op and
+   * is replaced once there is something real to tear down — a signal
+   * before that point is near-impossible (probing + binding is
+   * near-instant) and would simply resolve with nothing to clean up yet.
    */
   let shutdown: () => void = () => {};
   const shutdownRequested = new Promise<void>((resolve) => {
@@ -1004,17 +895,15 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
 
   let server: ReturnType<typeof Bun.serve>;
   try {
-    // `routes` claims "/" with the HTML import (ticket 08): Bun bundles the
-    // React board and every asset it references — JS, CSS, the vendored
-    // Geist woff2 files — and serves them, embedded straight into the
-    // `--compile` binary, with no further wiring here. `fetch` stays the
-    // fallback for everything `routes` doesn't claim (health, events, and
-    // every write route tickets 09-11 add). `Bun.serve`'s own `idleTimeout`
-    // (default 10s) is left untouched here — ticket 13, criterion 2's fix
-    // is `eventsResponse`'s own per-request `server.timeout(req, 0)`,
-    // never a server-wide setting, since every OTHER route on this server
-    // is a plain request/response that finishes instantly and has no
-    // reason to opt out of the default.
+    // `routes` claims "/" with the HTML import: Bun bundles the React
+    // board and every asset it references — JS, CSS, the vendored Geist
+    // woff2 files — straight into the `--compile` binary, no further
+    // wiring here. `fetch` stays the fallback for everything `routes`
+    // doesn't claim. `Bun.serve`'s own `idleTimeout` is left untouched
+    // here — the fix for a long-lived connection is `eventsResponse`'s own
+    // per-request `server.timeout(req, 0)`, never a server-wide setting,
+    // since every other route on this server finishes instantly and has
+    // no reason to opt out of the default.
     server = Bun.serve({
       port,
       hostname: "127.0.0.1",

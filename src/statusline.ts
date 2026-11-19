@@ -8,55 +8,31 @@ import { loadPolicy } from "./policy";
 import { closedOutSessionIndex, nodeCategory, readTouchedTimestamps } from "./sessions";
 import { describeAction } from "./status";
 
-/**
- * `tenaza statusline`'s own three counts — the same derived state `tenaza
- * status` renders as a tree + Inbox, folded down to numbers (ticket 07, AC4:
- * "its counts always agree with `tenaza status` for the same state").
- */
+/** Same derived state `tenaza status` renders as a tree + Inbox, folded into three counts — the two must always agree. */
 export interface StatuslineCounts {
-  /** Every Session whose OWN category (never rolled up) is "waits" or "alive" — i.e. not done, not ended. */
+  /** Every session whose own category (not rolled up) is "waits" or "alive". */
   live: number;
-  /** Every Session with the `measure` Capability whose latest sample is at or past the Policy's threshold (ADR 0001: a Session without `measure` can never be flagged, however large a stray sample is). */
+  /** Every session with the `measure` capability whose latest sample is at or past the threshold. */
   flagged: number;
-  /** The open Inbox's length — every `human`-Rule match not yet resolved, blocked or not (the GLOSSARY's own definition of an Inbox item, ticket 06). */
+  /** The open Inbox's length — every unresolved `human`-rule match, blocked or not. */
   inbox: number;
 }
 
-/**
- * The number of words from a command to show beside "most urgent" — 3, the
- * same the spec's own worked example uses ("gh pr merge" out of "gh pr merge
- * 58 --merge").
- */
 const FIRST_WORDS_COUNT = 3;
 
 export function firstWords(command: string, count: number = FIRST_WORDS_COUNT): string {
   return command.split(/\s+/).filter(Boolean).slice(0, count).join(" ");
 }
 
-/**
- * Every Session's own category (never rolled up — "vivas" counts individual
- * Sessions, not grouped roots) is "live" when it's "waits" or "alive":
- * anything that isn't done or ended yet. Mirrors `tenaza status`'s own
- * priority order (waits > alive > done > ended), read as a binary split here.
- */
 function isLive(category: ReturnType<typeof nodeCategory>): boolean {
   return category === "waits" || category === "alive";
 }
 
 /**
- * Derive the statusline's three counts from the same Events `tenaza status`
- * reads — no state kept beside them (ADR 0002). `flagged` is gated on the
- * `measure` Capability, exactly as `formatContextColumn` (sessions.ts) gates
- * the tree row's own `⚑` — never on whether a sample happens to exist.
- *
- * Reads `closedOutSessionIndex` (deepening ticket 01) — the SAME closed-out
- * index `tenaza status` and the board build, Activity touch merged in
- * before `closeDeadProcesses`/`closeSilentPidlessSessions` run — so a
- * Session whose runtime process is confirmed gone, or that went silent with
- * no pid at all, never counts toward "vivas" here either (ticket 02 AC1 /
- * ticket 06, the SAME rule every surface now applies), and ordinary
- * tool-call activity with no Event keeps a Session counted live exactly as
- * the board already did.
+ * `flagged` is gated on the `measure` capability, never on whether a
+ * sample happens to exist (matches `sessions.ts`'s own ⚑ gate). Uses
+ * `closedOutSessionIndex`, not a raw index, so a session whose process is
+ * confirmed dead — or went silent with no pid — never counts as live.
  */
 export function deriveStatuslineCounts(home: string = tenazaHome()): StatuslineCounts {
   const events = readAllSessionEvents(home);
@@ -82,14 +58,10 @@ export function deriveStatuslineCounts(home: string = tenazaHome()): StatuslineC
 }
 
 /**
- * The Inbox item named by the statusline's terse "most urgent" slot: the
- * MOST RECENTLY opened open item — `deriveInbox`'s last element, since its
- * ids are assigned by ascending chronological position. Matches the spec's
- * own User Story 6 worked example, where a Session blocked 4 minutes ago
- * (#14) is named over one blocked 2 hours ago (#13) — recency decides, not
- * whether the item is still `blocked` (ticket 07's own build-time call: an
- * unblocked item is still open and still real, so it can still be the one
- * named here).
+ * Most recently opened open item — `deriveInbox`'s last element, since ids
+ * are assigned in ascending chronological order. Recency decides, not
+ * whether it's still `blocked` — an unblocked item can still be the one
+ * named here.
  */
 export function mostUrgentInboxItem(home: string = tenazaHome()): InboxItem | undefined {
   const inbox = deriveInbox(home);
@@ -102,13 +74,7 @@ function formatFlagged(flagged: number, thresholdTokens: number): string {
   return `⚑ ${flagged} >${k}k`;
 }
 
-/**
- * The "most urgent" slot's own summary of `action` — `firstWords` of the
- * command for `shell` (unchanged, byte-for-byte, from ticket 07), or the
- * same tool-plus-args description `status`'s Inbox line uses for `mcp`
- * (ticket 04) — `top.action.command` simply doesn't exist on an `mcp`
- * Action, so this never falls back to a blind property read.
- */
+/** `firstWords` of the command for `shell`; `describeAction` for `mcp`, since `action.command` doesn't exist on that variant. */
 function formatInboxSummary(action: InboxItem["action"]): string {
   return action.kind === "shell" ? firstWords(action.command) : describeAction(action);
 }
@@ -119,41 +85,28 @@ function formatInbox(count: number, top: InboxItem | undefined, shortId: string 
 }
 
 /**
- * The "degradado" mark (ADR 0007, ticket 02): red, exactly while
- * `state/health.json` reports ANY fault — grave or not, since the
- * statusline is the one AMBIENT channel (decision 01's own word for it)
- * that reaches a human who never reads a `systemMessage` and never sees a
- * SessionStart warning. Empty string, never a bare space, when healthy —
- * so a caller can splice it into the line without a stray `·` showing up
- * for nothing. Reuses `contextbar.ts`'s own red: one "this needs you" color
- * across the line, never two.
+ * Red whenever `state/health.json` reports any fault, grave or not — the
+ * statusline is the one ambient channel that reaches a human who never
+ * reads a `systemMessage` or a SessionStart warning. Empty string, never
+ * a bare space, when healthy, so splicing it into the line leaves no
+ * stray `·`.
  */
 function formatHealthMark(home: string): string {
   return readHealth(home) === undefined ? "" : `${RED}degradado${RESET} ·`;
 }
 
 /**
- * Ticket 12: "the statusline shows a live dot while the heartbeat is
- * fresh" — the SAME freshness rule the live-answering hold and `tenaza
- * ui`'s own single-instance probe already read (`isHeartbeatFresh`,
- * `daemonlink.ts`'s `DEFAULT_HEARTBEAT_STALE_MS`), never a second
- * threshold for "is the Daemon up" (review lesson). Empty string, never a
- * bare space or a "daemon off" placeholder, while the Daemon is down —
- * it's opt-in (decision 05: "nothing starts on its own"), so its ordinary
- * state is absent, not a fault to announce the way `degradado` is.
+ * Uses the same freshness rule as everywhere else (`isHeartbeatFresh`,
+ * `DEFAULT_HEARTBEAT_STALE_MS`) — never a second staleness threshold for
+ * "is the Daemon up." Empty, not a placeholder, while the Daemon is down:
+ * it's opt-in, so being off is its ordinary state, not a fault like
+ * `degradado`.
  */
 function formatDaemonMark(home: string): string {
   return isHeartbeatFresh(readAlive(home), new Date()) ? `· ${GREEN}●${RESET} daemon` : "";
 }
 
-/**
- * `tenaza │ ● <n> vivas · ⚑ <n> >200k · ✉ <n> → #<id> <first words>` — the
- * spec's own format (q19), calm when `⚑` and `✉` are both 0 (no `>Nk`
- * suffix, no arrow). The `>Nk` suffix reflects the Policy's ACTUAL threshold
- * (ticket 04's own configurable one), never a hardcoded "200k" — a build-
- * time call: the bar's own `┊` mark already moves with a custom threshold,
- * so the statusline's number should never disagree with it.
- */
+/** The `>Nk` suffix always reflects the Policy's actual threshold, never a hardcoded number — the bar's own `┊` mark already moves with a custom threshold, so the two must never disagree. */
 export function formatStatusline(home: string = tenazaHome()): string {
   const counts = deriveStatuslineCounts(home);
   const thresholdTokens = loadPolicy(home).thresholdTokens;

@@ -6,12 +6,7 @@ import { type Action, type McpAction, EffectSchema } from "./contract/event";
 import { policyLkgPath, policyPath, tenazaHome } from "./paths";
 import { matchesContiguousRun, parseExecutedCommands, words } from "./shellparse";
 
-/**
- * A `shell` Rule (unchanged from ticket 03): a text pattern matched against
- * a normalized `shell` Action's parsed command. Matching is text on the
- * Action — a guardrail against honest agent mistakes, not a security
- * boundary.
- */
+/** A text pattern matched against a normalized `shell` Action's parsed command — a guardrail against honest mistakes, not a security boundary. */
 export const ShellRuleSchema = z.object({
   match: z.string(),
   effect: EffectSchema,
@@ -19,15 +14,11 @@ export const ShellRuleSchema = z.object({
 export type ShellRule = z.infer<typeof ShellRuleSchema>;
 
 /**
- * An `mcp` Rule (ticket 04, decision 07): `tool` is a glob on the tool's own
- * name (`*` as the only wildcard, e.g. "mcp__*neon*__run_sql*"); `unless`
- * EXEMPTS the match when a (dotted) argument path holds one of the listed
- * safe values — an ABSENT argument never counts as safe, it still matches
- * (the Neon worked example: no `branch_id` hits the default branch, which
- * is prod); `when` REQUIRES a (dotted) argument path to equal the given
- * value. An array argument satisfies either check when ANY of its elements
- * does. No per-provider code, and argument CONTENT (SQL text and the like)
- * is never inspected — only these two structural conditions are.
+ * An `mcp` Rule: `tool` is a glob on the tool's name (`*` the only
+ * wildcard); `unless` exempts a match whose argument already holds a safe
+ * value, `when` requires an argument to equal one. An array argument
+ * satisfies either when any element does. Argument CONTENT is never
+ * inspected — only these two structural conditions are.
  */
 export const McpRuleSchema = z.object({
   tool: z.string(),
@@ -39,10 +30,10 @@ export type McpRule = z.infer<typeof McpRuleSchema>;
 
 /**
  * One entry of the Policy, either shape — discriminated by which REQUIRED
- * field it carries (`match` vs `tool`) since neither TOML table declares a
+ * field it carries (`match` vs `tool`), since neither TOML table declares a
  * literal kind of its own. A malformed entry (neither, or a type mismatch)
- * fails the whole `policy.toml` parse and degrades the way ticket 01's LKG
- * path does — it never disables every OTHER Rule on its own.
+ * fails the whole `policy.toml` parse — it never disables every OTHER Rule
+ * on its own.
  */
 export const RuleSchema = z.union([ShellRuleSchema, McpRuleSchema]);
 export type Rule = z.infer<typeof RuleSchema>;
@@ -56,50 +47,36 @@ export function isMcpRule(rule: Rule): rule is McpRule {
 
 export interface Policy {
   rules: Rule[];
-  /** The context size past which a Session is Flagged (q9). Shown, never enforced — v1 never stops a Session. */
+  /** The context size past which a Session is Flagged; shown only, never enforced. */
   thresholdTokens: number;
   /**
    * How many minutes a Session may stay silent before the Live surface
-   * reads it as TRABADA (ticket 08, decision 04) — `[live] stall_minutes`
-   * in `policy.toml`. This is THE one place the value is read: the Daemon
-   * carries it in the SSE payload and the board classifies on it, so the
-   * board and this file can never disagree on what "stalled" means. No
-   * hook reads this (decision 05: "hooks never talk to it").
+   * reads it as TRABADA — `[live] stall_minutes` in `policy.toml`. Read
+   * only here, by the Daemon's SSE payload and the board's own classifier,
+   * so the two can never disagree on what "stalled" means.
    */
   stallMinutes: number;
   /**
-   * How many seconds a `human` match holds the agent's call for a live
-   * answer before it lapses to pending (ticket 10, decision 06) —
-   * `[live] wait_seconds` in `policy.toml`. Read raw here, exactly as the
-   * human configured it; `effectiveWaitSeconds` below is the ONE place that
-   * caps it against the hook's own timeout budget — this field never
-   * carries that cap pre-applied, so a human inspecting their own Policy
-   * sees the number they actually wrote.
+   * How many seconds a `human` match holds the agent's call before it
+   * lapses to pending — `[live] wait_seconds` in `policy.toml`, read raw
+   * and uncapped; `effectiveWaitSeconds` below applies the hook's timeout
+   * cap.
    */
   waitSeconds: number;
 }
 
-/** The Flag's own default (spec: "The threshold comes from the Policy, default 200k"). */
 export const DEFAULT_CONTEXT_THRESHOLD = 200_000;
-
-/** The Live surface's own default (spec: "default 15") when `[live] stall_minutes` is absent. */
 export const DEFAULT_STALL_MINUTES = 15;
-
-/** The live-answering window's own default (spec: "3 minutes by default") when `[live] wait_seconds` is absent. */
 export const DEFAULT_WAIT_SECONDS = 180;
 
 /**
- * The live-answering window's own ceiling (spec: "capped at the hook
- * timeout minus 30s") — `hooks/hooks.json`'s own PreToolUse `timeout` (240s)
- * minus a 30s margin for the hook's own side effects (logging, deriving the
- * id, notifying) to still finish inside Claude Code's own deadline even on
- * the slowest tick. A human may configure `wait_seconds` past this; the
- * hold itself never waits longer than this ceiling regardless
- * (`effectiveWaitSeconds`).
+ * The ceiling on the live-answering window — `hooks/hooks.json`'s own
+ * PreToolUse `timeout` (240s) minus a 30s margin for the hook's own side
+ * effects (logging, deriving the id, notifying) to finish before Claude
+ * Code's own deadline.
  */
 export const MAX_WAIT_SECONDS = 210;
 
-/** Never longer than the hook's own budget allows, whatever `[live] wait_seconds` asks for (ticket 10). The ONE place this cap is applied — every reader of "how long does this hold actually wait" (the hook's own poll loop, the board's draining bar) calls this rather than reading `Policy.waitSeconds` raw. */
 export function effectiveWaitSeconds(policy: Pick<Policy, "waitSeconds">): number {
   return Math.min(policy.waitSeconds, MAX_WAIT_SECONDS);
 }
@@ -110,17 +87,11 @@ const PolicyFileSchema = z.object({
   live: z.object({ stall_minutes: z.number().optional(), wait_seconds: z.number().optional() }).optional(),
 });
 
-/**
- * The last-known-good Policy's own on-disk shape (ADR 0007, H3): the
- * already-parsed, validated result — never the raw TOML — plus when it was
- * saved.
- */
 const LkgFileSchema = z.object({
   rules: z.array(RuleSchema),
   thresholdTokens: z.number(),
-  /** Optional only so an LKG written before this field existed still parses — it degrades to the default rather than losing the WHOLE cache (ADR 0007's own spirit: a missing piece never takes down what still reads fine). */
+  /** Optional so an LKG written before this field existed still parses — it degrades to the default instead of losing the whole cache. */
   stallMinutes: z.number().optional(),
-  /** Same optionality, same reason — an LKG written before ticket 10 still loads (ticket 10 fix, mirroring ticket 08's own stallMinutes precedent). */
   waitSeconds: z.number().optional(),
   savedAt: z.string(),
 });
@@ -155,11 +126,10 @@ function readPolicyFile(home: string): PolicyFileReadResult {
 }
 
 /**
- * Cache the last successfully parsed Policy to `state/policy.lkg.json`
- * (ADR 0007, H3) — the fallback a malformed `policy.toml` degrades to,
- * instead of silently dropping every Rule. A failure to WRITE this cache
- * must never fail the load that triggered it — it's a convenience, not the
- * source of truth.
+ * Caches the last successfully parsed Policy to `state/policy.lkg.json` —
+ * the fallback a malformed `policy.toml` degrades to. A failed write must
+ * never fail the load that triggered it: this cache is a convenience, not
+ * the source of truth.
  */
 function writeLkg(home: string, policy: Policy): void {
   try {
@@ -176,7 +146,7 @@ function writeLkg(home: string, policy: Policy): void {
       }),
     );
   } catch {
-    // See the doc comment above.
+    // Failing to write the LKG must never fail the load that triggered it.
   }
 }
 
@@ -199,19 +169,6 @@ function readLkg(home: string): { policy: Policy; savedAt: string } | undefined 
   }
 }
 
-/**
- * Load the user's Policy from `<home>/config/policy.toml`. A repo ships only
- * `policy.example.toml` and defaults — the user's own file is never
- * required, so an absent file degrades to no rules and the default
- * threshold, rather than an error.
- *
- * Never throws (ADR 0007, ticket 01): a malformed file degrades to the
- * last successfully parsed Policy (H3's own last-known-good), or — when
- * none was ever parsed — to no Rules at all, the same shape an absent file
- * already returns. `policyWarning` below reports whether THIS call
- * actually hit that fallback; `loadPolicy` itself only ever hands back
- * something usable.
- */
 const NO_RULES_POLICY: Policy = {
   rules: [],
   thresholdTokens: DEFAULT_CONTEXT_THRESHOLD,
@@ -219,6 +176,16 @@ const NO_RULES_POLICY: Policy = {
   waitSeconds: DEFAULT_WAIT_SECONDS,
 };
 
+/**
+ * Loads the user's Policy from `<home>/config/policy.toml`. The user's own
+ * file is never required — absent, it degrades to no rules and the
+ * default threshold.
+ *
+ * Never throws: a malformed file degrades to the last successfully parsed
+ * Policy, or to no rules when none was ever parsed. `policyWarning` below
+ * reports whether this call hit that fallback; this function only ever
+ * hands back something usable.
+ */
 export function loadPolicy(home: string = tenazaHome()): Policy {
   const file = policyPath(home);
   if (!existsSync(file)) return NO_RULES_POLICY;
@@ -235,18 +202,16 @@ export function loadPolicy(home: string = tenazaHome()): Policy {
 
 export interface PolicyWarning {
   message: string;
-  /** True only when NO last-known-good Policy ever existed — Rules are off entirely, not just stale (H3's "grave" case). */
+  /** True only when no last-known-good Policy ever existed — Rules are off entirely, not just stale. */
   grave: boolean;
 }
 
 /**
- * Re-derive whether `loadPolicy` just took its fallback path, as a REPORT
- * rather than a value (ADR 0007, ticket 01) — `undefined` when
- * `policy.toml` parsed cleanly, or is absent (a normal "nothing configured
- * yet" state, never a fault). Kept separate from `loadPolicy` itself so
- * every ordinary caller (sampling, the statusline, `decideAction`) keeps
- * asking only for a `Policy`; only the hook's own health report asks this
- * question too.
+ * Re-derives whether `loadPolicy` just took its fallback path, as a report
+ * rather than a value — `undefined` when `policy.toml` parsed cleanly or
+ * is absent (a normal state, never a fault). Kept separate so every
+ * ordinary caller keeps asking only for a `Policy`; only the hook's own
+ * health report asks this too.
  */
 export function policyWarning(home: string = tenazaHome()): PolicyWarning | undefined {
   if (!existsSync(policyPath(home))) return undefined;
@@ -270,20 +235,17 @@ export function policyWarning(home: string = tenazaHome()): PolicyWarning | unde
 
 export interface MatchOutcome {
   rule: Rule;
-  /** Set exactly when the command failed to parse and matching fell back to the v0.1 raw-substring check (ticket 03) — never set on a clean parse. */
+  /** Set when the command failed to parse and matching fell back to the raw-substring check — never set on a clean parse. */
   reason?: "parse_error";
 }
 
 /**
- * Could ANY `shell` Rule's first word possibly appear as a match in
- * `command`? If none of them is even present as a raw substring, no Rule —
- * parsed correctly or not — can ever match it: a Rule's full `match` text
- * can only be a substring of `command` if its own first word is too, and
- * the SAME holds for a parsed contiguous-run match, since every word a Rule
- * needs (its first one included) must appear SOMEWHERE in the executed
- * text for a run to exist. This is the prefilter (decision 02): the cheap
- * check that lets the hot path skip tree-sitter entirely on an ordinary
- * Bash call that names no Rule at all.
+ * Could ANY `shell` Rule's first word possibly appear in `command`? If
+ * none is even present as a raw substring, no Rule can match it — a
+ * Rule's full `match` text, or a parsed contiguous-run match, can only
+ * exist if its first word appears somewhere in the executed text. This
+ * prefilter lets the hot path skip tree-sitter entirely on a Bash call
+ * that names no Rule at all.
  */
 function mayMatchSomeRule(command: string, rules: readonly ShellRule[]): boolean {
   return rules.some((rule) => {
@@ -292,12 +254,11 @@ function mayMatchSomeRule(command: string, rules: readonly ShellRule[]): boolean
   });
 }
 
-/** The v0.1 behavior: the first Rule, in file order, whose `match` text is a raw substring of the command — the fallback a parse failure degrades to, never "no match" (the guard must never go empty). */
+/** The first Rule, in file order, whose `match` text is a raw substring of the command — the fallback a parse failure degrades to, never "no match": the guard must never go empty. */
 function matchByRawSubstring(command: string, rules: readonly ShellRule[]): ShellRule | undefined {
   return rules.find((rule) => command.includes(rule.match));
 }
 
-/** Convert an `mcp` Rule's tool glob (`*` the only wildcard) into a RegExp anchored to the whole string. */
 function globToRegExp(glob: string): RegExp {
   const pattern = glob
     .split("*")
@@ -306,7 +267,6 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${pattern}$`);
 }
 
-/** Reach a (possibly nested) argument by a dotted path, e.g. "params.branch_id". `undefined` on any missing or non-object step. */
 function argAtPath(args: Record<string, unknown>, dottedPath: string): unknown {
   let current: unknown = args;
   for (const key of dottedPath.split(".")) {
@@ -316,18 +276,17 @@ function argAtPath(args: Record<string, unknown>, dottedPath: string): unknown {
   return current;
 }
 
-/** `predicate` against `value`, or against ANY element when `value` is an array — decision 07's own "an array argument matches if any element does," applied uniformly to both `unless` and `when`. */
+/** `predicate` against `value`, or against ANY element when `value` is an array — the same array rule applied uniformly to both `unless` and `when`. */
 function matchesValueOrElement(value: unknown, predicate: (candidate: unknown) => boolean): boolean {
   return Array.isArray(value) ? value.some(predicate) : predicate(value);
 }
 
 /**
- * Does `rule.unless` exempt this call — i.e. is EVERY listed argument
- * already holding one of ITS OWN safe values? An absent argument never
- * counts as safe (the Neon worked example: no `branch_id` hits the default
- * branch, which is prod), so a Rule whose `unless` names an argument the
- * call never carries is never exempted. No `unless` at all is never an
- * exemption either — there's nothing to exempt it.
+ * Does `rule.unless` exempt this call — every listed argument already
+ * holding one of its own safe values? An absent argument never counts as
+ * safe (e.g. no `branch_id` hits the default branch, which is prod), so a
+ * Rule whose `unless` names an argument the call never carries is never
+ * exempted.
  */
 function exemptedByUnless(rule: McpRule, args: Record<string, unknown>): boolean {
   if (!rule.unless) return false;
@@ -338,7 +297,6 @@ function exemptedByUnless(rule: McpRule, args: Record<string, unknown>): boolean
   });
 }
 
-/** Does every `rule.when` condition hold? No `when` at all is vacuously true — the Rule carries no such requirement. */
 function satisfiesWhen(rule: McpRule, args: Record<string, unknown>): boolean {
   if (!rule.when) return true;
   return Object.entries(rule.when).every(([argPath, target]) =>
@@ -346,7 +304,7 @@ function satisfiesWhen(rule: McpRule, args: Record<string, unknown>): boolean {
   );
 }
 
-/** Does this `mcp` Rule match this `mcp` Action (decision 07)? The tool glob first — cheapest, and most calls name no Rule's tool at all — then `when`, then `unless`. */
+/** Does this `mcp` Rule match this `mcp` Action? Checks the tool glob first — cheapest, and most calls name no Rule's tool at all — then `when`, then `unless`. */
 function mcpRuleMatches(rule: McpRule, action: McpAction): boolean {
   if (!globToRegExp(rule.tool).test(action.tool)) return false;
   if (!satisfiesWhen(rule, action.args)) return false;
@@ -355,26 +313,23 @@ function mcpRuleMatches(rule: McpRule, action: McpAction): boolean {
 }
 
 /**
- * The first Rule, in file order, that matches the Action — a `shell` Action
- * against the Policy's `shell` Rules (ticket 03, decision 02, ADR 0006), or
- * an `mcp` Action against its `mcp` Rules (ticket 04, decision 07). A
- * `shell` Action's command is parsed with tree-sitter-bash, and a Rule
+ * The first Rule, in file order, that matches the Action — a `shell`
+ * Action against the `shell` Rules, or an `mcp` Action against the `mcp`
+ * Rules. A `shell` Action is parsed with tree-sitter-bash, and a Rule
  * matches when its words appear as a CONTIGUOUS RUN anywhere in some
- * executed command's argv — `timeout 60 gh pr merge 58` and
- * `sudo gh pr merge 58` match with no launcher table, while `rg "gh pr
- * merge"`, a heredoc body and a commit message never do, because a quoted
- * string stays one argv word. A parse failure or parser error falls back to
- * the v0.1 raw-substring match and reports `reason: "parse_error"` — the
- * caller logs that onto the Event; an `mcp` Action never takes this
- * fallback path, since there is no parse to fail. `undefined` means the
- * Action matched nothing at all. Takes only the `rules` a Policy carries —
- * never the whole `Policy` shape — since matching an Action has nothing to
- * do with the Flag threshold.
+ * executed command's argv — `timeout 60 gh pr merge 58` and `sudo gh pr
+ * merge 58` match, while `rg "gh pr merge"`, a heredoc body or a commit
+ * message never do, because a quoted string stays one argv word. A parse
+ * failure falls back to the raw-substring match and reports `reason:
+ * "parse_error"`; an `mcp` Action never takes this path, since there is no
+ * parse to fail. Takes only the `rules` a Policy carries, never the whole
+ * `Policy`, since matching an Action has nothing to do with the Flag
+ * threshold.
  *
- * Async because loading the bash grammar (`parseExecutedCommands`) is: the
- * cost is paid only past the prefilter below, which is why it stays
- * synchronous and checked FIRST — most Bash calls return right there, with
- * no `await` ever reached. An `mcp` Action never awaits anything at all.
+ * Async because loading the bash grammar is costly — a cost paid only past
+ * the prefilter below, which stays synchronous and runs first so most Bash
+ * calls return without ever reaching an `await`. An `mcp` Action never
+ * awaits at all.
  */
 export async function matchRule(
   action: Action,

@@ -1,46 +1,31 @@
 import type { TerminalLocator } from "./contract/event";
 
 /**
- * Go to the agent's terminal (decision 09, ticket 11). "Focusing is NOT an
- * Adapter Capability: it belongs to the terminal, not the runtime" (spec) —
- * so this module is CORE, not an Adapter: it never reads `process.env`
- * itself (that is `terminallocator.ts`'s own job, at SessionStart, once),
- * and it resolves a terminal table over whatever `TerminalLocator` it is
- * handed. A new terminal is a new ROW here — never a new `if` branch
- * anywhere else in this file.
- *
- * Two levels, per the research (`docs/research/tenaza-focus-agent-terminal.md`):
- * level 1 always raises the terminal APPLICATION (`open -b <bundle>`);
- * level 2 focuses the exact tab/pane when the row can. `planFocus` below is
- * PURE — it never spawns a process itself (that is `focus.ts`'s own job,
- * the focuser port) — so every row's own command can be asserted directly
- * against a captured (fixture) locator, never a real focus.
+ * Focusing is core, not an Adapter — it isn't runtime-specific, so it
+ * never reads `process.env` or spawns a process itself; that capture
+ * happens once, in `terminallocator.ts`, at SessionStart.
  */
 
 export type FocusLevel = "exact" | "app" | "unknown";
 
-/** One step the focuser port (`focus.ts`) can run, in order. `env` (spawn only) layers ON TOP of the focuser's own process env — WezTerm's CLI needs `WEZTERM_UNIX_SOCKET` set exactly this way when reaching a non-default instance. */
+/** `env` (spawn only) is layered on top of the focuser's own process env, never replacing it — WezTerm needs `WEZTERM_UNIX_SOCKET` set this way to reach a non-default instance. */
 export type FocusStep =
   | { kind: "spawn"; argv: string[]; env?: Record<string, string> }
   | { kind: "osascript"; script: string };
 
 export interface FocusPlan {
   level: FocusLevel;
-  /** The terminal app's own display name — undefined only when `level` is "unknown" (nothing was ever captured to raise). */
+  /** The terminal app's own display name — undefined only when `level` is "unknown". */
   appLabel: string | undefined;
-  /** In click order — an exact-tab step first (when one was built), then a Level-1 app raise UNLESS the exact step already raises the window on its own. Empty exactly when `level` is "unknown". */
+  /** In click order — an exact-tab step first (when one was built), then a Level-1 app raise unless the exact step already raises the window on its own. Empty exactly when `level` is "unknown". */
   steps: FocusStep[];
 }
 
 /**
- * What a LIVE resolution contributes, for the one row that structurally
- * needs it (tmux — research §1.2: the client tty to target with
- * `switch-client -c` is never captured at SessionStart, only discoverable
- * from `tmux list-clients` at CLICK time, since the outer vars captured
- * then describe whatever started the tmux SERVER, not the attached
- * client). `undefined` fields degrade gracefully — see `planFocus`'s own
- * doc on what happens when live resolution wasn't attempted or came back
- * empty.
+ * What a live resolution contributes — needed only for tmux, whose client
+ * tty for `switch-client -c` is never captured at SessionStart: the outer
+ * vars captured then describe whatever started the tmux server, not the
+ * attached client, so it's only discoverable live, via `list-clients`.
  */
 export interface LiveFacts {
   tmuxOuter?: { clientTty: string; bundleId?: string };
@@ -49,25 +34,25 @@ export interface LiveFacts {
 interface TerminalRow {
   id: string;
   label: string;
-  /** The row's own candidate bundle ids for the Level-1 raise, best first — empty for a multiplexer row (tmux/zellij), whose raise target is the OUTER app, never the multiplexer itself. */
+  /** The row's own candidate bundle ids for the Level-1 raise, best first — empty for a multiplexer row, whose raise target is the outer app, never the multiplexer itself. */
   bundleIds: string[];
   needsTcc: boolean;
-  /** This row's own CAPABILITY when it matches — tmux/zellij declare "exact" even though building it may still degrade per-session (`buildExact` returning `undefined`): the ONE static fact per row the ticket's own data shape names. */
+  /** This row's declared capability — tmux/zellij declare "exact" even though `buildExact` may still degrade to `undefined` for a given session. */
   level: "exact" | "app";
   isMultiplexer: boolean;
-  /** True when this row's own exact-tab command ALREADY raises the window (every AppleScript `activate`, Ghostty's `focus`, kitty's `focus-window`) — a Level-1 raise is skipped only then. */
+  /** True when this row's own exact-tab command already raises the window (every AppleScript `activate`, Ghostty's `focus`, kitty's `focus-window`) — a Level-1 raise is skipped only then. */
   raisesWindow: boolean;
   detect(locator: TerminalLocator): boolean;
-  /** `undefined` when this row matched but the locator (plus `liveFacts`, for tmux) doesn't carry enough to build an exact command for THIS session — never a guess. */
+  /** `undefined` when this row matched but the locator (plus `liveFacts`, for tmux) doesn't carry enough to build an exact command for this session — never a guess. */
   buildExact(locator: TerminalLocator, liveFacts: LiveFacts): FocusStep[] | undefined;
 }
 
-/** Escape a string for a double-quoted AppleScript literal — same two replacements `notify.ts`'s own `quoteAppleScriptString` already makes (backslash, then quote), kept local here rather than importing a notifier-named function into a module that has nothing to do with notifications. */
+/** Escape a string for a double-quoted AppleScript literal — kept local rather than importing a notifier-named function into a module that has nothing to do with notifications. */
 function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/** Apple Terminal (research §1.7): the tab whose own `tty` matches, selected, window 1 raised, then `activate` (which also raises the app — `raisesWindow: true`). Tty is the documented, exposed join key — `TERM_SESSION_ID` is not in the sdef at all. */
+/** Tty is the documented, exposed join key in Apple Terminal's AppleScript dictionary — `TERM_SESSION_ID` isn't in the sdef at all. */
 function appleTerminalScript(tty: string): string {
   const needle = quoteAppleScriptString(tty);
   return (
@@ -86,7 +71,7 @@ function appleTerminalScript(tty: string): string {
   );
 }
 
-/** iTerm2 (research §1.3): sessions expose `tty` as a documented property (the ITERM_SESSION_ID → UUID match is community knowledge, never relied on here); `select` makes the session active in its tab, then `activate` raises the app. */
+/** iTerm2 exposes `tty` as a documented session property — the common `ITERM_SESSION_ID` → UUID match is community knowledge only, never relied on here. */
 function iterm2Script(tty: string): string {
   const needle = quoteAppleScriptString(tty);
   return (
@@ -106,7 +91,7 @@ function iterm2Script(tty: string): string {
   );
 }
 
-/** Ghostty (research §1.6): no per-surface id is exported, so the match is the documented heuristic — "every terminal whose working directory contains" the captured `PWD`; `focus` raises the window on its own. "best guess" when more than one surface matches is the UI's own label to show (`terminals.ts` never knows how many matched). */
+/** Ghostty exports no per-surface id, so the match is a heuristic — the first terminal whose working directory contains the captured `PWD`; ambiguous when more than one surface matches. */
 function ghosttyScript(pwd: string): string {
   const needle = quoteAppleScriptString(pwd);
   return `tell application id "com.mitchellh.ghostty" to focus (first terminal whose working directory contains ${needle})`;
@@ -115,12 +100,10 @@ function ghosttyScript(pwd: string): string {
 const ORCA_CLI_PATH = "/Applications/Orca.app/Contents/Resources/bin/orca";
 
 /**
- * Ship ORDER matters here beyond readability: `detectRow` below is a plain
- * `.find`, and the two multiplexer rows come FIRST so "multiplexer vars
- * win" (spec, decision 09) falls out of array order alone — a Session
- * inside tmux also carries (stale, inherited) outer vars (research §1.2's
- * own reproduced gotcha), and matching Orca or Apple Terminal on those
- * first would raise the WRONG terminal entirely.
+ * Order matters here beyond readability: `detectRow` below is a plain
+ * `.find`, so the two multiplexer rows come FIRST — a Session inside tmux
+ * also carries stale, inherited outer-terminal vars, and matching Orca or
+ * Apple Terminal on those first would raise the WRONG terminal entirely.
  */
 const ROWS: TerminalRow[] = [
   {
@@ -222,7 +205,8 @@ const ROWS: TerminalRow[] = [
     level: "exact",
     isMultiplexer: false,
     raisesWindow: true,
-    // Research §1.5: only reachable at level 2 when remote control was configured (`KITTY_LISTEN_ON` captured) — otherwise `buildExact` returns `undefined` below and `planFocus` degrades this session's OWN level to "app", never claiming exact on a guess.
+    // Needs kitty's remote control enabled (`KITTY_LISTEN_ON` captured) to
+    // reach level 2 — otherwise `planFocus` degrades to "app", never a guess.
     detect: (l) => l.kittyWindowId !== undefined,
     buildExact: (l) =>
       l.kittyWindowId && l.kittyListenOn
@@ -235,7 +219,7 @@ export function detectRow(locator: TerminalLocator): TerminalRow | undefined {
   return ROWS.find((row) => row.detect(locator));
 }
 
-/** Friendly display names for the app-level fallback's own well-known bundle ids (research §1.8-§1.10) — a bundle id this map doesn't carry falls back to `outerApp`'s own basename, never a raw reverse-DNS string on the card. */
+/** Friendly display names for well-known bundle ids — a bundle id not in this map falls back to `outerApp`'s basename, never a raw reverse-DNS string on the card. */
 const KNOWN_APP_LABELS: Record<string, string> = {
   "dev.warp.Warp-Stable": "Warp",
   "org.alacritty": "Alacritty",
@@ -261,13 +245,7 @@ function buildOpenStep(bundleId: string | undefined, outerApp: string | undefine
   return undefined;
 }
 
-/**
- * The generic Level-1 fallback (research's own "covers Warp, Alacritty, VS
- * Code, Cursor and unknown terminals"): no row above matched at all, but
- * the capture still walked to an outermost `.app` or caught
- * `__CFBundleIdentifier` — raise it, app-level only, never an exact tab
- * (there is no row that knows how).
- */
+/** Raises whatever `.app` or bundle id the capture still caught, app-level only — there's no row here that knows how to build an exact tab. */
 function genericFallbackPlan(locator: TerminalLocator): FocusPlan {
   const raise = buildOpenStep(locator.bundleId, locator.outerApp);
   if (!raise) return { level: "unknown", appLabel: undefined, steps: [] };
@@ -275,12 +253,11 @@ function genericFallbackPlan(locator: TerminalLocator): FocusPlan {
 }
 
 /**
- * Resolve `locator` (plus whatever `liveFacts` a caller already resolved
+ * Resolves `locator` (plus whatever `liveFacts` a caller already resolved
  * live, for tmux) into the ordered steps the focuser port should run.
- * PURE — never spawns anything itself. A `locator` of `undefined` (no
- * `session.started.terminal` at all — legacy v0.1 data, or a Session whose
- * start hook never captured anything) is the "terminal desconocida" case:
- * `level: "unknown"`, no steps, never a crash.
+ * PURE — never spawns anything itself, so every row's command can be
+ * asserted against a fixture locator. `locator` of `undefined` — no
+ * capture at all — degrades to "unknown", no steps, never a crash.
  */
 export function planFocus(locator: TerminalLocator | undefined, liveFacts: LiveFacts = {}): FocusPlan {
   if (!locator) return { level: "unknown", appLabel: undefined, steps: [] };
@@ -291,10 +268,6 @@ export function planFocus(locator: TerminalLocator | undefined, liveFacts: LiveF
   const exactSteps = row.buildExact(locator, liveFacts);
   const steps: FocusStep[] = exactSteps ? [...exactSteps] : [];
 
-  // Append the Level-1 raise unless the exact step already raised the
-  // window on its own (`raisesWindow`) — which never applies when there
-  // was no exact step to begin with (a degraded-to-app session still needs
-  // SOMETHING to raise).
   if (!exactSteps || !row.raisesWindow) {
     const liveBundle = row.isMultiplexer ? liveFacts.tmuxOuter?.bundleId : undefined;
     const bundle = row.bundleIds[0] ?? liveBundle ?? locator.bundleId;
@@ -302,40 +275,31 @@ export function planFocus(locator: TerminalLocator | undefined, liveFacts: LiveF
     if (raise) steps.push(raise);
   }
 
-  // A row matched, but neither an exact command nor a raise target could
-  // ever be built for THIS session (no bundle id, no outer app, nothing —
-  // e.g. Zellij detected on `zellijPane` alone with no `zellijSession` and
-  // no captured outer vars at all). `steps` is empty either way, so "app"
-  // would be a label with nothing behind it — report the honest
-  // "unknown" instead, same as no row matching in the first place.
+  // A row matched but nothing could be built for this session (e.g.
+  // Zellij's `zellijPane` captured without `zellijSession`) — `steps` is
+  // empty, so report "unknown" rather than an "app" label with nothing
+  // behind it.
   if (steps.length === 0) return { level: "unknown", appLabel: undefined, steps: [] };
 
   return { level: exactSteps ? row.level : "app", appLabel: row.label, steps };
 }
 
 /**
- * A synthetic `LiveFacts` used ONLY by `reachFor` below, to ask "if live
- * resolution succeeds at click time, what level would this row reach" —
- * never fed to the focuser port, never returned to a caller that might
- * execute it (the empty `clientTty` would build a useless `-c ""`). The
- * REAL click-time call (`daemon.ts`'s focus route) always passes whatever
- * `terminals.ts`'s own `resolveTmuxOuterLive` actually resolved — which may
- * of course come back `undefined`, degrading that ONE session's own result
- * to "app" even though its card showed "exact" ahead of the click. Research
- * `docs/research/tenaza-focus-agent-terminal.md` ships tmux in the same
- * "verified, no prompt" tier as Orca — label it "exact" on that same
- * strength, never the conservative "app" a literal `liveFacts: {}` would
- * otherwise force it down to for every tmux card on every render.
+ * A synthetic `LiveFacts` for `reachFor` only — asks "if live resolution
+ * succeeds at click time, what level would this row reach," without ever
+ * being fed to the focuser port (the empty `clientTty` would build a
+ * useless `-c ""`). Without it, every tmux card would render "app" even
+ * though tmux is just as reliably exact as Orca; the real click-time call
+ * always resolves `LiveFacts` for real, and degrades to "app" on its own
+ * if that resolution ever comes back empty.
  */
 const OPTIMISTIC_LIVE_FACTS: LiveFacts = { tmuxOuter: { clientTty: "" } };
 
 /**
- * The STATIC, pre-click reach a card's own label is built from (spec:
- * "Label by reach... ir a terminal ↗ / abrir App ↗ / terminal
- * desconocida") — computed WITHOUT attempting any live resolution (that
- * only ever happens inside the real click, server-side, in
- * `daemon.ts`'s focus route). `needsTcc` rides along so the UI can add the
- * spec's own "macOS va a pedir permiso" note.
+ * The pre-click reach a card's label renders from — computed without any
+ * live resolution, which only ever happens inside the real click
+ * (`daemon.ts`'s focus route). `needsTcc` rides along so the UI can warn
+ * that macOS will prompt for permission.
  */
 export function reachFor(
   locator: TerminalLocator | undefined,
@@ -346,15 +310,13 @@ export function reachFor(
 }
 
 // ---------------------------------------------------------------------------
-// The ONE real, I/O-performing resolution in this otherwise-pure module:
-// tmux's own live outer-app lookup (research §1.2's own recommendation —
-// "resolved live via list-clients, never from the stale hook env"). Used
-// only by `daemon.ts`'s focus route at click time; never exercised by the
-// `planFocus`/`reachFor` unit tests above, which pass `liveFacts` as a
-// fixture instead of ever spawning a real `tmux`.
+// The one I/O-performing resolution in this otherwise-pure module: tmux's
+// live outer-app lookup, resolved fresh via `list-clients` rather than off
+// the stale hook env. Used only by `daemon.ts`'s focus route at click
+// time — `planFocus`/`reachFor` above never call it, only ever a fixture.
 // ---------------------------------------------------------------------------
 
-/** Bounded walk (never infinite) up a PID's own parent chain to the outermost `.app` on the path — same technique the research doc's §2 describes, reused here for the ONE row (tmux) whose outer app cannot be read from the captured locator at all. */
+/** Walks a PID's parent chain to the outermost `.app` on its path — tmux's own outer app can't be read off the captured locator at all, only resolved live from a client's pid. */
 function outermostAppPath(startPid: string): string | undefined {
   let pid = startPid;
   let lastApp: string | undefined;
@@ -390,15 +352,11 @@ function bundleIdForAppPath(appPath: string): string | undefined {
 }
 
 /**
- * `tmux -S <socket> list-clients`, picking the most recently active client
- * (research §1.2: "With several clients attached, `client_activity` picks
- * the most recent") — its own `client_tty` is what `-c` targets, and its
- * `client_pid`, walked to the outermost `.app`, is the outer raise target.
- * Best-effort and NEVER THROWS: no tmux on PATH, no socket, no attached
- * client, or a `ps`/`mdls` call failing all degrade to `undefined` — the
- * caller (`daemon.ts`'s focus route) then falls through to the captured
- * (possibly stale) locator fields via `planFocus`'s own degrade path,
- * never a crash on the human's click.
+ * Picks the most recently active tmux client (by `client_activity`) when
+ * several are attached, then walks its pid to the outermost `.app` for
+ * the raise target. Never throws — any failure here falls through to the
+ * captured locator's own (possibly stale) fields via `planFocus`'s
+ * degrade path, never a crash on the human's click.
  */
 export function resolveTmuxOuterLive(socket: string): { clientTty: string; bundleId?: string } | undefined {
   try {

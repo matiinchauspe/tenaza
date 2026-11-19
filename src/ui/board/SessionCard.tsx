@@ -10,35 +10,27 @@ export interface SessionCardProps {
   tone: ColumnTone;
   statusLabel: string;
   selected: boolean;
-  /** Ticket 10: true when a SEPARATE, selected TE NECESITA card names THIS Session as its own — the spec's own cross-highlight ("selecting it highlights that Session's card"). Never true at the same time as `selected` carries the live-request outline; the two are visually distinct (`session-card--highlighted` vs `card--selected`). */
+  /** True when a separate, selected TE NECESITA card names this Session as its own. Visually distinct from `selected` — the two can differ. */
   highlighted: boolean;
   onSelect: (id: string) => void;
-  /** Ticket 10: fires the live request's own approve/reject — `message` is whatever `SessionCard`'s own local draft currently holds. `undefined` (never called) when `card.liveRequest` is itself `undefined`. */
+  /** `message` is whatever this card's own local draft currently holds. Never called when `card.liveRequest` is `undefined`. */
   onApprove: (id: string, message: string | undefined) => void;
   onReject: (id: string, message: string | undefined) => void;
-  /** Ticket 11: "from any card" — already bound to this Session's own id by `Board`. */
+  /** Already bound to this Session's own id by `Board`. */
   onFocusTerminal: () => void;
-  /** Ticket 11: true only on a TERMINÓ card (`Board`'s own gate, `key === "termino"`) — this component never checks its own column. */
+  /** Set by `Board`'s own gate — this component never checks its own column. */
   showArchive: boolean;
   onArchive: () => void;
 }
 
-/** Stop a click inside the live-request block from ALSO firing the card's own `onClick` (select) — same convention `InboxCard`'s own `stopCardSelect` already uses. */
 function stopCardSelect(event: { stopPropagation(): void }): void {
   event.stopPropagation();
 }
 
 /**
- * Ticket 10: the TE ESPERA block docked on a Session's own card while its
- * agent is held, live (spec "Requests vs agents" — never a TE NECESITA
- * card of its own). Owns a small local draft of the message input's text —
- * "props in, callbacks out" still holds (`onApprove`/`onReject` are the
- * only way anything leaves this component), a plain controlled input is
- * not a fetch. `r` (the board-level shortcut, `useBoardKeyboard`) focuses
- * THIS input by its own id (`liveMessageInputElementId`); `a` reads its
- * CURRENT value straight from the DOM rather than through React state,
- * since the keyboard hook holds no state of its own for a per-card draft —
- * see that hook's own doc for why.
+ * Owns a small local draft of the message input — a controlled input is not a fetch, so
+ * "props in, callbacks out" still holds. `r` focuses this input by its own id; `a` reads its
+ * current value straight from the DOM rather than through React state.
  */
 function LiveRequestBlock({
   sessionId,
@@ -85,11 +77,9 @@ function LiveRequestBlock({
           value={message}
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
-            // Enter fires REJECT with whatever is typed (spec's own worked
-            // example types a reason before rejecting); Escape just blurs.
-            // `a`/`r`/`j`/`k` typed here are never board shortcuts at all —
-            // `useBoardKeyboard`'s own `isTypingTarget` guard already
-            // ignores every key while this input has focus.
+            // Enter fires reject with whatever is typed; Escape just blurs. Keys typed here
+            // are never board shortcuts — `useBoardKeyboard`'s `isTypingTarget` guard already
+            // ignores them while this input has focus.
             if (event.key === "Enter") {
               onReject(liveRequest.id, draft);
               event.currentTarget.blur();
@@ -117,17 +107,7 @@ function LiveRequestBlock({
   );
 }
 
-/**
- * Ticket 14: the plain, non-actionable line a card grows while Claude
- * Code's OWN permission/idle prompt is the most recent thing observed for
- * it — a badge plus its age, nothing more. Deliberately NO approve/reject,
- * NO message input, NO draining bar: unlike `LiveRequestBlock` below,
- * Tenaza never raised this and can never answer it on the agent's behalf
- * (spec's "Requests vs agents" puts approval state on the agent's card for
- * a hold TENAZA owns — this follows that same placement principle for a
- * fact Tenaza only OBSERVES, while staying visually and behaviourally
- * distinct so pressing `a`/`r` here is never implied to do anything).
- */
+/** Deliberately no approve/reject, no message input, no draining bar — unlike `LiveRequestBlock`, Tenaza never raised this and can never answer it on the agent's behalf. */
 function NativeWaitBlock({ nativeWait }: { nativeWait: NonNullable<SessionCardViewModel["nativeWait"]> }) {
   return (
     <div className="native-wait" title={nativeWait.hint}>
@@ -137,7 +117,7 @@ function NativeWaitBlock({ nativeWait }: { nativeWait: NonNullable<SessionCardVi
   );
 }
 
-/** Ticket 05 ("Turn state: working vs waiting"): the plain, non-actionable line a card grows while its Turn just ended and nothing more specific (`NativeWaitBlock` above) is also current — same placement and "observed only, never actionable" rule, reusing the SAME muted "native" tone (Tenaza observes here too, and never owns a window it could act from). AC3: `backgroundCount > 0` appends "· N en segundo plano" right on the badge. */
+/** Reuses the same muted "native" tone as `NativeWaitBlock` — Tenaza observes here too, and never owns a window it could act from. */
 function TurnWaitBlock({ turnWait }: { turnWait: NonNullable<SessionCardViewModel["turnWait"]> }) {
   return (
     <div className="turn-wait">
@@ -163,7 +143,7 @@ function VerdictBadge({ verdictBadge }: { verdictBadge: NonNullable<SessionCardV
   );
 }
 
-/** The resolution trace's own line (spec "Requests vs agents") — composed straight from the already-resolved view-model fields, never re-deriving wording here. */
+/** Composed straight from the already-resolved view-model fields, never re-deriving wording here. */
 function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["resolutionTrace"]> }) {
   return (
     <div className={`resolution-trace resolution-trace--${trace.latest.tone}`} title={trace.moreCount > 0 ? trace.tooltip : undefined}>
@@ -174,24 +154,13 @@ function ResolutionTrace({ trace }: { trace: NonNullable<SessionCardViewModel["r
 }
 
 /**
- * A Session's card — CORRIENDO, TRABADA or TERMINÓ (ticket 08, restyled per
- * the approved prototype; ticket 10 adds the TE ESPERA block, the
- * resolution trace, and the cross-highlight; ticket 11 adds the terminal
- * button, plus an "archivar" button on a TERMINÓ card only — `showArchive`,
- * `Board`'s own gate). A TERMINÓ card offers archivar INSTEAD of the
- * terminal button (tenaza-v0-3 ticket 02): the agent is gone, and once a
- * closed window reads as TERMINÓ, so is the terminal it ran in. Ticket 07
- * (tenaza-v0-3): an UNKNOWN terminal reach renders no terminal button
- * either, for the same reason the TERMINÓ gate reads above — there is
- * nothing to focus — never the old greyed, disabled "terminal desconocida"
- * button. No uppercase `StatusBadge`
- * here: the prototype signals a Session's state with a small colored dot
- * in `l1` instead — the column it sits in already names that state in
- * text (its header), so the dot is reinforcement, not the only signal.
- * `aria-label` on the `<li>` itself is the non-visual channel that still
- * carries the status word, same accessibility bar the badge used to
- * satisfy. A TERMINÓ card reads at reduced opacity
- * (`session-card--termino`, prototype's `.ended`).
+ * A TERMINÓ card offers archivar instead of the terminal button: the agent is gone, and once
+ * a closed window reads as TERMINÓ, so is the terminal it ran in — the same reason an unknown
+ * terminal reach renders no button either.
+ *
+ * No uppercase `StatusBadge` for the card's own state: a small colored dot in `l1` is
+ * reinforcement, not the only signal, since the column it sits in already names that state in
+ * text. `aria-label` on the `<li>` itself carries the status word non-visually.
  */
 export function SessionCard({
   card,

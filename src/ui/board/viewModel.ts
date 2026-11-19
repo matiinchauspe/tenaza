@@ -1,13 +1,9 @@
 /**
- * The board's own view model (ticket 08): turns a `BoardPayload` plus the
- * CURRENT `now` into exactly what the presentational components render —
- * four columns of cards, already classified and formatted, plus the
- * flattened id order `useBoardKeyboard` walks with j/k. Pure: the same
- * `(payload, now)` pair always builds the same model, with no `Date.now()`
- * inside and no state of its own — `BoardApp` (the container) re-calls this
- * on every `useNow` tick, which is what makes "TIME IS STATE" actually
- * hold: a Session that stopped producing Events re-classifies here even
- * though the SSE payload itself hasn't changed at all.
+ * Turns a `BoardPayload` plus the current `now` into what the presentational components
+ * render — four columns of classified, formatted cards, plus the flattened id order
+ * `useBoardKeyboard` walks. Pure, with no `Date.now()` inside and no state of its own:
+ * `BoardApp` re-calls this on every tick, so a Session that stopped producing Events still
+ * re-classifies here even though the SSE payload itself hasn't changed.
  */
 
 import { computeContextTrack, formatContextNumber, type ContextTrack } from "../../contextbar";
@@ -32,102 +28,70 @@ import type {
   TurnWait,
 } from "../../contract/live";
 
-/**
- * Ticket 11 (decision 09): "Label by reach: 'ir a terminal ↗', 'abrir <App>
- * ↗'" (ticket). The ONE place this wording is picked, for both card kinds —
- * `SessionCard`/`InboxCard` only ever render whatever this returns, never
- * re-deriving it. Ticket 07 (tenaza-v0-3): an "unknown" reach renders NO
- * terminal button at all on either card (never the old greyed "terminal
- * desconocida" text), so this branch's return value is never actually
- * shown — kept as an empty string, not a dead literal nobody reads.
- */
+/** "unknown" returns an empty string rather than a dead literal nobody reads, since neither card shows a terminal button for it at all. */
 export function terminalLabelFor(reach: TerminalReach, appLabel: string | undefined): string {
   if (reach === "exact") return "ir a terminal ↗";
   if (reach === "app") return `abrir ${appLabel ?? "la terminal"} ↗`;
   return "";
 }
 
-/** `label` reuses `formatContextNumber` (`contextbar.ts`) — the SAME "243k" / "⚑243k" / "—" the CLI's `status` tree already shows, so a Session never reads two different numbers in two different places. */
+/** Reuses `formatContextNumber` so a Session shows the same "243k"/"⚑243k"/"—" here as in the CLI's status tree. */
 export type ContextDisplay = { kind: "track"; track: ContextTrack; label: string } | { kind: "unavailable" };
 
 export interface InboxCardViewModel {
   id: string;
   project: string;
-  /** The `ticket` Label verbatim, or `undefined` when none was ever announced — a card renders NOTHING for it then (human fix round), never a stray "— ". */
+  /** Verbatim, or `undefined` when none was ever announced — a card then renders nothing for it, never a stray "— ". */
   ticket: string | undefined;
   sessionId: string;
-  /** The bare tool name ("Bash", or an MCP tool's qualified name) — the card's own dimmed prefix inside its command box. */
   tool: string;
-  /** The stored shell command, or `undefined` for an `mcp` Action (it has none) — the card shows the tool name alone then. */
+  /** `undefined` for an `mcp` Action (it has none) — the card shows the tool name alone then. */
   command: string | undefined;
-  /** "tool: command", or the bare tool name — kept for the card's `title` attribute (the full, unclamped text) and for a screen reader's accessible name. */
+  /** "tool: command", or the bare tool name — the card's `title` attribute and accessible name. */
   toolLabel: string;
   age: string;
-  /** Denied and awaiting `run` vs. already ran unenforced (ticket 06, ADR 0001) — read-only in ticket 08, picks the card's badge. */
+  /** Denied and awaiting `run`, vs. already ran unenforced (ADR 0001) — picks the card's badge. */
   blocked: boolean;
-  /** Ticket 09: a YA CORRIÓ item (`blocked: false`) and an `mcp` item (no stored command) both offer no `run` — this is the ONE place that rule is computed, so `InboxCard` never re-derives it from `blocked`/`command` separately. */
+  /** An already-ran item (`blocked: false`) and an `mcp` item (no stored command) both offer no `run` — computed here once so `InboxCard` never re-derives it. */
   offersRun: boolean;
-  /** Ticket 11: "from any card" (spec) — the OWNING Session's own terminal button, already formatted (`terminalLabelFor`). */
   terminalLabel: string;
   terminalReach: TerminalReach;
   terminalNeedsTcc: boolean;
 }
 
-/**
- * Ticket 10: the TE ESPERA block a Session's own card grows while its
- * agent is held, live — the spec's own "command, a draining wait bar, a
- * message input, rechazar/aprobar". `id` is the item's FULL identity hash,
- * what the view's `answer` write (`a`/`r`, or the buttons) posts back
- * against — never shown on the badge itself (the prototype's own layout
- * carries no id here at all, unlike a pending TE NECESITA card).
- */
 export interface LiveRequestViewModel {
+  /** The full identity hash the `answer` write posts back against — never shown on the badge itself, unlike a pending TE NECESITA card's id. */
   id: string;
   tool: string;
   command: string | undefined;
   toolLabel: string;
   /** "hace Ns" since the hold began. */
   age: string;
-  /** Seconds left before the window lapses — the badge's own "TE ESPERA · Ns". Never negative. */
+  /** Seconds left before the window lapses — never negative. */
   remainingSeconds: number;
   /** 0..1, how much of the draining bar is still filled. */
   remainingFraction: number;
 }
 
 /**
- * Ticket 14: the plain, non-actionable block a Session's own card grows
- * while Claude Code's OWN permission/idle prompt is the most recent thing
- * observed for it — never a Tenaza hold (contrast `LiveRequestViewModel`
- * above, which carries `remainingSeconds`/`remainingFraction` for its OWN
- * draining window and an `id` the view can post an answer against). There
- * is no window Tenaza owns here, no command to show (Claude Code's own
- * `Notification` payload carries none), and no answer Tenaza can send —
- * `SessionCard` renders this with no aprobar/rechazar, no message input,
- * no draining bar: only a badge plus the age, so pressing `a`/`r` on a
- * card showing this never does anything it looks like it should.
+ * Pure observation of Claude Code's own permission/idle prompt — never a Tenaza hold
+ * (contrast `LiveRequestViewModel`, which carries an `id` the view can answer against).
+ * There's no window, no command, and no answer Tenaza can send: `SessionCard` renders only a
+ * badge plus the age, so pressing `a`/`r` on a card showing this does nothing.
  */
 export interface NativeWaitViewModel {
   kind: NativeWaitKind;
-  /** The badge's own es-AR text, already picked (`NATIVE_WAIT_LABEL`) — "PERMISO NATIVO" or "INACTIVA". */
   label: string;
-  /** The badge's own `title` tooltip, spelling out that Tenaza only observes this. */
   hint: string;
   /** "hace Ns" since the notification was observed. */
   age: string;
 }
 
-/**
- * Ticket 05 ("Turn state: working vs waiting"): the plain, non-actionable
- * block a Session's own card grows while its Turn just ended and nothing
- * more specific (`nativeWait` above) is also current — same placement and
- * "observed only, never actionable" rule `NativeWaitViewModel` already
- * follows, for the SAME reason: Tenaza never raised this and can never
- * answer it on the agent's behalf.
- */
+/** Present only when the Turn just ended and nothing more specific (`nativeWait`) is also current — observed only, never actionable, for the same reason: Tenaza never raised this. */
 export interface TurnWaitViewModel {
   /** "hace Ns" since the Turn ended. */
   age: string;
-  /** AC3: how many subagents are still running under this Session — 0 renders the badge with no suffix. */
+  /** How many subagents are still running under this Session — 0 renders the badge with no suffix. */
   backgroundCount: number;
 }
 
@@ -149,16 +113,13 @@ function verdictBadgeFor(verdict: string | undefined): VerdictBadgeViewModel | u
   return { kind: verdict, label: VERDICT_BADGE_LABEL[verdict] };
 }
 
-/** One line of a Session's resolution trace (spec "Requests vs agents") — already resolved to its es-AR symbol/text/tone; `SessionCard` only ever composes these into the final "✓ #<id> <text> · hace <age>" string, never re-derives the wording itself. */
+/** Already resolved to its es-AR symbol/text/tone; `SessionCard` only composes these into the final string, never re-derives the wording. */
 export interface ResolutionTraceLineViewModel {
   symbol: "✓" | "✕" | "✗";
   /**
-   * Cosmetic-only display id (same convention `InboxCard`'s own
-   * `ID_DISPLAY_LENGTH` truncation already uses for `card.id` — NOT a
-   * collision-safe shortest-unique-prefix: that needs the full population
-   * of every id ever assigned, computed server-side with `node:crypto`
-   * (`identity.ts`), which must never reach this browser bundle). The
-   * full hash stays one hover away via the trace's own tooltip text.
+   * Cosmetic-only — not a collision-safe shortest-unique-prefix, which would need the full
+   * population of every id ever assigned, computed server-side (`node:crypto`) and must
+   * never reach this browser bundle. The full hash stays one hover away via the tooltip.
    */
   shortId: string;
   text: string;
@@ -177,40 +138,30 @@ export interface ResolutionTraceViewModel {
 export interface SessionCardViewModel {
   id: string;
   project: string;
-  /** The worktree this Session runs in (`worktreeLabel`, `src/board.ts`), or `undefined` outside a known worktree layout. */
+  /** `undefined` outside a known worktree layout. */
   worktree: string | undefined;
-  /** The `ticket` Label verbatim, or `undefined` when none was ever announced — a card renders NOTHING for it then (human fix round), never a stray "— ". */
   ticket: string | undefined;
   role: SessionRole;
-  /** The Session id cut for display (`SHORT_ID_LENGTH`); `id` stays whole for keys, selection and DOM ids. */
+  /** Cut for display; `id` stays whole for keys, selection and DOM ids. */
   shortId: string;
   /** Ready-to-render "↳ <label>", or `undefined` when this Session has no parent. */
   parentLabel: string | undefined;
   /** True when this card renders right under its parent in the same column (indented). */
   nested: boolean;
   context: ContextDisplay;
-  /** "Last signal" (spec's own field): what this Session most recently attempted, or "—" when it never has. */
+  /** What this Session most recently attempted, or "—" when it never has. */
   lastSignal: string;
   age: string;
-  /** Ticket 10: present while this Session's agent is held, waiting on a live answer — `undefined` for every other card, including one whose hold already lapsed to pending (that item renders in TE NECESITA instead, same payload row, classified by `liveItemPhase`). */
+  /** `undefined` for every other card, including one whose hold already lapsed to pending — that item renders in TE NECESITA instead, same payload row, classified by `liveItemPhase`. */
   liveRequest: LiveRequestViewModel | undefined;
-  /** Ticket 10: this Session's own resolution trace, or `undefined` when it never raised a request. */
+  /** `undefined` when this Session never raised a request. */
   resolutionTrace: ResolutionTraceViewModel | undefined;
-  /** Ticket 11: this Session's own (or, for a subagent, its parent's) terminal button, already formatted. */
+  /** For a subagent, this is its parent's terminal button, not its own. */
   terminalLabel: string;
   terminalReach: TerminalReach;
   terminalNeedsTcc: boolean;
-  /**
-   * Ticket 14: present while Claude Code's OWN native permission/idle
-   * prompt is the most recent thing observed for this Session — `undefined`
-   * for every other card. NEVER conflated with `liveRequest` above: that
-   * one is a Tenaza `human` Rule hold this VIEW can itself approve/reject;
-   * this one is pure observation — the card offers only "ir a terminal ↗"
-   * for it, never aprobar/rechazar, since Tenaza never raised it and can
-   * never answer it on the agent's behalf.
-   */
+  /** Never conflated with `liveRequest`: that's an answerable Tenaza hold, this is pure observation — the card offers only "ir a terminal ↗" for it. */
   nativeWait: NativeWaitViewModel | undefined;
-  /** Ticket 05: present while this Session's own Turn ended and nothing more specific is also current — `undefined` for every other card. */
   turnWait: TurnWaitViewModel | undefined;
   /** TERMINÓ only: a session can announce a verdict and keep running. */
   verdictBadge: VerdictBadgeViewModel | undefined;
@@ -222,13 +173,13 @@ export interface BoardColumnViewModel<Card> {
   cards: Card[];
 }
 
-/** The header's own stat chips (ticket 08's human fix round, decision 04's "stat chips"): plain counts, never re-derived by the header — same rule as everything else here, one pass over the already-classified cards. */
+/** Plain counts — the header never re-derives these from the cards. */
 export interface BoardStats {
-  /** Ticket 10: "the TE NECESITAN stat chip... count live + pending" (spec) — the TOTAL of every currently-live request PLUS every plain pending one, even though the TE NECESITA COLUMN itself only ever lists the pending half (`teNecesita.cards`). */
+  /** The total of every live request plus every plain pending one — even though the TE NECESITA column itself only lists the pending half. */
   teNecesita: number;
   corriendo: number;
   trabada: number;
-  /** Sessions at or past the context threshold, EXCLUDING a TERMINÓ card — an ended Session crossing 200k is no longer anyone's problem to watch. */
+  /** Sessions at or past the context threshold, excluding a TERMINÓ card — an ended Session crossing 200k is no longer anyone's problem to watch. */
   over200k: number;
 }
 
@@ -242,7 +193,7 @@ export interface BoardViewModel {
   orderedIds: string[];
 }
 
-/** Spanish for "no data" (ADR 0001) — an Adapter that never declared the `measure` Capability at all, the SAME convention `sessions.ts`'s `NO_MEASURE_CAPABILITY` renders for the CLI tree. Kept as its own literal here rather than importing that module, which would pull its node-builtin-using neighbors into the browser bundle (see `src/board.ts`'s own doc comment). */
+/** Kept as its own literal rather than imported from `sessions.ts`, which would pull node-builtin-using neighbors into the browser bundle. */
 export const NO_MEASURE_TEXT = "sin datos";
 
 function contextDisplayFor(session: BoardSession, contextThresholdTokens: number): ContextDisplay {
@@ -254,7 +205,7 @@ function contextDisplayFor(session: BoardSession, contextThresholdTokens: number
   };
 }
 
-/** `item` is anything shaped like an `ActionSummary` — an Inbox row's own `action` field, or a Session's `lastSignal`. The same "tool: command" / bare tool rule either way. */
+/** `item` is anything shaped like `ActionSummary` — an Inbox row's `action`, or a Session's `lastSignal` — same "tool: command" rule either way. */
 function toolLabelFor(item: ActionSummary): string {
   return item.command ? `${item.tool}: ${item.command}` : item.tool;
 }
@@ -277,7 +228,7 @@ function toInboxCard(item: BoardInboxItem, now: Date): InboxCardViewModel {
   };
 }
 
-/** Ticket 10: a still-live held item's own TE ESPERA block, docked on its Session's card — never shown on a TE NECESITA card at all (`buildBoardViewModel` routes a live-phase "held" row here instead of through `toInboxCard`). */
+/** `buildBoardViewModel` routes a live-phase "held" row here instead of through `toInboxCard` — never shown on a TE NECESITA card at all. */
 function toLiveRequest(item: BoardInboxItem, now: Date, waitSeconds: number): LiveRequestViewModel {
   const elapsedMs = now.getTime() - new Date(item.ts).getTime();
   const remainingSeconds = Math.max(0, Math.round((waitSeconds * 1000 - elapsedMs) / 1000));
@@ -292,13 +243,13 @@ function toLiveRequest(item: BoardInboxItem, now: Date, waitSeconds: number): Li
   };
 }
 
-/** Ticket 14's own es-AR wording for each native-wait kind — the ONE place either string is picked, so `SessionCard` never re-derives or duplicates this copy (same convention `traceInfo` below already follows for the resolution trace). */
+/** The one place this wording is picked, so `SessionCard` never re-derives or duplicates it. */
 const NATIVE_WAIT_LABEL: Record<NativeWaitKind, string> = {
   permission_prompt: "PERMISO NATIVO",
   idle_prompt: "INACTIVA",
 };
 
-/** The badge's own tooltip — spells out, in es-AR, that Tenaza only observes this (never answers it) and names where to actually act. */
+/** Spells out, in es-AR, that Tenaza only observes this and names where to actually act. */
 const NATIVE_WAIT_HINT: Record<NativeWaitKind, string> = {
   permission_prompt: "Claude Code te pide permiso — Tenaza solo observa, contestale en la terminal",
   idle_prompt: "el turno terminó y nadie respondió — Tenaza solo observa, contestale en la terminal",
@@ -319,10 +270,10 @@ function toTurnWait(turnWait: TurnWait | undefined, now: Date): TurnWaitViewMode
   return { age: formatAge(turnWait.since, now), backgroundCount: turnWait.backgroundCount };
 }
 
-/** Display truncation only (see `ResolutionTraceLineViewModel.shortId`'s own doc) — never a collision-safe shortest-unique-prefix. */
+/** Display truncation only — not collision-safe. */
 const TRACE_ID_DISPLAY_LENGTH = 4;
 
-/** The resolution trace's own es-AR wording (spec "Requests vs agents") — the ONE place every kind maps to its symbol/text/tone, so `SessionCard` never re-derives or duplicates this copy. */
+/** The one place every resolution kind maps to its symbol/text/tone, so `SessionCard` never re-derives it. */
 function traceInfo(entry: ResolutionTraceEntry): { symbol: ResolutionTraceLineViewModel["symbol"]; text: string; tone: ResolutionTraceLineViewModel["tone"] } {
   switch (entry.kind) {
     case "ran":
@@ -351,7 +302,7 @@ function toTraceLine(entry: ResolutionTraceEntry, now: Date): ResolutionTraceLin
   };
 }
 
-/** `resolutions` arrives newest-first (`inbox.ts`'s `deriveResolutionTraceBySession`) — never re-sorted here. `undefined` when the Session never raised a request, so `SessionCard` renders nothing rather than an empty trace line. */
+/** `resolutions` arrives newest-first and is never re-sorted here. `undefined` when the Session never raised a request, so `SessionCard` renders nothing rather than an empty trace line. */
 function toResolutionTrace(resolutions: readonly ResolutionTraceEntry[], now: Date): ResolutionTraceViewModel | undefined {
   const [latestEntry, ...rest] = resolutions;
   if (!latestEntry) return undefined;
@@ -363,18 +314,14 @@ function toResolutionTrace(resolutions: readonly ResolutionTraceEntry[], now: Da
   };
 }
 
-/** Display length of a Session id — enough to tell this human's Sessions apart at a glance (the prototype shows short ids); the full id stays in `id`. */
+/** Enough to tell this human's Sessions apart at a glance; the full id stays in `id`. */
 export const SHORT_ID_LENGTH = 8;
 
 function shortSessionId(id: string): string {
   return id.slice(0, SHORT_ID_LENGTH);
 }
 
-/**
- * "↳ <parent>": the parent's ticket when it has one, else its short id —
- * never its role (the human's report, 2026-10-27: "↳ sesión" named nothing,
- * since every top-level Session's role reads "sesión").
- */
+/** "↳ <parent>": the parent's ticket when it has one, else its short id — never its role, since every top-level Session's role reads "sesión" and so names nothing. */
 function parentLabelFor(session: BoardSession, byId: ReadonlyMap<string, BoardSession>): string | undefined {
   if (session.parentId === undefined) return undefined;
   const parent = byId.get(session.parentId);
@@ -382,12 +329,9 @@ function parentLabelFor(session: BoardSession, byId: ReadonlyMap<string, BoardSe
 }
 
 /**
- * A column's Sessions with each subagent right under its parent (spec: "a
- * subagent renders once, under its parent"). Parents keep the column's own
- * order; their children follow in that same order. A child whose parent is
- * not in this column (the parent ended, or stalled while it runs) stays
- * where the column's order puts it, un-nested — its `↳` still names the
- * parent.
+ * Parents keep the column's own order; children follow right after, in that order. A child
+ * whose parent isn't in this column (ended, or stalled while it runs) stays where the
+ * column's order puts it, un-nested — its `↳` still names the parent.
  */
 function nestUnderParents(list: readonly BoardSession[]): { session: BoardSession; nested: boolean }[] {
   const inColumn = new Set(list.map((session) => session.id));
@@ -443,21 +387,15 @@ function toSessionCard(
   };
 }
 
-/** Oldest first (spec's own convention for the live cards ticket 10 adds — applied uniformly to today's plain pending cards too, since nothing in 08 says otherwise). */
 function byOldestFirst(a: BoardInboxItem, b: BoardInboxItem): number {
   return a.ts.localeCompare(b.ts);
 }
 
-/** Freshest activity first within a Session column — a build-time default; the spec names no ordering for CORRIENDO/TRABADA/TERMINÓ. */
+/** Freshest activity first — a default; nothing mandates ordering for these columns. */
 function byMostRecentEventFirst(a: BoardSession, b: BoardSession): number {
   return (b.lastEventTs ?? "").localeCompare(a.lastEventTs ?? "");
 }
 
-/**
- * Ticket 10 (spec "Requests vs agents"): TE NECESITA now holds pending
- * REQUESTS only — "TE NECESITA · pedidos" names that directly, with
- * `TE_NECESITA_TOOLTIP` (below) spelling out why in `Column`'s own header.
- */
 const COLUMN_TITLES = {
   teNecesita: "TE NECESITA · pedidos",
   corriendo: "CORRIENDO",
@@ -465,17 +403,14 @@ const COLUMN_TITLES = {
   termino: "TERMINÓ",
 } as const;
 
-/** The TE NECESITA header's own tooltip (spec, verbatim from the approved prototype's `col()` call) — only this column carries one. */
+/** Only this column carries a tooltip. */
 export const TE_NECESITA_TOOLTIP = "el agente no está esperando: ya recibió el deny y siguió";
 
 /**
- * Ticket 10: split `payload.inbox` into the TE NECESITA rows (plain pending
- * items, unchanged, PLUS a held row whose window has already lapsed —
- * `liveItemPhase` reads that one as pending too, same as the hook itself
- * would by now) and the still-live rows that dock onto their OWN Session's
- * card instead (`liveBySessionId`). A held row whose Session cannot be
- * found at all (should not happen — see `toSessionCard`'s own callers)
- * degrades to the pending list rather than vanishing silently.
+ * Splits `payload.inbox` into the TE NECESITA rows (plain pending items, plus a held row
+ * whose window already lapsed — `liveItemPhase` reads that one as pending too) and the
+ * still-live rows that dock onto their own Session's card instead. A held row whose Session
+ * can't be found degrades to the pending list rather than vanishing silently.
  */
 function splitInboxByLivePhase(
   inbox: readonly BoardInboxItem[],
@@ -487,10 +422,8 @@ function splitInboxByLivePhase(
 
   for (const item of inbox) {
     if (item.decision === "held" && liveItemPhase(item.ts, now, waitSeconds) === "live") {
-      // At most one live hold per Session in practice (an agent waits on
-      // one tool call at a time) — a second one, were it ever to happen,
-      // simply overwrites the first here; nothing silently drops it from
-      // the LOG, only from this one render's badge.
+      // At most one live hold per Session in practice. A second one would simply overwrite
+      // the first here — nothing is dropped from the log, only from this render's badge.
       liveBySessionId.set(item.sessionId, item);
     } else {
       pending.push(item);
@@ -506,9 +439,8 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
 
   const { pending, liveBySessionId } = splitInboxByLivePhase(payload.inbox, now, payload.policy.waitSeconds);
 
-  // A live row whose Session this payload doesn't carry at all is an
-  // orphan this render can never dock anywhere — fall back to the pending
-  // list rather than dropping it (no silent failures, per review).
+  // A live row whose Session this payload doesn't carry at all is an orphan this render can
+  // never dock anywhere — fall back to the pending list rather than dropping it.
   for (const [sessionId, item] of liveBySessionId) {
     if (!sessionIds.has(sessionId)) {
       liveBySessionId.delete(sessionId);
@@ -568,12 +500,10 @@ export function buildBoardViewModel(payload: BoardPayload, now: Date): BoardView
 }
 
 /**
- * Ticket 10: "selecting [a pending request] highlights that Session's
- * card" (spec) — pure lookup, never baked into `buildBoardViewModel` itself
- * (selection is the container's own state, not a fact of the payload).
- * `undefined` when nothing is selected, or the selection isn't a TE
- * NECESITA card at all (a live request's own card needs no cross-highlight
- * — it's already selected directly).
+ * Pure lookup, never baked into `buildBoardViewModel` itself — selection is the container's
+ * own state, not a fact of the payload. `undefined` when nothing is selected, or the
+ * selection isn't a TE NECESITA card — a live request's own card needs no cross-highlight,
+ * since it's already selected directly.
  */
 export function highlightedSessionId(viewModel: BoardViewModel, selectedId: string | undefined): string | undefined {
   if (selectedId === undefined) return undefined;
@@ -581,15 +511,9 @@ export function highlightedSessionId(viewModel: BoardViewModel, selectedId: stri
 }
 
 /**
- * Ticket 11: "from any card... t brings the terminal... to the front"
- * (ticket) — `cardId` is whatever `useBoardKeyboard`'s own `selectedId`
- * carries, which for a TE NECESITA card is the ITEM's hash, never the
- * Session it belongs to. Resolves either shape to the one id the focus
- * route actually takes (`/sessions/<id>/focus`): a Session card's own id
- * IS already a Session id, so it round-trips unchanged; a TE NECESITA
- * card's own `sessionId` field is read instead. `undefined` only when
- * `cardId` names nothing at all (should not happen — it always came from
- * `orderedIds`).
+ * `cardId` is ambiguous: for a TE NECESITA card it's the item's hash, never the Session it
+ * belongs to; for a Session card it's already a Session id. Resolves either shape to the one
+ * id the focus route actually takes. `undefined` only when `cardId` names nothing at all.
  */
 export function sessionIdForCard(viewModel: BoardViewModel, cardId: string): string | undefined {
   const inboxCard = viewModel.teNecesita.cards.find((card) => card.id === cardId);
@@ -600,14 +524,7 @@ export function sessionIdForCard(viewModel: BoardViewModel, cardId: string): str
   return sessionCard?.id;
 }
 
-/**
- * Ticket 07 (tenaza-v0-3): the SAME resolution `sessionIdForCard` above
- * already does for `cardId` — a TE NECESITA row's own item hash, or a
- * Session card's own id — but reading its `terminalReach` instead of its
- * Session id. Lets the board gate the `t` key on "this card has no
- * terminal button to focus" without re-deriving which card kind `cardId`
- * names. `undefined` only when `cardId` names nothing at all.
- */
+/** Same card-kind resolution as `sessionIdForCard`, but reading `terminalReach` instead — lets the board gate the `t` key without re-deriving which card kind `cardId` names. */
 export function terminalReachForCard(viewModel: BoardViewModel, cardId: string): TerminalReach | undefined {
   const inboxCard = viewModel.teNecesita.cards.find((card) => card.id === cardId);
   if (inboxCard) return inboxCard.terminalReach;
@@ -617,7 +534,6 @@ export function terminalReachForCard(viewModel: BoardViewModel, cardId: string):
   return sessionCard?.terminalReach;
 }
 
-/** The keys `resolveBoardKeyAction` answers for — the same four `BoardApp.tsx:91-116` used to gate by hand before this ticket. */
 export type BoardKey = "d" | "x" | "a" | "t";
 
 /**
@@ -629,36 +545,21 @@ export type BoardKey = "d" | "x" | "a" | "t";
 export interface BoardKeyAction {
   kind: "done" | "dismiss" | "archive" | "answer" | "focusTerminal";
   /**
-   * The id the dispatched write actually targets. `answer` targets the
-   * live Inbox item's OWN id, never the selected Session card's id —
-   * `0cdd485` shipped exactly that bug once, by hand; this field makes it
-   * structurally impossible to repeat. `focusTerminal` targets the
-   * OWNING Session's id, which for a TE NECESITA card is a DIFFERENT id
-   * than the one selected (`sessionIdForCard`, above). Every other kind
-   * targets the selected card's own id, unchanged.
+   * `answer` targets the live Inbox item's own id, never the selected Session card's id —
+   * this field makes that distinction structurally explicit rather than left to each caller.
+   * `focusTerminal` targets the owning Session's id, which for a TE NECESITA card differs
+   * from the id selected. Every other kind targets the selected card's own id, unchanged.
    */
   id: string;
 }
 
 /**
- * Deepening ticket 04: "what does key K do on card X" (ticket) — the ONE
- * table `BoardApp` dispatches through now, replacing the per-key gates it
- * used to compute by hand (`inboxIds`, `terminoSessionIds`,
- * `liveRequestItemIdBySessionId`, plus `sessionIdForCard`/
- * `terminalReachForCard` for `t`). `BoardApp` only ever dispatches what
- * this returns; it holds no card-kind lookup of its own any more.
- * `useBoardKeyboard` stays ignorant of card kinds exactly as before this
- * ticket — it still only maps a raw keypress to WHICH key this is asked
- * about, never to whether the selected card is the right kind for it.
+ * The one table `BoardApp` dispatches through — it holds no card-kind lookup of its own.
+ * `undefined` for a key that doesn't apply to the selected card, including a `selectedId`
+ * naming no card at all.
  *
- * `undefined` for a key that does not apply to the selected card at all —
- * including a `selectedId` naming no card on this board (should not
- * happen in practice; `selectedId` always came from `orderedIds`, same
- * convention `sessionIdForCard`/`terminalReachForCard` already follow).
- *
- * `r` (reject) carries no gate at all — it only ever focuses a message
- * input, a pure DOM move `useBoardKeyboard` still owns directly — so it is
- * not one of this table's keys.
+ * `r` carries no gate here: it only focuses a message input, a pure DOM move
+ * `useBoardKeyboard` still owns directly.
  */
 export function resolveBoardKeyAction(
   viewModel: BoardViewModel,
@@ -681,9 +582,7 @@ export function resolveBoardKeyAction(
     }
 
     case "a": {
-      // The selected card's own live Inbox item (its `liveRequest` field —
-      // renaming that field elsewhere is out of scope for this ticket), if
-      // it is currently docked on a Session card at all.
+      // The selected card's live Inbox item, if one is currently docked on a Session card.
       const sessionCard = [...viewModel.corriendo.cards, ...viewModel.trabada.cards, ...viewModel.termino.cards].find(
         (card) => card.id === selectedId,
       );

@@ -12,7 +12,7 @@ export interface StatusBadgeProps {
   children: ReactNode;
 }
 
-/** Pure presentational: props in, markup out. Uppercase, square — HumanLayer's own look (CSS does the uppercasing; the text itself stays mixed-case in the DOM). Color is NEVER the only signal: the text itself names the status, so the badge reads the same under any color-vision deficiency. */
+/** Color is never the only signal: the text itself names the status, so the badge reads the same under any color-vision deficiency. */
 export function StatusBadge({ tone, children }: StatusBadgeProps) {
   return <span className={`status-badge status-badge--${tone}`}>{children}</span>;
 }

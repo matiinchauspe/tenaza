@@ -11,13 +11,9 @@ const LABEL: Record<ConnectionState, string> = {
 };
 
 /**
- * The SSE connection indicator (ticket 08, decision 04). `role="status"` +
- * `aria-live="polite"` give the state a non-visual channel too — a dot
- * color alone would be invisible to a screen reader AND, per the
- * accessibility bar, color is never the only signal here either way: the
- * label is always rendered, dot or no dot. Respects
- * `prefers-reduced-motion` through the stylesheet's own global rule, not
- * anything this component does itself.
+ * `role="status"` + `aria-live="polite"` give the state a non-visual channel — a dot color
+ * alone would be invisible to a screen reader, and the label is always rendered regardless.
+ * `prefers-reduced-motion` is handled by the stylesheet's own global rule, not this component.
  */
 export function LiveDot({ connectionState }: LiveDotProps) {
   return (

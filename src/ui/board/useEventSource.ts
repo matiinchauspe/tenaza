@@ -8,7 +8,7 @@ export interface BoardEventSourceState {
   connectionState: ConnectionState;
 }
 
-/** The minimal shape this hook actually drives — small enough that a test can hand it a fake constructor without implementing the whole DOM `EventSource` interface (same spirit as `daemon.ts`'s own injectable `openBrowser`/notifier test seams). */
+/** Minimal shape so a test can inject a fake constructor without implementing the whole DOM `EventSource` interface. */
 export interface EventSourceLike {
   close(): void;
   readyState: number;
@@ -21,17 +21,12 @@ export type EventSourceConstructor = new (url: string) => EventSourceLike;
 const CLOSED_READY_STATE = 2;
 
 /**
- * Wraps the SSE connection to `/events` (ticket 08): connection state for
- * the live dot, and a parse error that NEVER drops or crashes the board —
- * it warns once and keeps the LAST GOOD payload, never `undefined`ing it
- * out from under the board once one has arrived. The browser's own
- * `EventSource` already reconnects on a dropped connection; this hook only
- * tracks what state that leaves the board in.
+ * A parse error never drops or crashes the board: it warns once and keeps the last good
+ * payload rather than clearing it. The browser's own `EventSource` already handles
+ * reconnects; this hook only tracks what state that leaves the board in.
  *
- * `EventSourceImpl` is a constructor-injection test seam, never read from
- * the environment: a hook has no server process to set an env var for, so
- * it takes its fake the same way any other collaborator would — as a
- * parameter, defaulting to the real global.
+ * `EventSourceImpl` is a constructor-injection seam rather than an env var, since a hook has
+ * no process environment to read from.
  */
 export function useEventSource(
   url: string,

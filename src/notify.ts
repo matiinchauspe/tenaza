@@ -2,9 +2,15 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import path from "node:path";
 import type { Event } from "./contract/event";
 import { buildDaemonUrl, readDaemonToken } from "./daemonlink";
-import { findInboxRow, type InboxRow } from "./inbox";
-import { readSessionEvents } from "./log";
-import { DEFAULT_DAEMON_PORT, notifyRecorderPath, notifySoundStatePath, tenazaHome } from "./paths";
+import { deriveInbox, findInboxRow, type InboxRow, shortIdIndex } from "./inbox";
+import { readSessionEvents, type SessionLogCache } from "./log";
+import {
+  DEFAULT_DAEMON_PORT,
+  inboxNotifiedMarkerPath,
+  notifyRecorderPath,
+  notifySoundStatePath,
+  tenazaHome,
+} from "./paths";
 import { buildSessionIndex, categoryWord, deriveProject, roleOf, type SessionNode } from "./sessions";
 import { describeAction, UNBLOCKED_MARKER } from "./status";
 
@@ -245,18 +251,28 @@ export function buildMacNotifierCommand(
   return { tool: "osascript", argv: ["osascript", "-e", script] };
 }
 
+/** Without an explicit `PATH`, `Bun.which` searches the one the process started with. */
+function macNotifierCommand(notification: Notification, sound: boolean): MacNotifierCommand | undefined {
+  const PATH = process.env.PATH ?? "";
+  return buildMacNotifierCommand(
+    notification,
+    sound,
+    Bun.which("terminal-notifier", { PATH }) !== null,
+    Bun.which("osascript", { PATH }) !== null,
+  );
+}
+
+function canDeliver(notification: Notification): boolean {
+  return Boolean(process.env.TENAZA_NOTIFY_RECORDER) || macNotifierCommand(notification, false) !== undefined;
+}
+
 /**
  * `display notification` can't replace an earlier banner by tag — `tag` is
  * Tenaza's own bookkeeping key, not an OS-level one. Not awaited so the
  * hook never blocks on it.
  */
 function sendMacNotification(notification: Notification, sound: boolean): void {
-  const command = buildMacNotifierCommand(
-    notification,
-    sound,
-    Bun.which("terminal-notifier") !== null,
-    Bun.which("osascript") !== null,
-  );
+  const command = macNotifierCommand(notification, sound);
   if (!command) return;
   Bun.spawn(command.argv, { stdout: "ignore", stderr: "ignore" });
 }
@@ -290,6 +306,29 @@ function sessionContext(home: string, session: string): { project: string; role:
   return { project: deriveProject(node), role: roleOf(node), ticket: node.labels.ticket };
 }
 
+function claimInboxNotification(home: string, id: string): boolean {
+  const file = inboxNotifiedMarkerPath(id, home);
+  mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    writeFileSync(file, "", { flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+/** Claims only when it can deliver: a claim it cannot honour would keep the Daemon from ever notifying. */
+function notifyInboxRow(home: string, row: InboxRow, shortId: string, now: Date): void {
+  const context = sessionContext(home, row.session);
+  // Always the default port: no file records which port `tenaza ui --port <n>` bound to.
+  const token = readDaemonToken(home);
+  const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
+  const notification = buildInboxOpenedNotification(row, shortId, context, openUrl);
+  if (!canDeliver(notification) || !claimInboxNotification(home, row.id)) return;
+  sendNotification(home, notification, now);
+}
+
 /**
  * Fire 🟡 for the Inbox item `fullId` names. `shortId` is the same
  * display hash the caller is about to hand back to the agent/CLI, so the
@@ -300,16 +339,31 @@ function sessionContext(home: string, session: string): { project: string; role:
 export function notifyNewInboxItem(home: string, fullId: string, shortId: string, now: Date = new Date()): void {
   try {
     const row = findInboxRow(home, fullId);
-    if (!row) return;
-    const context = sessionContext(home, row.session);
-    // Only set when a Daemon has ever written a token; always the default
-    // port, since no file names which port a non-default
-    // `tenaza ui --port <n>` bound to.
-    const token = readDaemonToken(home);
-    const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
-    sendNotification(home, buildInboxOpenedNotification(row, shortId, context, openUrl), now);
+    if (row) notifyInboxRow(home, row, shortId, now);
   } catch {
   }
+}
+
+/** Skips items born before `since`, which may carry no claim, so a Daemon restart never replays the open Inbox. */
+export function notifyUnnotifiedInboxItems(
+  home: string,
+  since: Date,
+  now: Date = new Date(),
+  cache?: SessionLogCache,
+): void {
+  try {
+    const cutoff = since.toISOString();
+    const fresh = deriveInbox(home, cache).filter(
+      (row) => row.ts >= cutoff && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
+    );
+    if (fresh.length === 0) return;
+    const shortIds = shortIdIndex(home);
+    for (const row of fresh) {
+      try {
+        notifyInboxRow(home, row, shortIds.get(row.id) ?? row.id, now);
+      } catch {}
+    }
+  } catch {}
 }
 
 /** Fire 🔴 for `session` crossing `thresholdTokens` with this `contextTokens` sample, per `shouldNotifyThresholdCrossing`. */

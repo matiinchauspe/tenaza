@@ -113,6 +113,15 @@ export function notifySoundStatePath(home: string = tenazaHome()): string {
 }
 
 /**
+ * Created exclusively by whichever process notifies an Inbox item first — a host hook or the
+ * Daemon — so the other finds it and stays silent. A file, not an Event, because the claim must
+ * be atomic across processes, and a hook inside a Sandbox writes this same directory.
+ */
+export function inboxNotifiedMarkerPath(id: string, home: string = tenazaHome()): string {
+  return path.join(home, "state", "notified", `inbox-${id}`);
+}
+
+/**
  * Tenaza's last successfully parsed Policy — the fallback a malformed
  * `policy.toml` degrades to instead of silently dropping every Rule.
  * Written on every healthy `loadPolicy`, read back only when the user's

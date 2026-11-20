@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { usageSampledEvent } from "../src/contract/event";
+import { actionDecidedEvent, approvalResolvedEvent, sessionLabeledEvent, usageSampledEvent } from "../src/contract/event";
+import { decideAction } from "../src/decide";
+import { inboxIdentityHash } from "../src/identity";
+import { appendEvent, appendHumanEvent } from "../src/log";
 import {
   buildGraveFaultNotification,
   buildInboxOpenedNotification,
@@ -11,6 +14,8 @@ import {
   maxUsageSample,
   NOTIFY_BURST_WINDOW_MS,
   notifyGraveFault,
+  notifyNewInboxItem,
+  notifyUnnotifiedInboxItems,
   readNotificationRecorder,
   sendNotification,
   shouldNotifyThresholdCrossing,
@@ -355,11 +360,101 @@ describe("sendNotification (the notifier port itself, via the recorder test seam
 
   test("a failing notifier never throws — even when its OWN bookkeeping fails, not just macOS", () => {
     // `state/` is a FILE, not a directory: the sound-state and recorder
-    // writes underneath it both throw ENOTDIR. The guard must hold anyway.
+    // writes underneath it both throw ENOTDIR.
     writeFileSync(path.join(home, "state"), "not a directory");
 
     expect(() =>
       sendNotification(home, { tag: "t", title: "T", subtitle: "S", message: "M" }),
     ).not.toThrow();
+  });
+});
+
+describe("one notification per Inbox item, whichever process wrote it", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-once-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeItemWithoutNotifying(session: string, command: string): string {
+    appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "deny", { match: "gh pr merge", effect: "human" }),
+    );
+    return inboxIdentityHash(session, 2);
+  }
+
+  test("an item written to state with no notification gets one, naming its project and the held action", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home, new Date(0));
+
+    const recorded = readNotificationRecorder(home);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.tag).toBe(`inbox-${id}`);
+    expect(recorded[0]?.subtitle).toContain("crisol");
+    expect(recorded[0]?.message).toContain("gh pr merge 58");
+  });
+
+  test("a later pass over the same item never notifies it again", () => {
+    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Date(0));
+
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
+  test("an item a host hook already notified for is not notified again", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+
+    const result = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    expect(result.decision).toBe("deny");
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+
+    notifyUnnotifiedInboxItems(home, new Date(0));
+
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
+  test("a hook with no notifier to send through leaves the item for the Daemon to notify", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      process.env.PATH = savedPath;
+      process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+
+    notifyUnnotifiedInboxItems(home, new Date(0));
+
+    expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
+  });
+
+  test("an item older than the Daemon's start is left alone, so a restart never replays the open Inbox", () => {
+    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home, new Date(Date.now() + 60_000));
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("a resolved item is never notified", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", id, "dismissed"));
+
+    notifyUnnotifiedInboxItems(home, new Date(0));
+
+    expect(readNotificationRecorder(home)).toEqual([]);
   });
 });

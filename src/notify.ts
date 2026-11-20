@@ -22,7 +22,6 @@ export interface Notification {
   openUrl?: string;
 }
 
-/** What the recorder keeps: the Notification plus whether this send actually played a sound. */
 export interface RecordedNotification extends Notification {
   sound: boolean;
 }
@@ -30,7 +29,6 @@ export interface RecordedNotification extends Notification {
 /** A burst window (one sound per ~2s) — never blocks the notification itself, only throttles the sound across a burst. */
 export const NOTIFY_BURST_WINDOW_MS = 2000;
 
-/** Pure: should this send play a sound, given when one last did? No prior sound always plays one. */
 export function shouldPlaySound(
   lastSoundAt: Date | undefined,
   now: Date,
@@ -205,7 +203,6 @@ function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/** The argv `sendMacNotification` would actually spawn — split out as a pure function so the terminal-notifier-vs-osascript choice is unit-testable without touching a real process or PATH. */
 export interface MacNotifierCommand {
   tool: "terminal-notifier" | "osascript";
   argv: string[];
@@ -214,14 +211,15 @@ export interface MacNotifierCommand {
 /**
  * `osascript display notification` has no click-action parameter, so a
  * clickable notification needs `terminal-notifier -open <url>` instead.
- * Falls through to `osascript` (no click) when `terminal-notifier` isn't
- * installed, or when there's no `openUrl` to open anyway.
+ * `undefined` on a Linux Sandbox: it has no macOS notifier, and the host
+ * Daemon tells the human.
  */
 export function buildMacNotifierCommand(
   notification: Notification,
   sound: boolean,
   hasTerminalNotifier: boolean,
-): MacNotifierCommand {
+  hasOsascript: boolean,
+): MacNotifierCommand | undefined {
   if (notification.openUrl && hasTerminalNotifier) {
     const argv = [
       "terminal-notifier",
@@ -237,6 +235,7 @@ export function buildMacNotifierCommand(
     if (sound) argv.push("-sound", "default");
     return { tool: "terminal-notifier", argv };
   }
+  if (!hasOsascript) return undefined;
 
   const script =
     `display notification ${quoteAppleScriptString(notification.message)} ` +
@@ -247,17 +246,19 @@ export function buildMacNotifierCommand(
 }
 
 /**
- * `terminal-notifier -open <url>` when it's on PATH and there's a URL to
- * open, else `osascript -e 'display notification …'`, which ships with
- * every macOS. The tradeoff: `display notification` can't replace an
- * earlier banner by tag, or act on a click at all — `tag` here is
- * Tenaza's own bookkeeping key, not an OS-level one. Fired with
- * `Bun.spawn` and never awaited, so the hook never blocks on it.
+ * `display notification` can't replace an earlier banner by tag — `tag` is
+ * Tenaza's own bookkeeping key, not an OS-level one. Not awaited so the
+ * hook never blocks on it.
  */
 function sendMacNotification(notification: Notification, sound: boolean): void {
-  const hasTerminalNotifier = Bun.which("terminal-notifier") !== null;
-  const { argv } = buildMacNotifierCommand(notification, sound, hasTerminalNotifier);
-  Bun.spawn(argv, { stdout: "ignore", stderr: "ignore" });
+  const command = buildMacNotifierCommand(
+    notification,
+    sound,
+    Bun.which("terminal-notifier") !== null,
+    Bun.which("osascript") !== null,
+  );
+  if (!command) return;
+  Bun.spawn(command.argv, { stdout: "ignore", stderr: "ignore" });
 }
 
 /**

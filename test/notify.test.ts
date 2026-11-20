@@ -215,33 +215,41 @@ describe("buildMacNotifierCommand (ticket 10: terminal-notifier -open <url>, els
   };
 
   test("terminal-notifier on PATH AND an openUrl present → terminal-notifier -open <url>", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, true);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, true, true);
 
-    expect(command.tool).toBe("terminal-notifier");
-    expect(command.argv[0]).toBe("terminal-notifier");
-    expect(command.argv).toContain("-open");
-    expect(command.argv).toContain("http://127.0.0.1:4747/auth?token=t");
-    expect(command.argv).toContain("-sound");
+    expect(command?.tool).toBe("terminal-notifier");
+    expect(command?.argv[0]).toBe("terminal-notifier");
+    expect(command?.argv).toContain("-open");
+    expect(command?.argv).toContain("http://127.0.0.1:4747/auth?token=t");
+    expect(command?.argv).toContain("-sound");
   });
 
   test("terminal-notifier missing → falls back to osascript, no click action, even with an openUrl", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, false);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, false, true);
 
-    expect(command.tool).toBe("osascript");
-    expect(command.argv[0]).toBe("osascript");
-    expect(command.argv.join(" ")).not.toContain("http://127.0.0.1:4747");
+    expect(command?.tool).toBe("osascript");
+    expect(command?.argv[0]).toBe("osascript");
+    expect(command?.argv.join(" ")).not.toContain("http://127.0.0.1:4747");
   });
 
   test("no openUrl at all → osascript even when terminal-notifier IS on PATH (nothing to open)", () => {
-    const command = buildMacNotifierCommand(notification, true, true);
+    const command = buildMacNotifierCommand(notification, true, true, true);
 
-    expect(command.tool).toBe("osascript");
+    expect(command?.tool).toBe("osascript");
   });
 
   test("no sound this time → terminal-notifier argv omits -sound", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://x" }, false, true);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://x" }, false, true, true);
 
-    expect(command.argv).not.toContain("-sound");
+    expect(command?.argv).not.toContain("-sound");
+  });
+
+  test("neither tool on PATH (Linux) → no command at all, so nothing is spawned", () => {
+    expect(buildMacNotifierCommand(notification, true, false, false)).toBeUndefined();
+  });
+
+  test("no openUrl and no osascript → no command, even with terminal-notifier on PATH", () => {
+    expect(buildMacNotifierCommand(notification, true, true, false)).toBeUndefined();
   });
 });
 

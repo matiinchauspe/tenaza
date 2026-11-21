@@ -318,12 +318,15 @@ function claimInboxNotification(home: string, id: string): boolean {
   }
 }
 
-/** Claims only when it can deliver: a claim it cannot honour would keep the Daemon from ever notifying. */
-function notifyInboxRow(home: string, row: InboxRow, shortId: string, now: Date): void {
+/**
+ * Claims only when it can deliver: a claim it cannot honour would keep the Daemon from ever
+ * notifying. `port` defaults to the one a hook (no bound server of its own) always means; the
+ * Daemon's own caller passes the port it actually bound, so its banner opens the right one.
+ */
+function notifyInboxRow(home: string, row: InboxRow, shortId: string, now: Date, port: number = DEFAULT_DAEMON_PORT): void {
   const context = sessionContext(home, row.session);
-  // Always the default port: no file records which port `tenaza ui --port <n>` bound to.
   const token = readDaemonToken(home);
-  const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
+  const openUrl = token ? buildDaemonUrl(port, token) : undefined;
   const notification = buildInboxOpenedNotification(row, shortId, context, openUrl);
   if (!canDeliver(notification) || !claimInboxNotification(home, row.id)) return;
   sendNotification(home, notification, now);
@@ -344,23 +347,27 @@ export function notifyNewInboxItem(home: string, fullId: string, shortId: string
   }
 }
 
-/** Skips items born before `since`, which may carry no claim, so a Daemon restart never replays the open Inbox. */
+/**
+ * Skips `knownIds` — items already open when the Daemon snapshotted the Inbox — never `row.ts`
+ * against a start time: a Sandbox hook stamps `ts` from a guest clock that can read behind the
+ * host's, so a wall-clock cutoff would drop an item actually born after the Daemon started.
+ */
 export function notifyUnnotifiedInboxItems(
   home: string,
-  since: Date,
+  knownIds: ReadonlySet<string>,
   now: Date = new Date(),
   cache?: SessionLogCache,
+  port: number = DEFAULT_DAEMON_PORT,
 ): void {
   try {
-    const cutoff = since.toISOString();
     const fresh = deriveInbox(home, cache).filter(
-      (row) => row.ts >= cutoff && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
+      (row) => !knownIds.has(row.id) && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
     );
     if (fresh.length === 0) return;
     const shortIds = shortIdIndex(home);
     for (const row of fresh) {
       try {
-        notifyInboxRow(home, row, shortIds.get(row.id) ?? row.id, now);
+        notifyInboxRow(home, row, shortIds.get(row.id) ?? row.id, now, port);
       } catch {}
     }
   } catch {}

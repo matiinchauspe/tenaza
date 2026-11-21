@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { actionDecidedEvent, approvalResolvedEvent, sessionLabeledEvent, usageSampledEvent } from "../src/contract/event";
+import { writeDaemonToken } from "../src/daemonlink";
 import { decideAction } from "../src/decide";
 import { inboxIdentityHash } from "../src/identity";
 import { appendEvent, appendHumanEvent } from "../src/log";
@@ -392,7 +393,7 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
   test("an item written to state with no notification gets one, naming its project and the held action", () => {
     const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
 
-    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Set());
 
     const recorded = readNotificationRecorder(home);
     expect(recorded).toHaveLength(1);
@@ -404,8 +405,8 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
   test("a later pass over the same item never notifies it again", () => {
     writeItemWithoutNotifying("sess-1", "gh pr merge 58");
 
-    notifyUnnotifiedInboxItems(home, new Date(0));
-    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Set());
+    notifyUnnotifiedInboxItems(home, new Set());
 
     expect(readNotificationRecorder(home)).toHaveLength(1);
   });
@@ -418,7 +419,7 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
     expect(result.decision).toBe("deny");
     expect(readNotificationRecorder(home)).toHaveLength(1);
 
-    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Set());
 
     expect(readNotificationRecorder(home)).toHaveLength(1);
   });
@@ -436,25 +437,57 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
       process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
     }
 
-    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Set());
 
     expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
   });
 
-  test("an item older than the Daemon's start is left alone, so a restart never replays the open Inbox", () => {
-    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+  test("an item already known when the Daemon took its snapshot is left alone, so a restart never replays the open Inbox", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
 
-    notifyUnnotifiedInboxItems(home, new Date(Date.now() + 60_000));
+    notifyUnnotifiedInboxItems(home, new Set([id]));
 
     expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("an item not in the snapshot still notifies even with a `ts` behind the Daemon's own clock — a guest clock lagging the host's", () => {
+    appendEvent(home, sessionLabeledEvent("sess-1", { project: "crisol" }));
+    const event = actionDecidedEvent("sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, "deny", {
+      match: "gh pr merge",
+      effect: "human",
+    });
+    appendEvent(home, { ...event, ts: new Date(0).toISOString() });
+    const id = inboxIdentityHash("sess-1", 2);
+
+    notifyUnnotifiedInboxItems(home, new Set());
+
+    expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
   });
 
   test("a resolved item is never notified", () => {
     const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
     appendHumanEvent(home, approvalResolvedEvent("sess-1", id, "dismissed"));
 
-    notifyUnnotifiedInboxItems(home, new Date(0));
+    notifyUnnotifiedInboxItems(home, new Set());
 
     expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("the Daemon's own notification opens the port it is bound to, not the default", () => {
+    writeDaemonToken(home, "abc");
+    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home, new Set(), new Date(), undefined, 9999);
+
+    expect(readNotificationRecorder(home)[0]?.openUrl).toBe("http://127.0.0.1:9999/auth?token=abc");
+  });
+
+  test("a hook-sent notification keeps opening the default port — it has no bound server of its own to report", () => {
+    writeDaemonToken(home, "abc");
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyNewInboxItem(home, id, id.slice(0, 4));
+
+    expect(readNotificationRecorder(home)[0]?.openUrl).toBe("http://127.0.0.1:4747/auth?token=abc");
   });
 });

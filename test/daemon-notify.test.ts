@@ -41,6 +41,17 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     return inboxIdentityHash(session, 2);
   }
 
+  /** Stamps the item's own `ts`, so a test can simulate a guest clock lagging the host's. */
+  function writeSandboxItemAt(session: string, command: string, ts: string): string {
+    appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
+    const event = actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "held", {
+      match: "gh pr merge",
+      effect: "human",
+    });
+    appendEvent(home, { ...event, ts });
+    return inboxIdentityHash(session, 2);
+  }
+
   test("an item a Sandbox hook wrote with no notification gets exactly one from the running Daemon", async () => {
     const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
@@ -95,6 +106,31 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     try {
       await Bun.sleep(300);
       expect(readNotificationRecorder(home)).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("an item a Sandbox hook writes after the Daemon started still gets notified, even with its guest clock behind the host's", async () => {
+    const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      const id = writeSandboxItemAt("sess-1", "gh pr merge 58", new Date(0).toISOString());
+
+      const recorded = await waitForNotifications(home, 1, 3000);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]?.tag).toBe(`inbox-${id}`);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a banner the Daemon sends opens the port it is bound to, not the default", async () => {
+    const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      writeSandboxItem("sess-1", "gh pr merge 58");
+
+      const recorded = await waitForNotifications(home, 1, 3000);
+      expect(recorded[0]?.openUrl).toBe(`http://127.0.0.1:${daemon.port}/auth?token=${daemon.token}`);
     } finally {
       await daemon.stop();
     }

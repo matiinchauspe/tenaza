@@ -930,9 +930,9 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const url = buildDaemonUrl(boundPort, ctx.token);
 
   const heartbeat = setInterval(() => writeAlive(home), heartbeatIntervalMs());
-  const startedAt = new Date();
+  const knownInboxIds = new Set(deriveInbox(home, ctx.logCache).map((row) => row.id));
   const watcher = startStateWatcher(home, ctx.clients, ctx.logCache, ctx.resolveGitRoot, () =>
-    notifyUnnotifiedInboxItems(home, startedAt, new Date(), ctx.logCache),
+    notifyUnnotifiedInboxItems(home, knownInboxIds, new Date(), ctx.logCache, boundPort),
   );
 
   shutdown = (): void => {

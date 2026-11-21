@@ -119,9 +119,9 @@ longer applies). Tenaza never runs a command on its own initiative.
 _Avoid_: Approval, ack
 
 **Live surface**:
-The local page where the human watches their Sessions and Inbox change on their own, and acts on
-them.
-_Avoid_: Dashboard, UI, panel
+The local surface the Daemon serves, in the browser or the terminal, where the human watches their
+Sessions and Inbox change on their own, and acts on them.
+_Avoid_: Dashboard, UI, panel, board, TUI
 
 **Daemon**:
 The Tenaza process kept running by the OS service manager: it serves the Live surface, notices

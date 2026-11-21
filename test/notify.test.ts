@@ -368,6 +368,25 @@ describe("sendNotification (the notifier port itself, via the recorder test seam
       sendNotification(home, { tag: "t", title: "T", subtitle: "S", message: "M" }),
     ).not.toThrow();
   });
+
+  test("a send that cannot deliver leaves the sound state untouched — the next real send still sounds", () => {
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      sendNotification(home, { tag: "a", title: "A", subtitle: "", message: "" }, new Date(0));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+
+    sendNotification(home, { tag: "b", title: "B", subtitle: "", message: "" }, new Date(500));
+
+    expect(readNotificationRecorder(home)).toEqual([{ tag: "b", title: "B", subtitle: "", message: "", sound: true }]);
+  });
 });
 
 describe("one notification per Inbox item, whichever process wrote it", () => {

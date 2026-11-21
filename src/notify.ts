@@ -287,6 +287,7 @@ function sendMacNotification(notification: Notification, sound: boolean): void {
  */
 export function sendNotification(home: string, notification: Notification, now: Date = new Date()): void {
   try {
+    if (!canDeliver(notification)) return;
     const sound = shouldPlaySound(readLastSoundAt(home), now);
     if (sound) writeLastSoundAt(home, now);
 

@@ -98,7 +98,7 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     }
   });
 
-  test("an item already open when the Daemon starts is not replayed", async () => {
+  test("an item already open on the Daemon's very first start here is migrated silently, never replayed", async () => {
     writeSandboxItem("sess-1", "gh pr merge 58");
     await Bun.sleep(10);
 
@@ -108,6 +108,55 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
       expect(readNotificationRecorder(home)).toEqual([]);
     } finally {
       await daemon.stop();
+    }
+  });
+
+  test("an item a Sandbox hook writes while the Daemon is stopped is notified once it restarts", async () => {
+    const first = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    await first.stop();
+
+    const id = writeSandboxItem("sess-1", "gh pr merge 58");
+
+    const second = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      const recorded = await waitForNotifications(home, 1, 3000);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]?.tag).toBe(`inbox-${id}`);
+    } finally {
+      await second.stop();
+    }
+  });
+
+  test("an item a host hook already notified for stays notified once across a Daemon restart", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(
+      path.join(home, "config", "policy.toml"),
+      '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n\n[live]\nwait_seconds = 0\n',
+    );
+    const first = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      const hook = await runCli(["hook", "claude"], {
+        home,
+        stdin: JSON.stringify({
+          session_id: "sess-1",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr merge 58" },
+        }),
+      });
+      expect(hook.exitCode).toBe(0);
+      await Bun.sleep(300);
+      expect(readNotificationRecorder(home)).toHaveLength(1);
+    } finally {
+      await first.stop();
+    }
+
+    const second = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      await Bun.sleep(300);
+      expect(readNotificationRecorder(home)).toHaveLength(1);
+    } finally {
+      await second.stop();
     }
   });
 

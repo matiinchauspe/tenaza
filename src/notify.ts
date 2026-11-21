@@ -6,6 +6,7 @@ import { deriveInbox, findInboxRow, type InboxRow, shortIdIndex } from "./inbox"
 import { readSessionEvents, type SessionLogCache } from "./log";
 import {
   DEFAULT_DAEMON_PORT,
+  inboxMigratedMarkerPath,
   inboxNotifiedMarkerPath,
   notifyRecorderPath,
   notifySoundStatePath,
@@ -348,22 +349,27 @@ export function notifyNewInboxItem(home: string, fullId: string, shortId: string
   }
 }
 
-/**
- * Skips `knownIds` — items already open when the Daemon snapshotted the Inbox — never `row.ts`
- * against a start time: a Sandbox hook stamps `ts` from a guest clock that can read behind the
- * host's, so a wall-clock cutoff would drop an item actually born after the Daemon started.
- */
+/** Gated on its own sentinel, never the directory a hook's claim could create first and be mistaken for it. */
+export function migrateOpenInboxToNotified(home: string, cache?: SessionLogCache): void {
+  try {
+    const marker = inboxMigratedMarkerPath(home);
+    if (existsSync(marker)) return;
+    for (const row of deriveInbox(home, cache)) claimInboxNotification(home, row.id);
+    mkdirSync(path.dirname(marker), { recursive: true });
+    writeFileSync(marker, "", "utf8");
+  } catch {
+  }
+}
+
+/** Never filters by `row.ts`: a guest clock can read behind the host's, so a wall-clock cutoff could drop a late item. */
 export function notifyUnnotifiedInboxItems(
   home: string,
-  knownIds: ReadonlySet<string>,
   now: Date = new Date(),
   cache?: SessionLogCache,
   port: number = DEFAULT_DAEMON_PORT,
 ): void {
   try {
-    const fresh = deriveInbox(home, cache).filter(
-      (row) => !knownIds.has(row.id) && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
-    );
+    const fresh = deriveInbox(home, cache).filter((row) => !existsSync(inboxNotifiedMarkerPath(row.id, home)));
     if (fresh.length === 0) return;
     const shortIds = shortIdIndex(home);
     for (const row of fresh) {

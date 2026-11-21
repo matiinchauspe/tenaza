@@ -112,13 +112,18 @@ export function notifySoundStatePath(home: string = tenazaHome()): string {
   return path.join(home, "state", "notify-sound-at");
 }
 
-/**
- * Created exclusively by whichever process notifies an Inbox item first — a host hook or the
- * Daemon — so the other finds it and stays silent. A file, not an Event, because the claim must
- * be atomic across processes, and a hook inside a Sandbox writes this same directory.
- */
+export function notifiedMarkersDir(home: string = tenazaHome()): string {
+  return path.join(home, "state", "notified");
+}
+
+/** A file, not an Event, so the claim is atomic across processes — a notify or the Daemon's migration writes it. */
 export function inboxNotifiedMarkerPath(id: string, home: string = tenazaHome()): string {
-  return path.join(home, "state", "notified", `inbox-${id}`);
+  return path.join(notifiedMarkersDir(home), `inbox-${id}`);
+}
+
+/** The one marker only the migration itself writes, so a hook's or the Daemon's own claim is never read as it. */
+export function inboxMigratedMarkerPath(home: string = tenazaHome()): string {
+  return path.join(notifiedMarkersDir(home), ".migrated");
 }
 
 /**

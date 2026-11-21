@@ -109,15 +109,24 @@ function psField(pid: string, format: string): string | undefined {
  * exactly one pid.
  */
 export interface ProcessMarker {
-  pid: number;
-  /** `ps -o lstart=`'s raw text, opaque — never parsed as a date. `undefined` only means `ps` couldn't report it; `pid` is still captured either way. */
+  pid?: number;
+  /**
+   * `ps -o lstart=`'s raw text, opaque — never parsed as a date. Beside a
+   * `pid`, `undefined` only means `ps` couldn't report it.
+   */
   startedAt?: string;
 }
 
+/**
+ * Omits the marker off-`darwin`: a Sandbox's own pid namespace means
+ * nothing to the host's later `ps -p` (`closeDeadProcesses`).
+ */
 export function captureProcessMarker(
   pid: number = process.ppid,
   psRead: (pid: string, format: string) => string | undefined = psField,
+  platform: string = process.platform,
 ): ProcessMarker {
+  if (platform !== "darwin") return {};
   try {
     return { pid, startedAt: cleanField(psRead(String(pid), "lstart=")) };
   } catch {

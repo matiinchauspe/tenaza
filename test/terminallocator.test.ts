@@ -116,6 +116,18 @@ describe("captureProcessMarker (ticket 02) — pid + its process-start marker, v
   });
 });
 
+describe("captureProcessMarker (ticket 04) — a Sandbox's own pid namespace is never the host's", () => {
+  test("a non-darwin platform captures nothing at all — no pid the host could ever compare against", () => {
+    const marker = captureProcessMarker(1234, () => "Wed Oct 28 10:00:00 2026", "linux");
+    expect(marker).toEqual({});
+  });
+
+  test("darwin keeps capturing exactly as before — the host IS the process table it later checks", () => {
+    const marker = captureProcessMarker(1234, () => "Wed Oct 28 10:00:00 2026", "darwin");
+    expect(marker).toEqual({ pid: 1234, startedAt: "Wed Oct 28 10:00:00 2026" });
+  });
+});
+
 describe("outermostApp — the generic fallback's raise target", () => {
   test("a helper nested inside the app resolves to the outer bundle, never the helper", () => {
     expect(outermostApp("/Applications/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Orca Helper")).toBe(

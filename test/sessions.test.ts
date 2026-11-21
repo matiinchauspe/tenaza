@@ -610,6 +610,59 @@ describe("closeDeadProcesses — real `ps` (no injection): end-to-end over an ac
   });
 });
 
+describe("a Sandbox Session's pid (ticket 04 — found by review: a sandboxed hook's pid read as ended by the host)", () => {
+  test("captured on a non-darwin platform, the Session carries no pid — closeDeadProcesses leaves it untouched while it's still working", () => {
+    const marker = captureProcessMarker(1234, () => "Wed Oct 28 10:00:00 2026", "linux");
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: [],
+        pid: marker.pid,
+        pidStartedAt: marker.startedAt,
+      }),
+    ]);
+    // An empty map is what the host's `ps` reports for a pid from a different pid namespace.
+    closeDeadProcesses(index, new Date(), () => new Map());
+    expect(index.get("sess-1")!.endedAt).toBeUndefined();
+  });
+
+  test("the same Sandbox Session still ends on total silence — the SAME fallback a pid-less host Session already gets", () => {
+    const marker = captureProcessMarker(1234, () => "Wed Oct 28 10:00:00 2026", "linux");
+    const lastEventTs = "2026-10-01T00:00:00.000Z";
+    const index = buildSessionIndex([
+      {
+        ...sessionStartedEvent("sess-1", {
+          runtime: "claude",
+          cwd: "/repo",
+          capabilities: [],
+          pid: marker.pid,
+          pidStartedAt: marker.startedAt,
+        }),
+        ts: lastEventTs,
+      },
+    ]);
+    const now = new Date(new Date(lastEventTs).getTime() + TERMINO_WINDOW_MS + 1);
+    closeSilentPidlessSessions(index, now);
+    expect(index.get("sess-1")!.endedReason).toBe(NO_PID_SILENT_REASON);
+  });
+
+  test("a host Session's own pid keeps the process-liveness check it has today (AC3)", () => {
+    const marker = captureProcessMarker(1234, () => "Wed Oct 28 10:00:00 2026", "darwin");
+    const index = buildSessionIndex([
+      sessionStartedEvent("sess-1", {
+        runtime: "claude",
+        cwd: "/repo",
+        capabilities: [],
+        pid: marker.pid,
+        pidStartedAt: marker.startedAt,
+      }),
+    ]);
+    closeDeadProcesses(index, new Date(), () => new Map());
+    expect(index.get("sess-1")!.endedReason).toBe(PROCESS_GONE_REASON);
+  });
+});
+
 describe("isPidlessSilent (ticket 06, tenaza-v0-3 — a Session with no pid stops reading live after 24h of silence)", () => {
   test("no pid at all, silent past the 24h window, reads as silent (the pre-0.3.0 fallback)", () => {
     const index = buildSessionIndex([

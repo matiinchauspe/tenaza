@@ -41,6 +41,9 @@ reserved="$(hook "gh pr merge 1")"
 [[ "$reserved" == *'"permissionDecision":"deny"'* ]] || fail "reserved command was not denied: $reserved"
 [[ "$reserved" != *systemMessage* ]] || fail "reserved command carried a warning: $reserved"
 
+# A false claim here would stop the running Daemon from ever notifying this item.
+[[ ! -e "$HOME_DIR/state/notified" ]] || fail "the hook claimed a notification it cannot deliver: $(ls "$HOME_DIR/state/notified")"
+
 [[ -s "$HOME_DIR/state/sessions/smoke.jsonl" ]] || fail "no session log under TENAZA_HOME/state"
 status="$(TENAZA_HOME="$HOME_DIR" "$BIN" status)"
 [[ "$status" == *"gh pr merge 1"* ]] || fail "the Inbox does not list the reserved command: $status"

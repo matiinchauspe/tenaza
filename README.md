@@ -54,7 +54,7 @@ Requires macOS and [Claude Code](https://code.claude.com).
 Each release also ships `tenaza-linux-arm64` and `tenaza-linux-x64`, for running `tenaza hook
 claude` inside a Linux sandbox that mounts the host's `~/.tenaza`. Only the hook runs there: the
 Daemon, the board and notifications stay on the macOS host. A hook in the sandbox cannot notify,
-so the running Daemon notifies each Inbox item it writes, once.
+so the running Daemon notifies each Inbox item a sandbox hook writes, once.
 
 ```bash
 brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza

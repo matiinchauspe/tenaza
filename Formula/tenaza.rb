@@ -12,17 +12,17 @@
 class Tenaza < Formula
   desc "Decoupled control plane for coding agents: observe, enforce, show"
   homepage "https://github.com/matiinchauspe/tenaza"
-  version "0.4.0"
+  version "0.5.0"
   license "MIT"
 
   # The two sha256 values below are the real digests from the release's
   # checksums.txt — update-formula.sh overwrites both on every release.
   if Hardware::CPU.arm?
     url "https://github.com/matiinchauspe/tenaza/releases/download/v#{version}/tenaza-darwin-arm64"
-    sha256 "8a6806768ab000eb37abd35c9a115cf94835e5fa74bd0fb3f4433509408d3cd6"
+    sha256 "3f810a646b54fccbcc25ce47d2aafb15f7d129f32a09b9131031b7700c8d88b0"
   else
     url "https://github.com/matiinchauspe/tenaza/releases/download/v#{version}/tenaza-darwin-x64"
-    sha256 "e94954fc4e477b6d42cd1ec5047f594098c3f7889bcc981f10e1fe28074dbf8d"
+    sha256 "29d6ec90a53966af76502509a12c94926ab486526d6df97514b582082e4699b3"
   end
 
   def install

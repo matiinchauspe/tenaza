@@ -63,7 +63,7 @@ jobs:
             asset: tenaza-linux-x64
             runner: ubuntu-latest
           # A musl binary cannot run on the glibc runner, so its smoke runs in the Alpine image
-          # Crisol's Sandbox is built from.
+          # Crisol's Sandbox is built from, with the libstdc++ and libgcc Bun's musl build links.
           - target: bun-linux-arm64-musl
             asset: tenaza-linux-arm64-musl
             runner: ubuntu-24.04-arm
@@ -95,7 +95,7 @@ jobs:
         if: ${{ matrix.smoke_image }}
         run: >-
           docker run --rm -v "$PWD:/work" -w /work ${{ matrix.smoke_image }}
-          sh -c 'apk add --no-cache bash >/dev/null && scripts/smoke-hook.sh dist/${{ matrix.asset }}'
+          sh -c 'apk add --no-cache bash libstdc++ libgcc >/dev/null && scripts/smoke-hook.sh dist/${{ matrix.asset }}'
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

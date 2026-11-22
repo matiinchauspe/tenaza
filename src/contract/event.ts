@@ -138,8 +138,8 @@ const SessionStartedData = z.object({
    * `sessions.ts`'s `closeDeadProcesses` checks it against the live
    * process table later to tell a dead Session apart from an idle one.
    * Omitted when the process table couldn't be read at all (a sandboxed
-   * test env, or `backfillSessionStartedIfMissing`'s catch-up path) — such
-   * a Session is simply never a candidate for that check.
+   * test env, a hook run inside a Sandbox, or `backfillSessionStartedIfMissing`'s
+   * catch-up path) — such a Session is simply never a candidate for that check.
    */
   pid: z.number().optional(),
   /**

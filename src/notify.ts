@@ -2,9 +2,16 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import path from "node:path";
 import type { Event } from "./contract/event";
 import { buildDaemonUrl, readDaemonToken } from "./daemonlink";
-import { findInboxRow, type InboxRow } from "./inbox";
-import { readSessionEvents } from "./log";
-import { DEFAULT_DAEMON_PORT, notifyRecorderPath, notifySoundStatePath, tenazaHome } from "./paths";
+import { deriveInbox, findInboxRow, type InboxRow, shortIdIndex } from "./inbox";
+import { readSessionEvents, type SessionLogCache } from "./log";
+import {
+  DEFAULT_DAEMON_PORT,
+  inboxNotifiedMarkerPath,
+  inboxRelayRequestedMarkerPath,
+  notifyRecorderPath,
+  notifySoundStatePath,
+  tenazaHome,
+} from "./paths";
 import { buildSessionIndex, categoryWord, deriveProject, roleOf, type SessionNode } from "./sessions";
 import { describeAction, UNBLOCKED_MARKER } from "./status";
 
@@ -22,7 +29,6 @@ export interface Notification {
   openUrl?: string;
 }
 
-/** What the recorder keeps: the Notification plus whether this send actually played a sound. */
 export interface RecordedNotification extends Notification {
   sound: boolean;
 }
@@ -30,7 +36,6 @@ export interface RecordedNotification extends Notification {
 /** A burst window (one sound per ~2s) — never blocks the notification itself, only throttles the sound across a burst. */
 export const NOTIFY_BURST_WINDOW_MS = 2000;
 
-/** Pure: should this send play a sound, given when one last did? No prior sound always plays one. */
 export function shouldPlaySound(
   lastSoundAt: Date | undefined,
   now: Date,
@@ -165,10 +170,11 @@ export function buildGraveFaultNotification(message: string): Notification {
  * it was noticed. Swallows its own lookups failing too, not just
  * `sendNotification`'s own guard.
  */
-export function notifyGraveFault(home: string, message: string, now: Date = new Date()): void {
+export function notifyGraveFault(home: string, message: string, now: Date = new Date()): boolean {
   try {
-    sendNotification(home, buildGraveFaultNotification(message), now);
+    return sendNotification(home, buildGraveFaultNotification(message), now);
   } catch {
+    return false;
   }
 }
 
@@ -205,7 +211,6 @@ function quoteAppleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/** The argv `sendMacNotification` would actually spawn — split out as a pure function so the terminal-notifier-vs-osascript choice is unit-testable without touching a real process or PATH. */
 export interface MacNotifierCommand {
   tool: "terminal-notifier" | "osascript";
   argv: string[];
@@ -214,14 +219,15 @@ export interface MacNotifierCommand {
 /**
  * `osascript display notification` has no click-action parameter, so a
  * clickable notification needs `terminal-notifier -open <url>` instead.
- * Falls through to `osascript` (no click) when `terminal-notifier` isn't
- * installed, or when there's no `openUrl` to open anyway.
+ * `undefined` on a Linux Sandbox: it has no macOS notifier, and the host
+ * Daemon tells the human.
  */
 export function buildMacNotifierCommand(
   notification: Notification,
   sound: boolean,
   hasTerminalNotifier: boolean,
-): MacNotifierCommand {
+  hasOsascript: boolean,
+): MacNotifierCommand | undefined {
   if (notification.openUrl && hasTerminalNotifier) {
     const argv = [
       "terminal-notifier",
@@ -237,6 +243,7 @@ export function buildMacNotifierCommand(
     if (sound) argv.push("-sound", "default");
     return { tool: "terminal-notifier", argv };
   }
+  if (!hasOsascript) return undefined;
 
   const script =
     `display notification ${quoteAppleScriptString(notification.message)} ` +
@@ -246,18 +253,30 @@ export function buildMacNotifierCommand(
   return { tool: "osascript", argv: ["osascript", "-e", script] };
 }
 
+/** Without an explicit `PATH`, `Bun.which` searches the one the process started with. */
+function macNotifierCommand(notification: Notification, sound: boolean): MacNotifierCommand | undefined {
+  const PATH = process.env.PATH ?? "";
+  return buildMacNotifierCommand(
+    notification,
+    sound,
+    Bun.which("terminal-notifier", { PATH }) !== null,
+    Bun.which("osascript", { PATH }) !== null,
+  );
+}
+
+function canDeliver(notification: Notification): boolean {
+  return Boolean(process.env.TENAZA_NOTIFY_RECORDER) || macNotifierCommand(notification, false) !== undefined;
+}
+
 /**
- * `terminal-notifier -open <url>` when it's on PATH and there's a URL to
- * open, else `osascript -e 'display notification …'`, which ships with
- * every macOS. The tradeoff: `display notification` can't replace an
- * earlier banner by tag, or act on a click at all — `tag` here is
- * Tenaza's own bookkeeping key, not an OS-level one. Fired with
- * `Bun.spawn` and never awaited, so the hook never blocks on it.
+ * `display notification` can't replace an earlier banner by tag — `tag` is
+ * Tenaza's own bookkeeping key, not an OS-level one. Not awaited so the
+ * hook never blocks on it.
  */
 function sendMacNotification(notification: Notification, sound: boolean): void {
-  const hasTerminalNotifier = Bun.which("terminal-notifier") !== null;
-  const { argv } = buildMacNotifierCommand(notification, sound, hasTerminalNotifier);
-  Bun.spawn(argv, { stdout: "ignore", stderr: "ignore" });
+  const command = macNotifierCommand(notification, sound);
+  if (!command) return;
+  Bun.spawn(command.argv, { stdout: "ignore", stderr: "ignore" });
 }
 
 /**
@@ -268,17 +287,20 @@ function sendMacNotification(notification: Notification, sound: boolean): void {
  * throws — a failing notifier must never fail the hook or change its
  * allow/deny answer.
  */
-export function sendNotification(home: string, notification: Notification, now: Date = new Date()): void {
+export function sendNotification(home: string, notification: Notification, now: Date = new Date()): boolean {
   try {
+    if (!canDeliver(notification)) return false;
     const sound = shouldPlaySound(readLastSoundAt(home), now);
     if (sound) writeLastSoundAt(home, now);
 
     if (process.env.TENAZA_NOTIFY_RECORDER) {
       appendRecorder(home, { ...notification, sound });
-      return;
+      return true;
     }
     sendMacNotification(notification, sound);
+    return true;
   } catch {
+    return false;
   }
 }
 
@@ -287,6 +309,43 @@ function sessionContext(home: string, session: string): { project: string; role:
   const index = buildSessionIndex(readSessionEvents(session, home));
   const node: SessionNode = index.get(session) ?? { id: session, capabilities: [], labels: {} };
   return { project: deriveProject(node), role: roleOf(node), ticket: node.labels.ticket };
+}
+
+function claimInboxNotification(home: string, id: string): boolean {
+  const file = inboxNotifiedMarkerPath(id, home);
+  mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    writeFileSync(file, "", { flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+/** A plain write, never a claim — the Daemon's own exclusive claim still decides who actually sends it. */
+function recordRelayRequest(home: string, id: string): void {
+  const file = inboxRelayRequestedMarkerPath(id, home);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, "", "utf8");
+}
+
+/**
+ * Can't deliver → a relay request, never a claim: the claim is one-shot and
+ * would block the Daemon from ever notifying it. `port` defaults to a hook's
+ * (no bound server); the Daemon passes the port it actually bound.
+ */
+function notifyInboxRow(home: string, row: InboxRow, shortId: string, now: Date, port: number = DEFAULT_DAEMON_PORT): void {
+  const context = sessionContext(home, row.session);
+  const token = readDaemonToken(home);
+  const openUrl = token ? buildDaemonUrl(port, token) : undefined;
+  const notification = buildInboxOpenedNotification(row, shortId, context, openUrl);
+  if (!canDeliver(notification)) {
+    recordRelayRequest(home, row.id);
+    return;
+  }
+  if (!claimInboxNotification(home, row.id)) return;
+  sendNotification(home, notification, now);
 }
 
 /**
@@ -299,16 +358,34 @@ function sessionContext(home: string, session: string): { project: string; role:
 export function notifyNewInboxItem(home: string, fullId: string, shortId: string, now: Date = new Date()): void {
   try {
     const row = findInboxRow(home, fullId);
-    if (!row) return;
-    const context = sessionContext(home, row.session);
-    // Only set when a Daemon has ever written a token; always the default
-    // port, since no file names which port a non-default
-    // `tenaza ui --port <n>` bound to.
-    const token = readDaemonToken(home);
-    const openUrl = token ? buildDaemonUrl(DEFAULT_DAEMON_PORT, token) : undefined;
-    sendNotification(home, buildInboxOpenedNotification(row, shortId, context, openUrl), now);
+    if (row) notifyInboxRow(home, row, shortId, now);
   } catch {
   }
+}
+
+/**
+ * Notifies only an item carrying a relay request — never inferred from a
+ * missing notified marker alone, so a host item is never swept in. Never
+ * filters by `row.ts`: a guest clock can lag the host's.
+ */
+export function notifyUnnotifiedInboxItems(
+  home: string,
+  now: Date = new Date(),
+  cache?: SessionLogCache,
+  port: number = DEFAULT_DAEMON_PORT,
+): void {
+  try {
+    const relayed = deriveInbox(home, cache).filter(
+      (row) => existsSync(inboxRelayRequestedMarkerPath(row.id, home)) && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
+    );
+    if (relayed.length === 0) return;
+    const shortIds = shortIdIndex(home);
+    for (const row of relayed) {
+      try {
+        notifyInboxRow(home, row, shortIds.get(row.id) ?? row.id, now, port);
+      } catch {}
+    }
+  } catch {}
 }
 
 /** Fire 🔴 for `session` crossing `thresholdTokens` with this `contextTokens` sample, per `shouldNotifyThresholdCrossing`. */

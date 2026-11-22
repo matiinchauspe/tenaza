@@ -112,6 +112,24 @@ export function notifySoundStatePath(home: string = tenazaHome()): string {
   return path.join(home, "state", "notify-sound-at");
 }
 
+export function notifiedMarkersDir(home: string = tenazaHome()): string {
+  return path.join(home, "state", "notified");
+}
+
+/** A file, not an Event, so the claim is atomic across processes — a hook's own notify or the Daemon's relay claims it. */
+export function inboxNotifiedMarkerPath(id: string, home: string = tenazaHome()): string {
+  return path.join(notifiedMarkersDir(home), `inbox-${id}`);
+}
+
+export function relayRequestedMarkersDir(home: string = tenazaHome()): string {
+  return path.join(home, "state", "relay-requested");
+}
+
+/** A hook that cannot deliver writes this instead — the explicit request the Daemon notifies on. */
+export function inboxRelayRequestedMarkerPath(id: string, home: string = tenazaHome()): string {
+  return path.join(relayRequestedMarkersDir(home), `inbox-${id}`);
+}
+
 /**
  * Tenaza's last successfully parsed Policy — the fallback a malformed
  * `policy.toml` degrades to instead of silently dropping every Rule.

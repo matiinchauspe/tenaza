@@ -17,6 +17,7 @@ import {
 import { runFocusPlan } from "./focus";
 import { type InboxItem, deriveInbox, deriveResolutionTraceBySession } from "./inbox";
 import { createSessionLogCache, readAllSessionEvents, readAllSessionEventsCached, type SessionLogCache } from "./log";
+import { notifyUnnotifiedInboxItems } from "./notify";
 import {
   daemonAlivePath,
   daemonTokenPath,
@@ -395,12 +396,17 @@ function encodeSseEvent(data: unknown): Uint8Array {
  * `git` for a `cwd` it already resolved (see that function's own doc for
  * which one actually matters). Both optional only so a caller without
  * them still gets the same value; `runUi` below always passes both.
+ *
+ * `onStateChange` runs on every tick the signature moved, before the
+ * payload comparison, since a write can matter to it without changing what
+ * a client sees.
  */
 export function startStateWatcher(
   home: string,
   clients: Set<SseController>,
   cache?: SessionLogCache,
   resolveGitRoot?: (cwd: string) => string | undefined,
+  onStateChange?: () => void,
 ): { stop(): void } {
   let lastSignature: string | undefined;
   let lastPayload: string | undefined;
@@ -410,6 +416,7 @@ export function startStateWatcher(
       const signature = computeStateSignature(home);
       if (signature === lastSignature) return;
       lastSignature = signature;
+      onStateChange?.();
 
       // The stat signature changing is necessary, not sufficient — a usage
       // sample that leaves the context bar's number unchanged, or a torn
@@ -923,7 +930,9 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const url = buildDaemonUrl(boundPort, ctx.token);
 
   const heartbeat = setInterval(() => writeAlive(home), heartbeatIntervalMs());
-  const watcher = startStateWatcher(home, ctx.clients, ctx.logCache, ctx.resolveGitRoot);
+  const watcher = startStateWatcher(home, ctx.clients, ctx.logCache, ctx.resolveGitRoot, () =>
+    notifyUnnotifiedInboxItems(home, new Date(), ctx.logCache, boundPort),
+  );
 
   shutdown = (): void => {
     clearInterval(heartbeat);

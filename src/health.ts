@@ -14,6 +14,8 @@ export interface HealthState {
   cause: string;
   /** True only when there's nothing to fall back on (e.g. no last-known-good Policy ever) — a sharper signal for whichever channel reads this later. */
   grave: boolean;
+  /** Did THIS fault actually reach a human — never inferred from `grave` alone. */
+  notified: boolean;
   at: string;
 }
 
@@ -22,12 +24,13 @@ export function recordDegraded(
   home: string,
   cause: string,
   grave = false,
+  notified = false,
   now: Date = new Date(),
 ): void {
   try {
     const file = healthPath(home);
     mkdirSync(path.dirname(file), { recursive: true });
-    const state: HealthState = { cause, grave, at: now.toISOString() };
+    const state: HealthState = { cause, grave, notified, at: now.toISOString() };
     writeFileSync(file, JSON.stringify(state));
   } catch {
   }

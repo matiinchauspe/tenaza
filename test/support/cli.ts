@@ -19,7 +19,10 @@ export async function runCli(
   args: string[],
   options: { home: string; stdin?: string; env?: Record<string, string> } = { home: "" },
 ): Promise<CliResult> {
-  const proc = Bun.spawn(["bun", "run", CLI_ENTRY, ...args], {
+  // `process.execPath`, an absolute path — never the bare name "bun" — so a
+  // test overriding the child's own `PATH` (e.g. to make its notifier
+  // undeliverable) can't also break Bun's own lookup of the binary to spawn.
+  const proc = Bun.spawn([process.execPath, "run", CLI_ENTRY, ...args], {
     env: { ...process.env, TENAZA_HOME: options.home, ...options.env },
     stdin: options.stdin !== undefined ? new TextEncoder().encode(options.stdin) : "ignore",
     stdout: "pipe",

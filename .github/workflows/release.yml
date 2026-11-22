@@ -8,8 +8,6 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    # Tests run on the OS the release ships for. Two Daemon tests fail on
-    # Linux file watching, which is tracked separately before any Linux build.
     runs-on: macos-latest
     strategy:
       matrix:
@@ -46,9 +44,54 @@ jobs:
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  # Its own job so a red Linux leg never cancels a darwin one. It skips
+  # `bun test`: two Daemon tests fail on Linux file watching, and only the
+  # hook ships here, which the smoke step covers.
+  build-linux:
+    name: Build ${{ matrix.target }}
+    # Each leg runs on its own architecture so the smoke step can execute the
+    # binary it just compiled.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-linux-arm64
+            asset: tenaza-linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: bun-linux-x64
+            asset: tenaza-linux-x64
+            runner: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Cross-compile ${{ matrix.target }}
+        run: bun build ./src/cli.ts --compile --target=${{ matrix.target }} --outfile dist/${{ matrix.asset }}
+
+      - name: Smoke-test the compiled hook
+        run: scripts/smoke-hook.sh dist/${{ matrix.asset }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-linux]
+    # A failed Linux leg still ships the release, just without its asset.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -92,6 +135,8 @@ jobs:
           files: |
             release/tenaza-darwin-arm64
             release/tenaza-darwin-x64
+            release/tenaza-linux-arm64
+            release/tenaza-linux-x64
             release/checksums.txt
           body_path: release/notes.md
           generate_release_notes: true

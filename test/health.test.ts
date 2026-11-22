@@ -17,19 +17,32 @@ describe("ADR 0007 (ticket 01): health state", () => {
   });
 
   test("recordDegraded writes state/health.json, readable back through readHealth", () => {
-    recordDegraded(home, "policy.toml is invalid", true, new Date("2026-01-01T00:00:00.000Z"));
+    recordDegraded(home, "policy.toml is invalid", true, false, new Date("2026-01-01T00:00:00.000Z"));
 
     expect(existsSync(healthPath(home))).toBe(true);
     expect(readHealth(home)).toEqual({
       cause: "policy.toml is invalid",
       grave: true,
+      notified: false,
       at: "2026-01-01T00:00:00.000Z",
     });
   });
 
-  test("recordDegraded defaults grave to false", () => {
+  test("recordDegraded round-trips notified:true", () => {
+    recordDegraded(home, "policy.toml is invalid", true, true, new Date("2026-01-01T00:00:00.000Z"));
+
+    expect(readHealth(home)).toEqual({
+      cause: "policy.toml is invalid",
+      grave: true,
+      notified: true,
+      at: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
+  test("recordDegraded defaults grave and notified to false", () => {
     recordDegraded(home, "a torn log line was skipped");
     expect(readHealth(home)?.grave).toBe(false);
+    expect(readHealth(home)?.notified).toBe(false);
   });
 
   test("readHealth is undefined on a fresh home — nothing degraded yet", () => {

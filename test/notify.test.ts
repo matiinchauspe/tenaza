@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { usageSampledEvent } from "../src/contract/event";
+import { actionDecidedEvent, approvalResolvedEvent, sessionLabeledEvent, usageSampledEvent } from "../src/contract/event";
+import { writeDaemonToken } from "../src/daemonlink";
+import { decideAction } from "../src/decide";
+import { inboxIdentityHash } from "../src/identity";
+import { appendEvent, appendHumanEvent } from "../src/log";
 import {
   buildGraveFaultNotification,
   buildInboxOpenedNotification,
@@ -11,11 +15,14 @@ import {
   maxUsageSample,
   NOTIFY_BURST_WINDOW_MS,
   notifyGraveFault,
+  notifyNewInboxItem,
+  notifyUnnotifiedInboxItems,
   readNotificationRecorder,
   sendNotification,
   shouldNotifyThresholdCrossing,
   shouldPlaySound,
 } from "../src/notify";
+import { inboxNotifiedMarkerPath, inboxRelayRequestedMarkerPath } from "../src/paths";
 
 describe("shouldPlaySound (ticket 08's burst-window anti-spam: one sound per ~2s)", () => {
   test("plays when nothing has sounded yet", () => {
@@ -215,33 +222,41 @@ describe("buildMacNotifierCommand (ticket 10: terminal-notifier -open <url>, els
   };
 
   test("terminal-notifier on PATH AND an openUrl present → terminal-notifier -open <url>", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, true);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, true, true);
 
-    expect(command.tool).toBe("terminal-notifier");
-    expect(command.argv[0]).toBe("terminal-notifier");
-    expect(command.argv).toContain("-open");
-    expect(command.argv).toContain("http://127.0.0.1:4747/auth?token=t");
-    expect(command.argv).toContain("-sound");
+    expect(command?.tool).toBe("terminal-notifier");
+    expect(command?.argv[0]).toBe("terminal-notifier");
+    expect(command?.argv).toContain("-open");
+    expect(command?.argv).toContain("http://127.0.0.1:4747/auth?token=t");
+    expect(command?.argv).toContain("-sound");
   });
 
   test("terminal-notifier missing → falls back to osascript, no click action, even with an openUrl", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, false);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://127.0.0.1:4747/auth?token=t" }, true, false, true);
 
-    expect(command.tool).toBe("osascript");
-    expect(command.argv[0]).toBe("osascript");
-    expect(command.argv.join(" ")).not.toContain("http://127.0.0.1:4747");
+    expect(command?.tool).toBe("osascript");
+    expect(command?.argv[0]).toBe("osascript");
+    expect(command?.argv.join(" ")).not.toContain("http://127.0.0.1:4747");
   });
 
   test("no openUrl at all → osascript even when terminal-notifier IS on PATH (nothing to open)", () => {
-    const command = buildMacNotifierCommand(notification, true, true);
+    const command = buildMacNotifierCommand(notification, true, true, true);
 
-    expect(command.tool).toBe("osascript");
+    expect(command?.tool).toBe("osascript");
   });
 
   test("no sound this time → terminal-notifier argv omits -sound", () => {
-    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://x" }, false, true);
+    const command = buildMacNotifierCommand({ ...notification, openUrl: "http://x" }, false, true, true);
 
-    expect(command.argv).not.toContain("-sound");
+    expect(command?.argv).not.toContain("-sound");
+  });
+
+  test("neither tool on PATH (Linux) → no command at all, so nothing is spawned", () => {
+    expect(buildMacNotifierCommand(notification, true, false, false)).toBeUndefined();
+  });
+
+  test("no openUrl and no osascript → no command, even with terminal-notifier on PATH", () => {
+    expect(buildMacNotifierCommand(notification, true, true, false)).toBeUndefined();
   });
 });
 
@@ -347,11 +362,215 @@ describe("sendNotification (the notifier port itself, via the recorder test seam
 
   test("a failing notifier never throws — even when its OWN bookkeeping fails, not just macOS", () => {
     // `state/` is a FILE, not a directory: the sound-state and recorder
-    // writes underneath it both throw ENOTDIR. The guard must hold anyway.
+    // writes underneath it both throw ENOTDIR.
     writeFileSync(path.join(home, "state"), "not a directory");
 
     expect(() =>
       sendNotification(home, { tag: "t", title: "T", subtitle: "S", message: "M" }),
     ).not.toThrow();
+  });
+
+  test("a send that cannot deliver leaves the sound state untouched — the next real send still sounds", () => {
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      sendNotification(home, { tag: "a", title: "A", subtitle: "", message: "" }, new Date(0));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+
+    sendNotification(home, { tag: "b", title: "B", subtitle: "", message: "" }, new Date(500));
+
+    expect(readNotificationRecorder(home)).toEqual([{ tag: "b", title: "B", subtitle: "", message: "", sound: true }]);
+  });
+});
+
+describe("one notification per Inbox item, whichever process wrote it", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-once-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeItemWithoutNotifying(session: string, command: string): string {
+    appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "deny", { match: "gh pr merge", effect: "human" }),
+    );
+    return inboxIdentityHash(session, 2);
+  }
+
+  /** Simulates a Sandbox hook's own failed delivery attempt — the only way a relay request gets written. */
+  function failedHookDelivery(id: string): void {
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+  }
+
+  test("an item a failed hook delivery left a relay request for gets one from the Daemon, naming its project and the held action", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
+    expect(readNotificationRecorder(home)).toEqual([]);
+
+    notifyUnnotifiedInboxItems(home);
+
+    const recorded = readNotificationRecorder(home);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.tag).toBe(`inbox-${id}`);
+    expect(recorded[0]?.subtitle).toContain("crisol");
+    expect(recorded[0]?.message).toContain("gh pr merge 58");
+  });
+
+  test("an open item with no relay request is never notified by the Daemon", () => {
+    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("a later pass over the same relayed item never notifies it again", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
+
+    notifyUnnotifiedInboxItems(home);
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
+  test("an item a host hook already notified for is not notified again", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(path.join(home, "config", "policy.toml"), '[[rule]]\nmatch = "gh pr merge"\neffect = "human"\n');
+
+    const result = await decideAction(home, "sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" });
+    expect(result.decision).toBe("deny");
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
+  test("a hook with no notifier to send through leaves the item for the Daemon to notify", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
+  });
+
+  test("an item with a relay request still notifies even with a `ts` behind the Daemon's own clock — a guest clock lagging the host's", () => {
+    appendEvent(home, sessionLabeledEvent("sess-1", { project: "crisol" }));
+    const event = actionDecidedEvent("sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, "deny", {
+      match: "gh pr merge",
+      effect: "human",
+    });
+    appendEvent(home, { ...event, ts: new Date(0).toISOString() });
+    const id = inboxIdentityHash("sess-1", 2);
+    failedHookDelivery(id);
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
+  });
+
+  test("a resolved item is never notified", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    appendHumanEvent(home, approvalResolvedEvent("sess-1", id, "dismissed"));
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("the Daemon's own notification opens the port it is bound to, not the default", () => {
+    writeDaemonToken(home, "abc");
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
+
+    notifyUnnotifiedInboxItems(home, new Date(), undefined, 9999);
+
+    expect(readNotificationRecorder(home)[0]?.openUrl).toBe("http://127.0.0.1:9999/auth?token=abc");
+  });
+
+  test("a hook-sent notification keeps opening the default port — it has no bound server of its own to report", () => {
+    writeDaemonToken(home, "abc");
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyNewInboxItem(home, id, id.slice(0, 4));
+
+    expect(readNotificationRecorder(home)[0]?.openUrl).toBe("http://127.0.0.1:4747/auth?token=abc");
+  });
+});
+
+describe("AC1: a hook records a relay request only when it cannot deliver (ticket 06)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-relay-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeItem(session: string, command: string): string {
+    appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
+    appendEvent(
+      home,
+      actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "deny", { match: "gh pr merge", effect: "human" }),
+    );
+    return inboxIdentityHash(session, 2);
+  }
+
+  test("cannot deliver: a relay request is recorded, no notified marker is claimed, and nothing is sent", () => {
+    const id = writeItem("sess-1", "gh pr merge 58");
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+
+    expect(existsSync(inboxRelayRequestedMarkerPath(id, home))).toBe(true);
+    expect(existsSync(inboxNotifiedMarkerPath(id, home))).toBe(false);
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("can deliver: claims and notifies as today, recording no relay request", () => {
+    const id = writeItem("sess-1", "gh pr merge 58");
+
+    notifyNewInboxItem(home, id, id.slice(0, 4));
+
+    expect(existsSync(inboxNotifiedMarkerPath(id, home))).toBe(true);
+    expect(existsSync(inboxRelayRequestedMarkerPath(id, home))).toBe(false);
+    expect(readNotificationRecorder(home)).toHaveLength(1);
   });
 });

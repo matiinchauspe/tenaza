@@ -24,27 +24,15 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * Has Tenaza just crossed into this grave fault, rather than already
- * being in it? Reads `state/health.json` as it stood before this call's
- * own `recordDegraded` — absent, healthy, a non-grave fault, or a
- * different grave message (a new fault opening while an old one is still
- * open) all count as a transition; the same grave message repeating does
- * not. Without this, a grave Policy fault — which makes every PreToolUse
- * call grave — would ring once per Bash/MCP call across every parallel
- * agent, rather than once per fault.
- *
- * Concurrency: this read and the `recordDegraded` write right after it
- * are two separate, non-atomic steps, and `tenaza hook claude` runs as a
- * fresh process per call — two hooks racing on the first grave call can
- * both read "healthy" before either writes, so both notify. Accepted
- * rather than fixed with a lock: it costs one duplicate banner on the
- * rare race that opens a grave state, never a banner per ordinary call
- * once it's already open.
+ * Only a fault already marked `notified: true` skips a resend — grave
+ * alone would let an undeliverable fault get marked notified and never
+ * reach anyone. Two racing hooks may both notify once; accepted.
  */
-function enteredGraveState(home: string, degraded: { message: string; grave: boolean }): boolean {
+function graveFaultDelivered(home: string, degraded: { message: string; grave: boolean }): boolean {
   if (!degraded.grave) return false;
   const previous = readHealth(home);
-  return previous === undefined || !previous.grave || previous.cause !== degraded.message;
+  if (previous?.grave && previous.cause === degraded.message && previous.notified) return true;
+  return notifyGraveFault(home, degraded.message);
 }
 
 /**
@@ -55,8 +43,8 @@ function enteredGraveState(home: string, degraded: { message: string; grave: boo
  * whatever comes back, keep `state/health.json` in step, and — the one
  * call site, so it covers a grave fault however it was noticed (the
  * SessionStart self-check or a PreToolUse call hitting the same Policy
- * state) — fire the macOS notification on the transition into a grave
- * state only, never on every call it stays grave through.
+ * state) — attempt the macOS notification once per grave fault (via
+ * `graveFaultDelivered`), then record whether it was actually delivered.
  */
 async function runHookClaude(): Promise<number> {
   const home = tenazaHome();
@@ -64,9 +52,8 @@ async function runHookClaude(): Promise<number> {
   const { output, degraded } = await runClaudeHookSafely(home, raw);
 
   if (degraded) {
-    const shouldNotify = enteredGraveState(home, degraded);
-    recordDegraded(home, degraded.message, degraded.grave);
-    if (shouldNotify) notifyGraveFault(home, degraded.message);
+    const notified = graveFaultDelivered(home, degraded);
+    recordDegraded(home, degraded.message, degraded.grave, notified);
   } else {
     recordHealthy(home);
   }

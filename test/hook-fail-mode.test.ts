@@ -346,6 +346,25 @@ describe("ADR 0007 (ticket 02): the SessionStart self-check and its warning chan
     expect(readNotificationRecorder(home)).toHaveLength(2);
   });
 
+  test("ticket 06 AC6: a grave fault the process can't deliver stays notified:false, so a later process that CAN deliver still rings it once", async () => {
+    mkdirSync(path.join(home, "config"), { recursive: true });
+    writeFileSync(policyPath(home), "[[rule\nmatch = broken"); // grave: no LKG ever
+
+    const undeliverable = await runCli(["hook", "claude"], {
+      home,
+      stdin: sessionStartPayload("sess-a"),
+      env: { PATH: "", TENAZA_NOTIFY_RECORDER: "" },
+    });
+    expect(undeliverable.exitCode).toBe(0);
+    expect(readHealth(home)).toMatchObject({ grave: true, notified: false });
+    expect(readNotificationRecorder(home)).toHaveLength(0); // nothing could be delivered, so nothing was recorded as sent
+
+    const delivered = await sessionStart("sess-b"); // the ordinary test env, which CAN deliver
+    expect(delivered.exitCode).toBe(0);
+    expect(readHealth(home)).toMatchObject({ grave: true, notified: true });
+    expect(readNotificationRecorder(home)).toHaveLength(1);
+  });
+
   test("an unwritable state directory: reported by name in the systemMessage, no notification — and the next healthy SessionStart leaves nothing behind", async () => {
     mkdirSync(path.join(home, "state"), { recursive: true });
     chmodSync(path.join(home, "state"), 0o500);

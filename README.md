@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.0-2dd4bf" alt="version 0.5.0">
+  <img src="https://img.shields.io/badge/version-0.5.1-2dd4bf" alt="version 0.5.1">
   <img src="https://img.shields.io/badge/license-MIT-34d399" alt="license MIT">
   <img src="https://img.shields.io/badge/platform-macOS-8b93a0" alt="platform macOS">
 </p>
@@ -51,11 +51,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 Requires macOS and [Claude Code](https://code.claude.com).
 
-Each release also ships `tenaza-linux-arm64` and `tenaza-linux-x64`, for running `tenaza hook
-claude` inside a Linux sandbox that mounts the host's `~/.tenaza`. Only the hook runs there: the
-Daemon, the board and notifications stay on the macOS host. A hook in the sandbox cannot notify,
-so the host Daemon relays each Inbox item a sandbox hook writes, at most once — including one
-written while the Daemon itself was down. That relay covers Inbox items only.
+Each release also ships Linux builds for running `tenaza hook claude` inside a Linux sandbox that
+mounts the host's `~/.tenaza`: `tenaza-linux-arm64` and `tenaza-linux-x64` for glibc, and
+`tenaza-linux-arm64-musl` and `tenaza-linux-x64-musl` for an Alpine sandbox. Only the hook runs
+there: the Daemon, the board and notifications stay on the macOS host. A hook in the sandbox cannot
+notify, so the host Daemon relays each Inbox item a sandbox hook writes, at most once — including
+one written while the Daemon itself was down. That relay covers Inbox items only.
 
 ```bash
 brew tap matiinchauspe/tenaza https://github.com/matiinchauspe/tenaza

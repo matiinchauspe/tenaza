@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.5.1] - 2026-11-22
+
+### Added
+
+- **musl builds for an Alpine sandbox**: each release also ships `tenaza-linux-arm64-musl` and
+  `tenaza-linux-x64-musl`, listed in `checksums.txt`. The glibc builds do not start on Alpine, even
+  with `gcompat`. Each one is smoke-tested in `alpine:3.20` before it is published.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added

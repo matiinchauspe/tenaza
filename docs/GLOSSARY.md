@@ -12,7 +12,10 @@ _Avoid_: Run, conversation, job
 
 **Label**:
 An opaque key=value attached to a Session by whoever announced it. Tenaza stores and shows Labels
-without interpreting them — except the reserved `project`, which groups Sessions.
+without interpreting them — except the keys it reads: `project` groups Sessions, `ticket` plus
+`base` mark a Session to nudge toward a checkpoint past its context threshold, and a `verdict` of
+`done`, `parked`, `checkpoint` or `fail-fast` stops that nudge. Labels merge last-write-wins and
+cannot be deleted, so any other `verdict` value restarts it.
 _Avoid_: Tag, metadata, annotation
 
 **Event**:

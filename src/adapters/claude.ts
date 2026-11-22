@@ -620,6 +620,13 @@ export function isDispatchedRun(labels: Record<string, string>): boolean {
   return Boolean(labels.ticket) && Boolean(labels.base);
 }
 
+const EXIT_VERDICTS = new Set(["done", "parked", "checkpoint", "fail-fast"]);
+
+/** A closed list: a run sent back overwrites `verdict` with any other value, and an unknown one reopens the nudge. */
+export function hasExitVerdict(labels: Record<string, string>): boolean {
+  return labels.verdict !== undefined && EXIT_VERDICTS.has(labels.verdict);
+}
+
 function readLatestUsageSample(home: string, session: string): number | undefined {
   try {
     const raw = readFileSync(usageSampleMarkerPath(session, home), "utf8").trim();
@@ -644,7 +651,8 @@ function readLabels(home: string, session: string): Record<string, string> {
 
 /** The latest sample, not the max: once a compaction lowers the reading, the next sample stops the nudge. */
 function checkpointNudge(home: string, session: string): ClaudeContextOutput | undefined {
-  if (!isDispatchedRun(readLabels(home, session))) return undefined;
+  const labels = readLabels(home, session);
+  if (!isDispatchedRun(labels) || hasExitVerdict(labels)) return undefined;
   if (!shouldNudgeCheckpoint(readLatestUsageSample(home, session), loadPolicy(home).thresholdTokens)) return undefined;
   return { hookEventName: "PostToolUse", additionalContext: CHECKPOINT_NUDGE };
 }

@@ -6,6 +6,7 @@ import {
   ANNOUNCE_DECLARATION,
   CHECKPOINT_NUDGE,
   handleClaudeHook,
+  hasExitVerdict,
   isDispatchedRun,
   LABEL_NOT_RECORDED,
   parseLabelCommand,
@@ -1613,6 +1614,20 @@ describe("isDispatchedRun: pure, both labels / either alone / neither", () => {
   });
 });
 
+describe("hasExitVerdict: pure, the four exit values only", () => {
+  test.each([
+    [{ verdict: "done" }, true],
+    [{ verdict: "parked" }, true],
+    [{ verdict: "checkpoint" }, true],
+    [{ verdict: "fail-fast" }, true],
+    [{ verdict: "pending" }, false],
+    [{ verdict: "shipped" }, false],
+    [{}, false],
+  ])("hasExitVerdict(%p) -> %p", (labels, expected) => {
+    expect(hasExitVerdict(labels)).toBe(expected);
+  });
+});
+
 describe("PostToolUse checkpoint nudge: nag a dispatched run past the threshold, never a block", () => {
   let home: string;
 
@@ -1718,6 +1733,55 @@ describe("PostToolUse checkpoint nudge: nag a dispatched run past the threshold,
     const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
 
     expect(response).toBeUndefined();
+  });
+
+  test.each(["done", "parked", "checkpoint", "fail-fast"])(
+    "a dispatched Session past the threshold that already announced `verdict=%s` is never nudged — its run has ended",
+    async (verdict) => {
+      await label("sess-1", { ticket: "RES-1", base: "main", verdict });
+      for (let i = 1; i <= 25; i++) {
+        await handleClaudeHook(home, {
+          session_id: "sess-1",
+          hook_event_name: "PostToolUse",
+          transcript_path: fixture("above-threshold.jsonl"),
+        });
+      }
+
+      const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+      expect(response).toBeUndefined();
+    },
+  );
+
+  test("a dispatched Session sent back with `verdict=pending` after an exit verdict is nudged again past the threshold", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main", verdict: "done" });
+    await label("sess-1", { verdict: "pending" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
+  });
+
+  test("a `verdict` outside the exit list still gets nudged — an unknown value fails toward the nudge", async () => {
+    await label("sess-1", { ticket: "RES-1", base: "main", verdict: "shipped" });
+    for (let i = 1; i <= 25; i++) {
+      await handleClaudeHook(home, {
+        session_id: "sess-1",
+        hook_event_name: "PostToolUse",
+        transcript_path: fixture("above-threshold.jsonl"),
+      });
+    }
+
+    const response = await handleClaudeHook(home, { session_id: "sess-1", hook_event_name: "PostToolUse" });
+
+    expect(response?.hookSpecificOutput?.additionalContext).toBe(CHECKPOINT_NUDGE);
   });
 
   test("labeled with `base` alone past the threshold is never nudged — `ticket` is required too", async () => {

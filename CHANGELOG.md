@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.5.0] - 2026-11-21
+
+### Added
+
+- **Linux binaries for the hook**: each release also ships `tenaza-linux-arm64` and
+  `tenaza-linux-x64`, for running `tenaza hook claude` inside a Linux sandbox that mounts the
+  host's `~/.tenaza`. Only the hook runs there; the Daemon, the board and notifications stay on
+  the macOS host.
+- **The Daemon relays what a sandbox hook could not send**: a hook with no macOS notifier leaves
+  the Inbox item for the running Daemon, which notifies it at most once, never twice. An item
+  written while the Daemon was down is notified when it starts. The relay covers Inbox items only.
+
+### Fixed
+
+- A session whose hook runs in a sandbox no longer reads TERMINÓ on the host board while it is
+  still working.
+- A grave fault a hook could not deliver keeps ringing on the next call that can, instead of
+  counting as notified.
+- A notification that cannot be delivered no longer silences the sound of the next one.
+- A banner the Daemon sends opens the port it is bound to (`tenaza ui --port <n>`), not the
+  default.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added

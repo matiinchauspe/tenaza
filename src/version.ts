@@ -8,4 +8,4 @@
  * --version` and the SessionStart self-check both read this same
  * constant, for one source of truth on "which Tenaza is this."
  */
-export const TENAZA_VERSION = "0.4.0";
+export const TENAZA_VERSION = "0.5.0";

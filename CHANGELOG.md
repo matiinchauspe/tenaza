@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.5.2] - 2026-11-22
+
+### Fixed
+
+- The musl builds `tenaza-linux-arm64-musl` and `tenaza-linux-x64-musl` are published. 0.5.1
+  shipped without them: their smoke test ran on an Alpine image missing the `libstdc++` and
+  `libgcc` they link. An Alpine sandbox needs both (`apk add libstdc++ libgcc`).
+
 ## [0.5.1] - 2026-11-22
 
 ### Added

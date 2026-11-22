@@ -13,7 +13,6 @@ import {
   buildMacNotifierCommand,
   buildThresholdCrossedNotification,
   maxUsageSample,
-  migrateOpenInboxToNotified,
   NOTIFY_BURST_WINDOW_MS,
   notifyGraveFault,
   notifyNewInboxItem,
@@ -23,7 +22,7 @@ import {
   shouldNotifyThresholdCrossing,
   shouldPlaySound,
 } from "../src/notify";
-import { inboxMigratedMarkerPath, inboxNotifiedMarkerPath, notifiedMarkersDir } from "../src/paths";
+import { inboxNotifiedMarkerPath, inboxRelayRequestedMarkerPath } from "../src/paths";
 
 describe("shouldPlaySound (ticket 08's burst-window anti-spam: one sound per ~2s)", () => {
   test("plays when nothing has sounded yet", () => {
@@ -411,8 +410,26 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
     return inboxIdentityHash(session, 2);
   }
 
-  test("an item written to state with no notification gets one, naming its project and the held action", () => {
+  /** Simulates a Sandbox hook's own failed delivery attempt — the only way a relay request gets written. */
+  function failedHookDelivery(id: string): void {
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+  }
+
+  test("an item a failed hook delivery left a relay request for gets one from the Daemon, naming its project and the held action", () => {
     const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
+    expect(readNotificationRecorder(home)).toEqual([]);
 
     notifyUnnotifiedInboxItems(home);
 
@@ -423,8 +440,17 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
     expect(recorded[0]?.message).toContain("gh pr merge 58");
   });
 
-  test("a later pass over the same item never notifies it again", () => {
+  test("an open item with no relay request is never notified by the Daemon", () => {
     writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+
+    notifyUnnotifiedInboxItems(home);
+
+    expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("a later pass over the same relayed item never notifies it again", () => {
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
 
     notifyUnnotifiedInboxItems(home);
     notifyUnnotifiedInboxItems(home);
@@ -447,25 +473,14 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
 
   test("a hook with no notifier to send through leaves the item for the Daemon to notify", () => {
     const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
-    const savedPath = process.env.PATH;
-    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
-    try {
-      process.env.PATH = "";
-      delete process.env.TENAZA_NOTIFY_RECORDER;
-      notifyNewInboxItem(home, id, id.slice(0, 4));
-    } finally {
-      if (savedPath === undefined) delete process.env.PATH;
-      else process.env.PATH = savedPath;
-      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
-      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
-    }
+    failedHookDelivery(id);
 
     notifyUnnotifiedInboxItems(home);
 
     expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${id}`]);
   });
 
-  test("an item with no marker still notifies even with a `ts` behind the Daemon's own clock — a guest clock lagging the host's", () => {
+  test("an item with a relay request still notifies even with a `ts` behind the Daemon's own clock — a guest clock lagging the host's", () => {
     appendEvent(home, sessionLabeledEvent("sess-1", { project: "crisol" }));
     const event = actionDecidedEvent("sess-1", { kind: "shell", command: "gh pr merge 58", tool: "Bash" }, "deny", {
       match: "gh pr merge",
@@ -473,6 +488,7 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
     });
     appendEvent(home, { ...event, ts: new Date(0).toISOString() });
     const id = inboxIdentityHash("sess-1", 2);
+    failedHookDelivery(id);
 
     notifyUnnotifiedInboxItems(home);
 
@@ -490,7 +506,8 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
 
   test("the Daemon's own notification opens the port it is bound to, not the default", () => {
     writeDaemonToken(home, "abc");
-    writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    const id = writeItemWithoutNotifying("sess-1", "gh pr merge 58");
+    failedHookDelivery(id);
 
     notifyUnnotifiedInboxItems(home, new Date(), undefined, 9999);
 
@@ -507,18 +524,18 @@ describe("one notification per Inbox item, whichever process wrote it", () => {
   });
 });
 
-describe("migrateOpenInboxToNotified (ticket 05: the marker IS the record, so an upgrade never replays an open Inbox)", () => {
+describe("AC1: a hook records a relay request only when it cannot deliver (ticket 06)", () => {
   let home: string;
 
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-migrate-"));
+    home = mkdtempSync(path.join(tmpdir(), "tenaza-notify-relay-"));
   });
 
   afterEach(() => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  function writeOpenItem(session: string, command: string): string {
+  function writeItem(session: string, command: string): string {
     appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
     appendEvent(
       home,
@@ -527,51 +544,33 @@ describe("migrateOpenInboxToNotified (ticket 05: the marker IS the record, so an
     return inboxIdentityHash(session, 2);
   }
 
-  test("on the first run, every open item is claimed without sending anything", () => {
-    const id = writeOpenItem("sess-1", "gh pr merge 58");
+  test("cannot deliver: a relay request is recorded, no notified marker is claimed, and nothing is sent", () => {
+    const id = writeItem("sess-1", "gh pr merge 58");
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
 
-    migrateOpenInboxToNotified(home);
-
+    expect(existsSync(inboxRelayRequestedMarkerPath(id, home))).toBe(true);
+    expect(existsSync(inboxNotifiedMarkerPath(id, home))).toBe(false);
     expect(readNotificationRecorder(home)).toEqual([]);
+  });
+
+  test("can deliver: claims and notifies as today, recording no relay request", () => {
+    const id = writeItem("sess-1", "gh pr merge 58");
+
+    notifyNewInboxItem(home, id, id.slice(0, 4));
+
     expect(existsSync(inboxNotifiedMarkerPath(id, home))).toBe(true);
-  });
-
-  test("its own sentinel is written even with nothing open, so an empty first run is still remembered", () => {
-    migrateOpenInboxToNotified(home);
-
-    expect(existsSync(inboxMigratedMarkerPath(home))).toBe(true);
-    expect(existsSync(notifiedMarkersDir(home))).toBe(true);
-  });
-
-  test("a second call is a no-op — an item it already claimed stays unnotified afterward too", () => {
-    writeOpenItem("sess-1", "gh pr merge 58");
-    migrateOpenInboxToNotified(home);
-
-    migrateOpenInboxToNotified(home);
-    notifyUnnotifiedInboxItems(home);
-
-    expect(readNotificationRecorder(home)).toEqual([]);
-  });
-
-  test("state it cannot read or write never throws", () => {
-    writeFileSync(path.join(home, "state"), "not a directory");
-
-    expect(() => migrateOpenInboxToNotified(home)).not.toThrow();
-  });
-
-  test("an upgrade race — a hook's own claim creating the marker directory first never skips the migration", () => {
-    const olderId = writeOpenItem("sess-older", "gh pr merge 1");
-    const newId = writeOpenItem("sess-new", "gh pr merge 2");
-
-    // The new binary's hook claims and notifies `newId` for real, before the Daemon
-    // itself has restarted — a side effect that creates the directory, not the sentinel.
-    notifyNewInboxItem(home, newId, newId.slice(0, 4));
-    expect(existsSync(notifiedMarkersDir(home))).toBe(true);
-    expect(existsSync(inboxMigratedMarkerPath(home))).toBe(false);
-
-    migrateOpenInboxToNotified(home);
-
-    expect(readNotificationRecorder(home).map((n) => n.tag)).toEqual([`inbox-${newId}`]);
-    expect(existsSync(inboxNotifiedMarkerPath(olderId, home))).toBe(true);
+    expect(existsSync(inboxRelayRequestedMarkerPath(id, home))).toBe(false);
+    expect(readNotificationRecorder(home)).toHaveLength(1);
   });
 });

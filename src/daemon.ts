@@ -17,7 +17,7 @@ import {
 import { runFocusPlan } from "./focus";
 import { type InboxItem, deriveInbox, deriveResolutionTraceBySession } from "./inbox";
 import { createSessionLogCache, readAllSessionEvents, readAllSessionEventsCached, type SessionLogCache } from "./log";
-import { migrateOpenInboxToNotified, notifyUnnotifiedInboxItems } from "./notify";
+import { notifyUnnotifiedInboxItems } from "./notify";
 import {
   daemonAlivePath,
   daemonTokenPath,
@@ -930,7 +930,6 @@ export async function runUi(options: RunUiOptions = {}): Promise<number> {
   const url = buildDaemonUrl(boundPort, ctx.token);
 
   const heartbeat = setInterval(() => writeAlive(home), heartbeatIntervalMs());
-  migrateOpenInboxToNotified(home, ctx.logCache);
   const watcher = startStateWatcher(home, ctx.clients, ctx.logCache, ctx.resolveGitRoot, () =>
     notifyUnnotifiedInboxItems(home, new Date(), ctx.logCache, boundPort),
   );

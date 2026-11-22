@@ -5,7 +5,7 @@ import path from "node:path";
 import { actionDecidedEvent, sessionLabeledEvent } from "../src/contract/event";
 import { inboxIdentityHash } from "../src/identity";
 import { appendEvent } from "../src/log";
-import { readNotificationRecorder, type RecordedNotification } from "../src/notify";
+import { notifyNewInboxItem, readNotificationRecorder, type RecordedNotification } from "../src/notify";
 import { runCli } from "./support/cli";
 import { spawnDaemon } from "./support/daemon";
 
@@ -32,7 +32,8 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  function writeSandboxItem(session: string, command: string): string {
+  /** Just the Inbox event, with no hook ever having attempted to notify it — no relay request lands from this alone. */
+  function writeInboxEvent(session: string, command: string): string {
     appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
     appendEvent(
       home,
@@ -41,21 +42,45 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     return inboxIdentityHash(session, 2);
   }
 
+  /** The one way a relay request lands in state: a hook's own failed delivery attempt. */
+  function failedHookDelivery(id: string): void {
+    const savedPath = process.env.PATH;
+    const savedRecorder = process.env.TENAZA_NOTIFY_RECORDER;
+    try {
+      process.env.PATH = "";
+      delete process.env.TENAZA_NOTIFY_RECORDER;
+      notifyNewInboxItem(home, id, id.slice(0, 4));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedRecorder === undefined) delete process.env.TENAZA_NOTIFY_RECORDER;
+      else process.env.TENAZA_NOTIFY_RECORDER = savedRecorder;
+    }
+  }
+
+  function writeRelayedSandboxItem(session: string, command: string): string {
+    const id = writeInboxEvent(session, command);
+    failedHookDelivery(id);
+    return id;
+  }
+
   /** Stamps the item's own `ts`, so a test can simulate a guest clock lagging the host's. */
-  function writeSandboxItemAt(session: string, command: string, ts: string): string {
+  function writeRelayedSandboxItemAt(session: string, command: string, ts: string): string {
     appendEvent(home, sessionLabeledEvent(session, { project: "crisol" }));
     const event = actionDecidedEvent(session, { kind: "shell", command, tool: "Bash" }, "held", {
       match: "gh pr merge",
       effect: "human",
     });
     appendEvent(home, { ...event, ts });
-    return inboxIdentityHash(session, 2);
+    const id = inboxIdentityHash(session, 2);
+    failedHookDelivery(id);
+    return id;
   }
 
-  test("an item a Sandbox hook wrote with no notification gets exactly one from the running Daemon", async () => {
+  test("an item a Sandbox hook's failed delivery left relayed gets exactly one from the running Daemon", async () => {
     const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
-      const id = writeSandboxItem("sess-1", "gh pr merge 58");
+      const id = writeRelayedSandboxItem("sess-1", "gh pr merge 58");
 
       const recorded = await waitForNotifications(home, 1, 3000);
       expect(recorded).toHaveLength(1);
@@ -66,6 +91,19 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
       appendEvent(home, sessionLabeledEvent("sess-1", { ticket: "02" }));
       await Bun.sleep(300);
       expect(readNotificationRecorder(home)).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  test("a relayed item written before any Daemon has ever started here is notified once one first starts", async () => {
+    const id = writeRelayedSandboxItem("sess-1", "gh pr merge 58");
+
+    const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      const recorded = await waitForNotifications(home, 1, 3000);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]?.tag).toBe(`inbox-${id}`);
     } finally {
       await daemon.stop();
     }
@@ -98,24 +136,32 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     }
   });
 
-  test("an item already open on the Daemon's very first start here is migrated silently, never replayed", async () => {
-    writeSandboxItem("sess-1", "gh pr merge 58");
+  test("an open item with no relay request is never notified by the Daemon, across first start and a restart", async () => {
+    writeInboxEvent("sess-1", "gh pr merge 58");
     await Bun.sleep(10);
 
-    const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    const first = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
       await Bun.sleep(300);
       expect(readNotificationRecorder(home)).toEqual([]);
     } finally {
-      await daemon.stop();
+      await first.stop();
+    }
+
+    const second = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
+    try {
+      await Bun.sleep(300);
+      expect(readNotificationRecorder(home)).toEqual([]);
+    } finally {
+      await second.stop();
     }
   });
 
-  test("an item a Sandbox hook writes while the Daemon is stopped is notified once it restarts", async () => {
+  test("an item a Sandbox hook's failed delivery relays while the Daemon is stopped is notified once it restarts", async () => {
     const first = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     await first.stop();
 
-    const id = writeSandboxItem("sess-1", "gh pr merge 58");
+    const id = writeRelayedSandboxItem("sess-1", "gh pr merge 58");
 
     const second = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
@@ -160,10 +206,10 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
     }
   });
 
-  test("an item a Sandbox hook writes after the Daemon started still gets notified, even with its guest clock behind the host's", async () => {
+  test("an item a Sandbox hook relays after the Daemon started still gets notified, even with its guest clock behind the host's", async () => {
     const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
-      const id = writeSandboxItemAt("sess-1", "gh pr merge 58", new Date(0).toISOString());
+      const id = writeRelayedSandboxItemAt("sess-1", "gh pr merge 58", new Date(0).toISOString());
 
       const recorded = await waitForNotifications(home, 1, 3000);
       expect(recorded).toHaveLength(1);
@@ -176,7 +222,7 @@ describe("the Daemon notifies Inbox items it reads from state", () => {
   test("a banner the Daemon sends opens the port it is bound to, not the default", async () => {
     const daemon = await spawnDaemon(["--port", "0", "--no-open"], { home, env: { TENAZA_SSE_POLL_MS: POLL_MS } });
     try {
-      writeSandboxItem("sess-1", "gh pr merge 58");
+      writeRelayedSandboxItem("sess-1", "gh pr merge 58");
 
       const recorded = await waitForNotifications(home, 1, 3000);
       expect(recorded[0]?.openUrl).toBe(`http://127.0.0.1:${daemon.port}/auth?token=${daemon.token}`);

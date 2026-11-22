@@ -116,14 +116,18 @@ export function notifiedMarkersDir(home: string = tenazaHome()): string {
   return path.join(home, "state", "notified");
 }
 
-/** A file, not an Event, so the claim is atomic across processes — a notify or the Daemon's migration writes it. */
+/** A file, not an Event, so the claim is atomic across processes — a hook's own notify or the Daemon's relay claims it. */
 export function inboxNotifiedMarkerPath(id: string, home: string = tenazaHome()): string {
   return path.join(notifiedMarkersDir(home), `inbox-${id}`);
 }
 
-/** The one marker only the migration itself writes, so a hook's or the Daemon's own claim is never read as it. */
-export function inboxMigratedMarkerPath(home: string = tenazaHome()): string {
-  return path.join(notifiedMarkersDir(home), ".migrated");
+export function relayRequestedMarkersDir(home: string = tenazaHome()): string {
+  return path.join(home, "state", "relay-requested");
+}
+
+/** A hook that cannot deliver writes this instead — the explicit request the Daemon notifies on. */
+export function inboxRelayRequestedMarkerPath(id: string, home: string = tenazaHome()): string {
+  return path.join(relayRequestedMarkersDir(home), `inbox-${id}`);
 }
 
 /**

@@ -6,8 +6,8 @@ import { deriveInbox, findInboxRow, type InboxRow, shortIdIndex } from "./inbox"
 import { readSessionEvents, type SessionLogCache } from "./log";
 import {
   DEFAULT_DAEMON_PORT,
-  inboxMigratedMarkerPath,
   inboxNotifiedMarkerPath,
+  inboxRelayRequestedMarkerPath,
   notifyRecorderPath,
   notifySoundStatePath,
   tenazaHome,
@@ -170,10 +170,11 @@ export function buildGraveFaultNotification(message: string): Notification {
  * it was noticed. Swallows its own lookups failing too, not just
  * `sendNotification`'s own guard.
  */
-export function notifyGraveFault(home: string, message: string, now: Date = new Date()): void {
+export function notifyGraveFault(home: string, message: string, now: Date = new Date()): boolean {
   try {
-    sendNotification(home, buildGraveFaultNotification(message), now);
+    return sendNotification(home, buildGraveFaultNotification(message), now);
   } catch {
+    return false;
   }
 }
 
@@ -286,18 +287,20 @@ function sendMacNotification(notification: Notification, sound: boolean): void {
  * throws — a failing notifier must never fail the hook or change its
  * allow/deny answer.
  */
-export function sendNotification(home: string, notification: Notification, now: Date = new Date()): void {
+export function sendNotification(home: string, notification: Notification, now: Date = new Date()): boolean {
   try {
-    if (!canDeliver(notification)) return;
+    if (!canDeliver(notification)) return false;
     const sound = shouldPlaySound(readLastSoundAt(home), now);
     if (sound) writeLastSoundAt(home, now);
 
     if (process.env.TENAZA_NOTIFY_RECORDER) {
       appendRecorder(home, { ...notification, sound });
-      return;
+      return true;
     }
     sendMacNotification(notification, sound);
+    return true;
   } catch {
+    return false;
   }
 }
 
@@ -320,17 +323,28 @@ function claimInboxNotification(home: string, id: string): boolean {
   }
 }
 
+/** A plain write, never a claim — the Daemon's own exclusive claim still decides who actually sends it. */
+function recordRelayRequest(home: string, id: string): void {
+  const file = inboxRelayRequestedMarkerPath(id, home);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, "", "utf8");
+}
+
 /**
- * Claims only when it can deliver: a claim it cannot honour would keep the Daemon from ever
- * notifying. `port` defaults to the one a hook (no bound server of its own) always means; the
- * Daemon's own caller passes the port it actually bound, so its banner opens the right one.
+ * Can't deliver → a relay request, never a claim: the claim is one-shot and
+ * would block the Daemon from ever notifying it. `port` defaults to a hook's
+ * (no bound server); the Daemon passes the port it actually bound.
  */
 function notifyInboxRow(home: string, row: InboxRow, shortId: string, now: Date, port: number = DEFAULT_DAEMON_PORT): void {
   const context = sessionContext(home, row.session);
   const token = readDaemonToken(home);
   const openUrl = token ? buildDaemonUrl(port, token) : undefined;
   const notification = buildInboxOpenedNotification(row, shortId, context, openUrl);
-  if (!canDeliver(notification) || !claimInboxNotification(home, row.id)) return;
+  if (!canDeliver(notification)) {
+    recordRelayRequest(home, row.id);
+    return;
+  }
+  if (!claimInboxNotification(home, row.id)) return;
   sendNotification(home, notification, now);
 }
 
@@ -349,19 +363,11 @@ export function notifyNewInboxItem(home: string, fullId: string, shortId: string
   }
 }
 
-/** Gated on its own sentinel, never the directory a hook's claim could create first and be mistaken for it. */
-export function migrateOpenInboxToNotified(home: string, cache?: SessionLogCache): void {
-  try {
-    const marker = inboxMigratedMarkerPath(home);
-    if (existsSync(marker)) return;
-    for (const row of deriveInbox(home, cache)) claimInboxNotification(home, row.id);
-    mkdirSync(path.dirname(marker), { recursive: true });
-    writeFileSync(marker, "", "utf8");
-  } catch {
-  }
-}
-
-/** Never filters by `row.ts`: a guest clock can read behind the host's, so a wall-clock cutoff could drop a late item. */
+/**
+ * Notifies only an item carrying a relay request — never inferred from a
+ * missing notified marker alone, so a host item is never swept in. Never
+ * filters by `row.ts`: a guest clock can lag the host's.
+ */
 export function notifyUnnotifiedInboxItems(
   home: string,
   now: Date = new Date(),
@@ -369,10 +375,12 @@ export function notifyUnnotifiedInboxItems(
   port: number = DEFAULT_DAEMON_PORT,
 ): void {
   try {
-    const fresh = deriveInbox(home, cache).filter((row) => !existsSync(inboxNotifiedMarkerPath(row.id, home)));
-    if (fresh.length === 0) return;
+    const relayed = deriveInbox(home, cache).filter(
+      (row) => existsSync(inboxRelayRequestedMarkerPath(row.id, home)) && !existsSync(inboxNotifiedMarkerPath(row.id, home)),
+    );
+    if (relayed.length === 0) return;
     const shortIds = shortIdIndex(home);
-    for (const row of fresh) {
+    for (const row of relayed) {
       try {
         notifyInboxRow(home, row, shortIds.get(row.id) ?? row.id, now, port);
       } catch {}

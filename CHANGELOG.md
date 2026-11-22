@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 release's own section here is what `.github/workflows/release.yml` publishes as that release's
 notes (`scripts/extract-changelog.sh`), with GitHub's own generated PR list appended below it.
 
+## [0.5.3] - 2026-11-22
+
+### Fixed
+
+- A dispatched run that already announced its verdict (`verdict=done`, `parked`, `checkpoint` or
+  `fail-fast`) is no longer told to checkpoint once it crosses the context threshold. Obeying that
+  nudge made a finished run report a checkpoint instead of done. A run sent back to work
+  announces `verdict=pending` (or any other value) and is nudged again.
+
 ## [0.5.2] - 2026-11-22
 
 ### Fixed

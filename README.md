@@ -254,12 +254,14 @@ CI runs the same tests and typecheck on every pull request. Design decisions liv
    PR, merge it.
 2. Tag the merge commit and push the tag:
    `git tag -a v<version> -m v<version> <merge-sha> && git push origin v<version>`.
-3. CI builds the release binaries on the tag, then opens a PR (`chore/formula-<version>`)
-   that points `Formula/tenaza.rb` at the new release — run
-   `packaging/homebrew/update-formula.sh <version>` by hand only if that job ever fails;
-   merging the PR is still a human's step. It needs one repo setting: Settings → Actions →
-   General → Workflow permissions → "Allow GitHub Actions to create and approve pull
-   requests".
+3. Wait for the tag's `Release` run to go green: it publishes the binaries, then opens
+   `chore/formula-<version>`, pointing `Formula/tenaza.rb` at them. Merging that PR is a
+   human's step. If the formula job fails, run `packaging/homebrew/update-formula.sh
+   <version>` and open the PR by hand. If a build fails, fix it on main and release the
+   next patch version — a pushed tag is never reused.
+
+The formula PR needs one repo setting: Settings → Actions → General → Workflow permissions →
+"Allow GitHub Actions to create and approve pull requests".
 
 ## License
 

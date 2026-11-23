@@ -242,12 +242,24 @@ bun test
 bun run typecheck
 ```
 
-CI builds the release binaries on every `v*` tag, then opens a PR
-(`chore/formula-<version>`) that points `Formula/tenaza.rb` at the new release —
-run `packaging/homebrew/update-formula.sh <version>` by hand only if that job ever
-fails; merging the PR is still a human's step. It needs one repo setting: Settings →
-Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve
-pull requests". Design decisions live in [`docs/adr/`](docs/adr/).
+CI runs the same tests and typecheck on every pull request. Design decisions live in
+[`docs/adr/`](docs/adr/).
+
+### Releasing
+
+1. From `origin/main`, branch `release/<version>`. Bump `src/version.ts` and
+   `.claude-plugin/plugin.json`, and add the `## [<version>]` entry to `CHANGELOG.md` —
+   `test/version-consistency.test.ts` requires all three to match, so the entry ships in
+   this commit, never in the fix it describes. Commit `chore: release <version>`, open the
+   PR, merge it.
+2. Tag the merge commit and push the tag:
+   `git tag -a v<version> -m v<version> <merge-sha> && git push origin v<version>`.
+3. CI builds the release binaries on the tag, then opens a PR (`chore/formula-<version>`)
+   that points `Formula/tenaza.rb` at the new release — run
+   `packaging/homebrew/update-formula.sh <version>` by hand only if that job ever fails;
+   merging the PR is still a human's step. It needs one repo setting: Settings → Actions →
+   General → Workflow permissions → "Allow GitHub Actions to create and approve pull
+   requests".
 
 ## License
 

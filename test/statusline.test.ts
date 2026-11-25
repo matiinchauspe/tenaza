@@ -266,7 +266,8 @@ describe("deriveStatuslineCounts / formatStatusline", () => {
    * unit layer; `closeDeadProcesses` itself already is).
    */
   describe("ticket 02 — a Session whose captured pid's process has exited never counts toward vivas", () => {
-    test("live while the process is up, no longer live once it exits", async () => {
+    // skipped off darwin: needs the real macOS `ps -o … -p` (BusyBox ps has no -p)
+    test.skipIf(process.platform !== "darwin")("live while the process is up, no longer live once it exits", async () => {
       const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
       try {
         appendEvent(

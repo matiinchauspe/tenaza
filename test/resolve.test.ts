@@ -562,7 +562,8 @@ describe("archiveSession", () => {
    * human who then clicks "archivar" must not be refused with `not-ended`
    * just because no real `SessionEnd` ever arrived.
    */
-  test("ticket 02: a Session whose captured pid's process has exited archives cleanly too, never refused with not-ended", async () => {
+  // skipped off darwin: needs the real macOS `ps -o … -p` (BusyBox ps has no -p)
+  test.skipIf(process.platform !== "darwin")("ticket 02: a Session whose captured pid's process has exited archives cleanly too, never refused with not-ended", async () => {
     const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
     try {
       appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: proc.pid }));

@@ -566,7 +566,8 @@ describe("closeDeadProcesses (ticket 02 — the ONE rule status/statusline/the b
 });
 
 describe("closeDeadProcesses — real `ps` (no injection): end-to-end over an actual OS process", () => {
-  test("a Session whose captured pid belongs to a process that has since exited reads as closed", async () => {
+  // skipped off darwin: needs the real macOS `ps -o … -p` (BusyBox ps has no -p)
+  test.skipIf(process.platform !== "darwin")("a Session whose captured pid belongs to a process that has since exited reads as closed", async () => {
     const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
     try {
       // The SAME capture this ticket wires into SessionStart, read for a REAL pid.

@@ -94,24 +94,24 @@ describe("captureProcessMarker (ticket 02) — pid + its process-start marker, v
       expect(pid).toBe("1234");
       expect(format).toBe("lstart=");
       return "Wed Oct 28 10:00:00 2026";
-    });
+    }, "darwin");
     expect(marker).toEqual({ pid: 1234, startedAt: "Wed Oct 28 10:00:00 2026" });
   });
 
   test("defaults pid to process.ppid — the SAME hop captureTerminalLocator's own walk targets", () => {
-    const marker = captureProcessMarker(undefined, () => "whatever");
+    const marker = captureProcessMarker(undefined, () => "whatever", "darwin");
     expect(marker.pid).toBe(process.ppid);
   });
 
   test("psRead returning nothing (ps couldn't report lstart) still captures the bare pid", () => {
-    const marker = captureProcessMarker(1234, () => undefined);
+    const marker = captureProcessMarker(1234, () => undefined, "darwin");
     expect(marker).toEqual({ pid: 1234, startedAt: undefined });
   });
 
   test("a throwing psRead degrades to the bare pid alone, never crashes SessionStart", () => {
     const marker = captureProcessMarker(1234, () => {
       throw new Error("ps unavailable in this sandbox");
-    });
+    }, "darwin");
     expect(marker).toEqual({ pid: 1234 });
   });
 });

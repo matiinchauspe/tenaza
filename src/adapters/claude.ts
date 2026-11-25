@@ -481,9 +481,13 @@ function sampleUsage(home: string, session: string, transcriptPath: string | und
  * SAME OS process as its parent, so its own liveness check needs no
  * parent walk.
  */
-export function handleSessionStart(home: string, payload: ClaudeSessionStartPayload): void {
+export function handleSessionStart(
+  home: string,
+  payload: ClaudeSessionStartPayload,
+  platform: string = process.platform,
+): void {
   try {
-    const marker = captureProcessMarker();
+    const marker = captureProcessMarker(undefined, undefined, platform);
     appendEvent(
       home,
       sessionStartedEvent(payload.session_id, {
@@ -506,9 +510,13 @@ export function handleSessionStart(home: string, payload: ClaudeSessionStartPayl
  * so a subagent keeps its announce declaration exactly when a top-level
  * Session would.
  */
-export function handleSubagentStart(home: string, payload: ClaudeSubagentStartPayload): void {
+export function handleSubagentStart(
+  home: string,
+  payload: ClaudeSubagentStartPayload,
+  platform: string = process.platform,
+): void {
   try {
-    const marker = captureProcessMarker();
+    const marker = captureProcessMarker(undefined, undefined, platform);
     appendEvent(
       home,
       sessionStartedEvent(payload.agent_id, {
@@ -718,20 +726,21 @@ export function handleNotification(home: string, payload: ClaudeNotificationPayl
  * host nothing. Overloaded so a PreToolUse caller gets PreToolUse's own
  * output shape, never the context-only one.
  */
-export async function handleClaudeHook(home: string, payload: ClaudeHookPayload): Promise<ClaudePreToolUseOutput | undefined>;
-export async function handleClaudeHook(home: string, payload: ClaudeHookInput): Promise<ClaudeHookOutput | undefined>;
+export async function handleClaudeHook(home: string, payload: ClaudeHookPayload, platform?: string): Promise<ClaudePreToolUseOutput | undefined>;
+export async function handleClaudeHook(home: string, payload: ClaudeHookInput, platform?: string): Promise<ClaudeHookOutput | undefined>;
 export async function handleClaudeHook(
   home: string,
   payload: ClaudeHookInput,
+  platform: string = process.platform,
 ): Promise<ClaudeHookOutput | undefined> {
   switch (payload.hook_event_name) {
     case "PreToolUse":
       return await handlePreToolUse(home, payload);
     case "SessionStart":
-      handleSessionStart(home, payload);
+      handleSessionStart(home, payload, platform);
       return declarationResponse("SessionStart");
     case "SubagentStart":
-      handleSubagentStart(home, payload);
+      handleSubagentStart(home, payload, platform);
       return declarationResponse("SubagentStart");
     case "SubagentStop":
       handleSubagentStop(home, payload);

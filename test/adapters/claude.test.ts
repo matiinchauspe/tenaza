@@ -195,7 +195,7 @@ effect = "flag"
    * the process, so asserting against it directly is not a flaky guess).
    */
   test("SessionStart also captures the runtime's own pid (ticket 02)", async () => {
-    await handleClaudeHook(home, { session_id: "sess-pid", hook_event_name: "SessionStart", cwd: "/repo" });
+    await handleClaudeHook(home, { session_id: "sess-pid", hook_event_name: "SessionStart", cwd: "/repo" }, "darwin");
     const events = readSessionEvents("sess-pid", home);
     expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
   });
@@ -222,7 +222,7 @@ effect = "flag"
       hook_event_name: "SubagentStart",
       agent_id: "agent-pid",
       cwd: "/repo",
-    });
+    }, "darwin");
     const events = readSessionEvents("agent-pid", home);
     expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
   });

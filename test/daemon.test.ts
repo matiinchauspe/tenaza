@@ -1963,7 +1963,8 @@ describe("buildBoardPayload — ticket 02: a Session whose captured pid's proces
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("reads endedAt/a DISTINCT reason once its process has exited — no real SessionEnd ever arrived", async () => {
+  // skipped off darwin: needs the real macOS `ps -o … -p` (BusyBox ps has no -p)
+  test.skipIf(process.platform !== "darwin")("reads endedAt/a DISTINCT reason once its process has exited — no real SessionEnd ever arrived", async () => {
     const proc = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
     try {
       appendEvent(home, sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: proc.pid }));
@@ -1984,7 +1985,8 @@ describe("buildBoardPayload — ticket 02: a Session whose captured pid's proces
     }
   });
 
-  test("AC2: a live-but-idle Session (process up, no Events for hours) keeps endedAt undefined — only a confirmed-dead process changes category", () => {
+  // skipped off darwin: needs the real macOS `ps -o … -p` (BusyBox ps has no -p)
+  test.skipIf(process.platform !== "darwin")("AC2: a live-but-idle Session (process up, no Events for hours) keeps endedAt undefined — only a confirmed-dead process changes category", () => {
     const longAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     appendEvent(home, { ...sessionStartedEvent("sess-1", { runtime: "claude", cwd: home, capabilities: [], pid: process.pid }), ts: longAgo });
 

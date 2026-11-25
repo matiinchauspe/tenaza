@@ -194,9 +194,8 @@ effect = "flag"
    * real `process.ppid` (deterministic — it never changes for the life of
    * the process, so asserting against it directly is not a flaky guess).
    */
-  // skipped off darwin: Tenaza captures no pid there, and handleClaudeHook has no platform seam
-  test.skipIf(process.platform !== "darwin")("SessionStart also captures the runtime's own pid (ticket 02)", async () => {
-    await handleClaudeHook(home, { session_id: "sess-pid", hook_event_name: "SessionStart", cwd: "/repo" });
+  test("SessionStart also captures the runtime's own pid (ticket 02)", async () => {
+    await handleClaudeHook(home, { session_id: "sess-pid", hook_event_name: "SessionStart", cwd: "/repo" }, "darwin");
     const events = readSessionEvents("sess-pid", home);
     expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
   });
@@ -217,14 +216,13 @@ effect = "flag"
    * DOES carry a `pid` — it shares the same OS process as its parent, so its
    * own liveness check needs no parent walk at read time.
    */
-  // skipped off darwin: Tenaza captures no pid there, and handleClaudeHook has no platform seam
-  test.skipIf(process.platform !== "darwin")("SubagentStart also captures the runtime's own pid (ticket 02)", async () => {
+  test("SubagentStart also captures the runtime's own pid (ticket 02)", async () => {
     await handleClaudeHook(home, {
       session_id: "sess-1",
       hook_event_name: "SubagentStart",
       agent_id: "agent-pid",
       cwd: "/repo",
-    });
+    }, "darwin");
     const events = readSessionEvents("agent-pid", home);
     expect((events[0] as { data: { pid?: number } }).data.pid).toBe(process.ppid);
   });
